@@ -105,6 +105,15 @@ function stepRefAt(workflow: WorkflowDescriptor, step: number): string {
   return `step ${step} (${workflow.steps[step - 1].label})`;
 }
 
+function readBlock(path: string, label: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return `${label} unavailable: ${detail}. Restore the file or abort the run.`;
+  }
+}
+
 function promptFor(run: ActiveRun): string {
   return [
     "# Active workflow",
@@ -118,9 +127,9 @@ function promptFor(run: ActiveRun): string {
     "- `workflow_abort` - stop the run when the user asks or it cannot continue. To restart, abort then start the workflow again.",
     "",
     "## Workflow overview",
-    readFileSync(run.workflow.overviewPath, "utf8"),
+    readBlock(run.workflow.overviewPath, "Workflow overview"),
     "## Current step instructions",
-    readFileSync(run.workflow.steps[run.step - 1].path, "utf8"),
+    readBlock(run.workflow.steps[run.step - 1].path, "Step instructions"),
   ].join("\n\n");
 }
 
@@ -204,8 +213,15 @@ export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WO
     const pending = state;
     const delivery = { runId: pending.run.runId, step: pending.run.step };
     if (sentDelivery?.runId !== delivery.runId || sentDelivery.step !== delivery.step) {
+      let message: string;
       try {
-        await pi.sendUserMessage(transitionMessage(pending.run), { deliverAs: "followUp" });
+        message = transitionMessage(pending.run);
+      } catch (error) {
+        ctx.ui.notify(`Workflow content unreadable: ${error instanceof Error ? error.message : String(error)}. Restore the file to retry delivery, or abort the run.`, "error");
+        return;
+      }
+      try {
+        await pi.sendUserMessage(message, { deliverAs: "followUp" });
       } catch (error) {
         ctx.ui.notify(`Workflow follow-up failed: ${error instanceof Error ? error.message : String(error)}. Delivery stays pending and retries after the agent settles.`, "error");
         return;

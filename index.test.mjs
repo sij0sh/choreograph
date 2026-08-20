@@ -875,3 +875,60 @@ test("pending v2 snapshots materialize current workflow files on delivery", asyn
   assert.match(run.sent.at(-1).message, /Use the current file/);
   assert.equal(run.entries.at(-1).data.delivered, true);
 });
+
+test("a missing step file classifies delivery as content failure and recovers on restore", async () => {
+  const root = tempRoot("workflow-content-missing-");
+  const directory = writeWorkflow(root, "auditable", { piVisibility: true });
+  const run = harness(root);
+  await run.handlers.get("session_start")({ reason: "startup" }, run.ctx);
+  run.setSendFailure("queue unavailable");
+  await run.tools.get(START_TOOL).execute("start", { name: "auditable" }, undefined, undefined, run.ctx);
+  assert.ok(run.notices.some((item) => /Workflow follow-up failed: queue unavailable/.test(item.message)));
+  const attemptsBefore = run.attempts.length;
+
+  rmSync(join(directory, "steps/01-one.md"));
+  run.setSendFailure(null);
+  await endRun(run);
+  assert.equal(run.attempts.length, attemptsBefore);
+  const content = run.notices.find((item) => /Workflow content unreadable/.test(item.message));
+  assert.equal(content.level, "error");
+  assert.match(content.message, /Restore the file to retry delivery/);
+  const blocked = await run.tools.get("workflow_advance").execute("advance", {}, undefined, undefined, run.ctx);
+  assert.equal(blocked.isError, true);
+  assert.equal(blocked.details.status, "delivery-pending");
+
+  writeFileSync(join(directory, "steps/01-one.md"), "# Restored step\n\nFresh instructions.\n");
+  await endRun(run);
+  assert.equal(run.attempts.length, attemptsBefore + 1);
+  assert.match(run.sent.at(-1).message, /Fresh instructions/);
+  assert.equal(run.entries.at(-1).data.delivered, true);
+});
+
+test("a missing overview file classifies step-1 delivery as content failure", async () => {
+  const root = tempRoot("workflow-overview-missing-");
+  const directory = writeWorkflow(root, "auditable", { piVisibility: true });
+  const run = harness(root);
+  await run.handlers.get("session_start")({ reason: "startup" }, run.ctx);
+  run.setSendFailure("queue unavailable");
+  await run.tools.get(START_TOOL).execute("start", { name: "auditable" }, undefined, undefined, run.ctx);
+  rmSync(join(directory, "WORKFLOW.md"));
+  run.setSendFailure(null);
+
+  await endRun(run);
+  assert.equal(run.attempts.length, 1);
+  assert.ok(run.notices.some((item) => /Workflow content unreadable/.test(item.message)));
+  assert.equal(run.entries.at(-1).data.delivered, false);
+});
+
+test("a missing step file degrades the before_agent_start prompt instead of throwing", async () => {
+  const root = tempRoot("workflow-prompt-missing-");
+  const directory = writeWorkflow(root, "auditable", { piVisibility: true });
+  const run = harness(root);
+  await startRun(run, "auditable");
+  rmSync(join(directory, "steps/01-one.md"));
+
+  const result = await run.handlers.get("before_agent_start")({ systemPrompt: "base" }, run.ctx);
+  assert.ok(result.systemPrompt.includes("base"));
+  assert.match(result.systemPrompt, /Step instructions unavailable: ENOENT/);
+  assert.match(result.systemPrompt, /Restore the file or abort the run/);
+});
