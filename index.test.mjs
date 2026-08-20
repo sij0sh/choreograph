@@ -35,9 +35,13 @@ function writeWorkflow(root, name, options = {}) {
     "steps:",
     ...stepFiles.map((file) => `  - ${file}`),
   ];
-  if (options.legalTools) {
-    frontmatter.push("legalTools:");
-    for (const tool of options.legalTools) frontmatter.push(`  - ${tool}`);
+  if (options.legalTools !== undefined) {
+    if (options.legalTools.length === 0) {
+      frontmatter.push("legalTools: []");
+    } else {
+      frontmatter.push("legalTools:");
+      for (const tool of options.legalTools) frontmatter.push(`  - ${tool}`);
+    }
   }
   if (options.piVisibility !== undefined) frontmatter.push(`piVisibility: ${options.piVisibility}`);
   frontmatter.push("---", "");
@@ -194,6 +198,8 @@ test("legalTools frontmatter is parsed, deduped, and validated", () => {
   const root = tempRoot("workflow-legaltools-");
   const gated = loadWorkflowManifest(writeWorkflow(root, "gated", { legalTools: ["bash", "read"] }));
   assert.deepEqual([...gated.legalTools].sort(), ["bash", "read"]);
+  const empty = loadWorkflowManifest(writeWorkflow(root, "empty-legal", { legalTools: [] }));
+  assert.deepEqual([...empty.legalTools], []);
   assert.equal(loadWorkflowManifest(writeWorkflow(root, "open")).legalTools, undefined);
   assert.throws(() => loadWorkflowManifest(writeWorkflow(root, "bad", { legalTools: ["Read"] })), /legalTools\[0\] must match/);
   assert.throws(() => loadWorkflowManifest(writeWorkflow(root, "dupes", { legalTools: ["read", "read"] })), /must not contain duplicates/);
@@ -353,6 +359,20 @@ test("legalTools gates baseline tools during a run and restores them on abort", 
   assert.ok(run.activeTools.has("git_record"));
   assert.ok(!run.activeTools.has("workflow_abort"));
   assert.ok(run.activeTools.has(START_TOOL));
+});
+
+test("legalTools: [] restricts a run to exactly the workflow run tools", async () => {
+  const root = tempRoot("workflow-legaltools-empty-");
+  writeWorkflow(root, "auditable", { legalTools: [], piVisibility: true });
+  const run = harness(root);
+  await run.handlers.get("session_start")({ reason: "startup" }, run.ctx);
+  assert.ok(!run.notices.some((item) => /legalTools/.test(item.message)));
+  const idle = [...run.activeTools].sort();
+  assert.ok(idle.includes("read") && idle.includes("bash"));
+  await run.commands.get("auditable").handler("", run.ctx);
+  assert.deepEqual([...run.activeTools].sort(), [...RUN_TOOLS].sort());
+  await run.tools.get("workflow_abort").execute("call", {}, undefined, undefined, run.ctx);
+  assert.deepEqual([...run.activeTools].sort(), idle);
 });
 
 test("unknown legalTools entries produce a session-start warning", async () => {

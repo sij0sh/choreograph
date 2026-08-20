@@ -88,7 +88,7 @@ function extractFrontmatter(path: string): ObjectValue {
 }
 
 function parseLegalTools(raw: unknown): Set<string> | undefined {
-  if (raw === undefined || (Array.isArray(raw) && raw.length === 0)) return undefined;
+  if (raw === undefined) return undefined;
   if (!Array.isArray(raw)) throw new Error("legalTools must be a list");
   const tools = raw.map((value, index) => {
     const tool = stringAt(value, `legalTools[${index}]`);
