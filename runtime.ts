@@ -125,16 +125,23 @@ export class WorkflowRuntime {
   private readonly isWorkflowTool = (name: string): boolean => (ALL_WORKFLOW_TOOLS as readonly string[]).includes(name);
   private readonly captureBaseline = (): string[] => this.pi.getActiveTools().filter((name) => !this.isWorkflowTool(name));
 
-  private setRunTools(): void {
+  private activeToolsFor(run: ActiveRun | undefined): string[] {
     this.baselineTools ??= this.captureBaseline();
-    const legal = this.state.status === "active" ? this.state.run.workflow.legalTools : undefined;
-    const base = legal ? this.baselineTools.filter((name) => legal.has(name)) : this.baselineTools;
-    this.pi.setActiveTools([...base, ...RUN_TOOL_NAMES]);
+    let base = [...this.baselineTools];
+    if (!run) return this.visibleWorkflows.length ? [...base, START_TOOL_NAME] : [...base];
+    const step = run.workflow.steps[run.step - 1];
+    for (const ceiling of [run.workflow.tools, step?.tools]) {
+      if (ceiling) base = base.filter((name) => ceiling.has(name));
+    }
+    return [...base, ...RUN_TOOL_NAMES];
+  }
+
+  private setRunTools(): void {
+    this.pi.setActiveTools(this.activeToolsFor(this.state.status === "active" ? this.state.run : undefined));
   }
 
   private setIdleTools(): void {
-    this.baselineTools ??= this.captureBaseline();
-    this.pi.setActiveTools(this.visibleWorkflows.length ? [...this.baselineTools, START_TOOL_NAME] : [...this.baselineTools]);
+    this.pi.setActiveTools(this.activeToolsFor(undefined));
   }
 
   private showStatus(ctx: ExtensionContext): void {
@@ -268,6 +275,7 @@ export class WorkflowRuntime {
     }
     this.state = { status: "active", run, delivered: false };
     this.showStatus(ctx);
+    this.setRunTools();
     await this.deliverPending(ctx);
     return {
       content: [{ type: "text", text: `Step ${step} complete. Advancing to ${stepRefAt(workflow, run.step)}. Its instructions arrive in the next message.` }],
@@ -303,9 +311,10 @@ export class WorkflowRuntime {
     this.state = { status: "idle" };
     this.baselineTools = null;
     const available = new Set(this.pi.getActiveTools());
-    const unknownTools = this.workflows.flatMap((workflow) =>
-      workflow.legalTools ? [...workflow.legalTools].filter((tool) => !available.has(tool)).map((tool) => `${workflow.name}: ${tool}`) : [],
-    );
+    const unknownTools = this.workflows.flatMap((workflow) => {
+      const configured = new Set<string>([...(workflow.tools ?? []), ...workflow.steps.flatMap((step) => [...(step.tools ?? [])]), ...[...workflow.operators.values()].flatMap((operator) => [...(operator.tools ?? [])])]);
+      return [...configured].filter((tool) => !available.has(tool)).map((tool) => `${workflow.name}: ${tool}`);
+    });
     this.setIdleTools();
     this.restoreRun(ctx);
     this.showStatus(ctx);

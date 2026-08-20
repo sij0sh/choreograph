@@ -200,10 +200,10 @@ test("obsolete frontmatter keys are rejected", () => {
 test("legalTools frontmatter is parsed, deduped, and validated", () => {
   const root = tempRoot("workflow-legaltools-");
   const gated = loadWorkflowManifest(writeWorkflow(root, "gated", { legalTools: ["bash", "read"] }));
-  assert.deepEqual([...gated.legalTools].sort(), ["bash", "read"]);
+  assert.deepEqual([...(gated.tools ?? [])].sort(), ["bash", "read"]);
   const empty = loadWorkflowManifest(writeWorkflow(root, "empty-legal", { legalTools: [] }));
-  assert.deepEqual([...empty.legalTools], []);
-  assert.equal(loadWorkflowManifest(writeWorkflow(root, "open")).legalTools, undefined);
+  assert.deepEqual([...(empty.tools ?? [])], []);
+  assert.equal(loadWorkflowManifest(writeWorkflow(root, "open")).tools, undefined);
   assert.throws(() => loadWorkflowManifest(writeWorkflow(root, "bad", { legalTools: ["Read"] })), /legalTools\[0\] must match/);
   assert.throws(() => loadWorkflowManifest(writeWorkflow(root, "dupes", { legalTools: ["read", "read"] })), /must not contain duplicates/);
 });
@@ -383,7 +383,7 @@ test("unknown legalTools entries produce a session-start warning", async () => {
   writeWorkflow(root, "gated", { legalTools: ["read", "nonexistent"], piVisibility: true });
   const run = harness(root);
   await run.handlers.get("session_start")({ reason: "startup" }, run.ctx);
-  const warning = run.notices.find((item) => /legalTools/.test(item.message));
+  const warning = run.notices.find((item) => /unknown tools/.test(item.message));
   assert.ok(warning);
   assert.equal(warning.level, "warning");
   assert.match(warning.message, /gated: nonexistent/);
@@ -931,4 +931,39 @@ test("a missing step file degrades the before_agent_start prompt instead of thro
   assert.ok(result.systemPrompt.includes("base"));
   assert.match(result.systemPrompt, /Step instructions unavailable: ENOENT/);
   assert.match(result.systemPrompt, /Restore the file or abort the run/);
+});
+
+// --- Phase 2: structured manifests and per-position tool ceilings ---
+
+function writeStructuredWorkflow(root, name, options = {}) {
+  const directory = join(root, name);
+  mkdirSync(directory, { recursive: true });
+  const stepFiles = options.stepFiles ?? ["steps/01-frame.md", "steps/02-report.md"];
+  for (const file of stepFiles) {
+    mkdirSync(dirname(join(directory, file)), { recursive: true });
+    writeFileSync(join(directory, file), `# ${file}\n`);
+  }
+  const lines = ["---", `description: ${name} description`, ...(options.tools !== undefined ? (options.tools.length ? [`tools: [${options.tools.join(", ")}]`] : ["tools: []"]) : []), "steps:"];
+  for (const step of options.steps ?? stepFiles.map((file) => `  - ${file}`)) lines.push(step);
+  lines.push("---", "");
+  writeFileSync(join(directory, "WORKFLOW.md"), lines.join("\n"));
+  return directory;
+}
+
+test("step tool ceilings narrow the active tools per position", async () => {
+  const root = tempRoot("workflow-step-tools-");
+  writeStructuredWorkflow(root, "gated", {
+    tools: ["read", "bash", "grep"],
+    steps: ["  - path: steps/01-frame.md", "    tools: [read, bash]", "  - path: steps/02-report.md", "    tools: [read]"],
+  });
+  const run = harness(root);
+  await startRun(run, "gated");
+  assert.ok(run.activeTools.has("read"));
+  assert.ok(run.activeTools.has("bash"));
+  assert.ok(!run.activeTools.has("grep"), "workflow ceiling applies");
+
+  await run.tools.get("workflow_advance").execute("call", {}, undefined, undefined, run.ctx);
+  assert.ok(run.activeTools.has("read"));
+  assert.ok(!run.activeTools.has("bash"), "step ceiling narrows at the committed position");
+  assert.ok(!run.activeTools.has("grep"));
 });

@@ -9,5 +9,5 @@
     "types": ["node"],
     "allowImportingTsExtensions": true
   },
-  "include": ["index.ts", "manifest.ts", "types.ts"]
+  "include": ["index.ts", "manifest.ts", "runtime.ts", "state.ts", "types.ts"]
 }
