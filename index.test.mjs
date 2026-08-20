@@ -68,6 +68,7 @@ function harness(root, entries = []) {
   const statuses = [];
   let streaming = false;
   let appendFailure = null;
+  let appendFilter = null;
   let sendFailure = null;
   const pi = {
     registerCommand: (name, command) => commands.set(name, command),
@@ -84,6 +85,8 @@ function harness(root, entries = []) {
       sent.push({ message, options });
     },
     appendEntry: (customType, data) => {
+      const rejection = appendFilter ? appendFilter(data) : null;
+      if (rejection) throw new Error(rejection);
       if (appendFailure) throw new Error(appendFailure);
       entries.push({ type: "custom", customType, data });
     },
@@ -98,7 +101,7 @@ function harness(root, entries = []) {
     },
   };
   register(pi, root);
-  return { activeTools, attempts, commands, ctx, entries, handlers, notices, pi, sent, setAppendFailure: (message) => (appendFailure = message), setSendFailure: (message) => (sendFailure = message), setStreaming: (value) => (streaming = value), statuses, tools };
+  return { activeTools, attempts, commands, ctx, entries, handlers, notices, pi, sent, setAppendFailure: (message) => (appendFailure = message), setAppendFilter: (fn) => (appendFilter = fn), setSendFailure: (message) => (sendFailure = message), setStreaming: (value) => (streaming = value), statuses, tools };
 }
 
 async function startRun(run, name = "auditable", target = "") {
@@ -781,6 +784,79 @@ test("an undelivered step cannot advance and retries after agent_settled", async
   await endRun(run);
   assert.match(run.sent.at(-1).message, /step 1 \(one\)/);
   assert.equal(run.entries.at(-1).data.delivered, true);
+});
+
+test("marker append failure after a successful send retries only the marker", async () => {
+  const root = tempRoot("workflow-marker-once-");
+  writeWorkflow(root, "auditable", { piVisibility: true });
+  const run = harness(root);
+  await run.handlers.get("session_start")({ reason: "startup" }, run.ctx);
+  let markerFailures = 1;
+  run.setAppendFilter((data) => (data.status === "active" && data.delivered && markerFailures-- > 0 ? "disk full" : null));
+
+  await run.tools.get(START_TOOL).execute("start", { name: "auditable" }, undefined, undefined, run.ctx);
+  assert.equal(run.sent.length, 1);
+  assert.match(run.sent[0].message, /step 1 \(one\)/);
+  assert.ok(run.notices.some((item) => /disk full/.test(item.message)));
+
+  await endRun(run);
+  assert.equal(run.sent.length, 1);
+  assert.equal(run.entries.at(-1).data.delivered, true);
+
+  const advance = await run.tools.get("workflow_advance").execute("advance", {}, undefined, undefined, run.ctx);
+  assert.equal(advance.isError, undefined);
+  await endRun(run);
+  assert.equal(run.sent.length, 2);
+  assert.match(run.sent.at(-1).message, /step 2 \(two\)/);
+});
+
+test("a send that resolves after abort appends no active snapshot", async () => {
+  const root = tempRoot("workflow-abort-race-");
+  writeWorkflow(root, "auditable", { piVisibility: true });
+  const run = harness(root);
+  await run.handlers.get("session_start")({ reason: "startup" }, run.ctx);
+  let releaseSend;
+  run.pi.sendUserMessage = (message, options) => {
+    run.attempts.push({ message, options });
+    return new Promise((resolve) => (releaseSend = resolve));
+  };
+
+  const starting = run.tools.get(START_TOOL).execute("start", { name: "auditable" }, undefined, undefined, run.ctx);
+  const aborting = run.tools.get("workflow_abort").execute("call", {}, undefined, undefined, run.ctx);
+  releaseSend();
+  await starting;
+  await aborting;
+  assert.equal(run.entries.at(-1).data.status, "aborted");
+  assert.ok(run.activeTools.has(START_TOOL));
+
+  await run.handlers.get("session_start")({ reason: "resume" }, run.ctx);
+  assert.ok(!run.notices.some((item) => /Resumed/.test(item.message)));
+  assert.ok(!/auditable/.test(run.statuses.at(-1).value));
+});
+
+test("interleaved abort during advance delivery appends no active snapshot", async () => {
+  const root = tempRoot("workflow-abort-race-advance-");
+  writeWorkflow(root, "auditable", { piVisibility: true });
+  const run = harness(root);
+  await startRun(run, "auditable");
+  await endRun(run);
+  let releaseSend;
+  run.pi.sendUserMessage = (message, options) => {
+    run.attempts.push({ message, options });
+    return new Promise((resolve) => (releaseSend = resolve));
+  };
+
+  const advancing = run.tools.get("workflow_advance").execute("advance", {}, undefined, undefined, run.ctx);
+  const aborting = run.tools.get("workflow_abort").execute("call", {}, undefined, undefined, run.ctx);
+  releaseSend();
+  await advancing;
+  await aborting;
+  assert.ok(run.attempts.some((attempt) => /step 2 \(two\)/.test(attempt.message)));
+  assert.equal(run.sent.length, 1);
+  assert.equal(run.entries.at(-1).data.status, "aborted");
+
+  await run.handlers.get("session_start")({ reason: "resume" }, run.ctx);
+  assert.ok(!run.notices.some((item) => /Resumed/.test(item.message)));
 });
 
 test("pending v2 snapshots materialize current workflow files on delivery", async () => {

@@ -164,6 +164,7 @@ export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WO
   const workflowsByName = new Map(visibleWorkflows.map((workflow) => [workflow.name, workflow]));
   let state: RunState = { status: "idle" };
   let baselineTools: string[] | null = null;
+  let sentDelivery: { runId: string; step: number } | null = null;
 
   const isWorkflowTool = (name: string): boolean => (ALL_WORKFLOW_TOOLS as readonly string[]).includes(name);
   const captureBaseline = (): string[] => pi.getActiveTools().filter((name) => !isWorkflowTool(name));
@@ -201,12 +202,17 @@ export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WO
   async function deliverPending(ctx: ExtensionContext): Promise<void> {
     if (state.status !== "active" || state.delivered) return;
     const pending = state;
-    try {
-      await pi.sendUserMessage(transitionMessage(pending.run), { deliverAs: "followUp" });
-    } catch (error) {
-      ctx.ui.notify(`Workflow follow-up failed: ${error instanceof Error ? error.message : String(error)}. Delivery stays pending and retries after the agent settles.`, "error");
-      return;
+    const delivery = { runId: pending.run.runId, step: pending.run.step };
+    if (sentDelivery?.runId !== delivery.runId || sentDelivery.step !== delivery.step) {
+      try {
+        await pi.sendUserMessage(transitionMessage(pending.run), { deliverAs: "followUp" });
+      } catch (error) {
+        ctx.ui.notify(`Workflow follow-up failed: ${error instanceof Error ? error.message : String(error)}. Delivery stays pending and retries after the agent settles.`, "error");
+        return;
+      }
+      sentDelivery = delivery;
     }
+    if (state !== pending) return;
     try {
       appendCommitted(activeSnapshot(pending.run, true), `delivered marker for ${pending.run.workflow.title} run ${pending.run.runId}`);
     } catch (error) {
