@@ -471,7 +471,8 @@ test("workflow transitions append resumable snapshots", async () => {
   assert.equal(started.customType, "pi-workflows");
   assert.equal(started.data.status, "active");
   assert.equal(started.data.workflow, "auditable");
-  assert.equal(started.data.step, 1);
+  assert.equal(started.data.v, 3);
+  assert.deepEqual(started.data.position, { kind: "step", stepId: "one" });
   assert.equal(started.data.delivered, false, "state commits before its delivery marker");
   const kickoff = run.entries.at(-1);
   assert.equal(kickoff.data.status, "active");
@@ -480,13 +481,13 @@ test("workflow transitions append resumable snapshots", async () => {
   await run.tools.get("workflow_advance").execute("call", {}, undefined, undefined, run.ctx);
   const advance = run.entries.at(-2);
   assert.equal(advance.data.status, "active");
-  assert.equal(advance.data.step, 2);
+  assert.deepEqual(advance.data.position, { kind: "step", stepId: "two" });
   assert.equal(advance.data.delivered, false, "step 2 commits before delivery");
   assert.equal(advance.data.runId, started.data.runId);
 
   const marker = run.entries.at(-1);
   assert.equal(marker.data.status, "active");
-  assert.equal(marker.data.step, 2);
+  assert.deepEqual(marker.data.position, { kind: "step", stepId: "two" });
   assert.equal(marker.data.delivered, true, "delivered marker commits after accepted delivery");
 
   await run.tools.get("workflow_abort").execute("call", {}, undefined, undefined, run.ctx);
@@ -604,7 +605,7 @@ test("an aborted signal rejects an advance and keeps the prior step", async () =
   );
 
   assert.equal(run.entries.length, entryCount, "no marker appended");
-  assert.equal(run.entries.at(-1).data.step, 1, "prior step stays durable");
+  assert.equal(run.entries.at(-1).data.position.stepId, "one", "prior step stays durable");
   assert.equal(run.statuses.length, statusCount);
   assert.equal(run.sent.length, sentCount);
   assert.ok(run.activeTools.has("workflow_advance"), "run stays active");
@@ -744,7 +745,7 @@ test("advance append failure keeps the prior step active", async () => {
   run.setAppendFailure(null);
   const retry = await run.tools.get("workflow_advance").execute("call", {}, undefined, undefined, run.ctx);
   assert.equal(retry.details.status, "active");
-  assert.equal(retry.details.step, 2);
+  assert.equal(retry.details.step, "two");
 });
 
 test("abort append failure keeps the run active", async () => {
@@ -961,8 +962,10 @@ test("step tool ceilings narrow the active tools per position", async () => {
   assert.ok(run.activeTools.has("read"));
   assert.ok(run.activeTools.has("bash"));
   assert.ok(!run.activeTools.has("grep"), "workflow ceiling applies");
+  assert.ok(run.activeTools.has("workflow_transition"), "structured control tool");
+  assert.ok(!run.activeTools.has("workflow_advance"), "legacy control tool stays inactive");
 
-  await run.tools.get("workflow_advance").execute("call", {}, undefined, undefined, run.ctx);
+  await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: [], checkpoint: { summary: "done" } }, undefined, undefined, run.ctx);
   assert.ok(run.activeTools.has("read"));
   assert.ok(!run.activeTools.has("bash"), "step ceiling narrows at the committed position");
   assert.ok(!run.activeTools.has("grep"));

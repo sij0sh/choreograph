@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { discoverWorkflows } from "./manifest.ts";
 import type { WorkflowDescriptor } from "./types.ts";
-import { WorkflowRuntime, START_TOOL_NAME, RUN_TOOL_NAMES } from "./runtime.ts";
+import { WorkflowRuntime, START_TOOL_NAME, ADVANCE_TOOL_NAME, TRANSITION_TOOL_NAME, ABORT_TOOL_NAME } from "./runtime.ts";
 
 const AGENT_ROOT = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const WORKFLOWS_ROOT = join(AGENT_ROOT, "workflows");
@@ -25,18 +25,56 @@ export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WO
   const workflowsByName = new Map(visibleWorkflows.map((workflow) => [workflow.name, workflow]));
   const runtime = new WorkflowRuntime(pi, workflows);
 
-  pi.registerTool({
-    name: "workflow_advance",
-    label: "Advance workflow",
-    description: "Advance the active workflow once the current step's completion criteria are met. Continues to the next step or completes the workflow after the final step.",
-    parameters: NO_PARAMETERS,
-    async execute(_id, _params, signal, _update, ctx) {
-      return runtime.advance(signal, ctx);
-    },
-  });
+  const hasLegacy = workflows.some((workflow) => !workflow.structured);
+  const hasStructured = workflows.some((workflow) => workflow.structured);
+
+  if (hasLegacy) {
+    pi.registerTool({
+      name: ADVANCE_TOOL_NAME,
+      label: "Advance workflow",
+      description: "Advance the active legacy workflow once the current step's completion criteria are met. Continues to the next step or completes the workflow after the final step.",
+      parameters: NO_PARAMETERS,
+      async execute(_id, _params, signal, _update, ctx) {
+        return runtime.advance(signal, ctx);
+      },
+    });
+  }
+
+  if (hasStructured) {
+    pi.registerTool({
+      name: TRANSITION_TOOL_NAME,
+      label: "Transition workflow",
+      description: "Record the outcome of the current workflow position: pass (criteria met), blocked (cannot proceed), rework (redo a destination), or replan (regenerate the dynamic plan).",
+      parameters: Type.Object(
+        {
+          outcome: Type.Unsafe<"pass" | "blocked" | "rework" | "replan">({
+            type: "string",
+            enum: ["pass", "blocked", "rework", "replan"],
+            description: "The outcome of the current position.",
+          }),
+          met: Type.Optional(Type.Array(Type.String(), { description: "Criterion ids claimed complete. A pass must list every required criterion." })),
+          checkpoint: Type.Object(
+            {
+              summary: Type.String({ description: "What was done and concluded at this position." }),
+              evidence: Type.Optional(Type.Array(Type.String(), { description: "Evidence references backing the summary." })),
+              decisions: Type.Optional(Type.Array(Type.String(), { description: "Decisions taken." })),
+              unknowns: Type.Optional(Type.Array(Type.String(), { description: "Open questions or risks." })),
+              data: Type.Optional(Type.Any({ description: "Structured payload; the planner pass carries data.plan here." })),
+            },
+            { additionalProperties: false },
+          ),
+          nodes: Type.Optional(Type.Array(Type.String(), { description: "Node ids to invalidate; only for a verifier rework into the executor." })),
+        },
+        { additionalProperties: false },
+      ),
+      async execute(_id, params, signal, _update, ctx) {
+        return runtime.transition(params, signal, ctx);
+      },
+    });
+  }
 
   pi.registerTool({
-    name: "workflow_abort",
+    name: ABORT_TOOL_NAME,
     label: "Abort workflow",
     description: "Abort the active workflow only when the user requests it or the workflow cannot continue.",
     parameters: NO_PARAMETERS,
@@ -92,7 +130,7 @@ export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WO
         }
         return {
           content: [{ type: "text", text: `${workflow.title} run ${run.runId} started. Its first message arrives next.` }],
-          details: { workflow: workflow.name, runId: run.runId, step: run.step, status: "active" },
+          details: { workflow: workflow.name, runId: run.runId, step: run.position.stepId, status: "active" },
           terminate: true,
         };
       },
@@ -100,8 +138,9 @@ export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WO
   }
 
   pi.on("session_start", (_event, ctx: ExtensionContext) => {
-    const { unknownTools } = runtime.handleSessionStart(ctx);
+    const { unknownTools, unknownModels } = runtime.handleSessionStart(ctx);
     if (unknownTools.length) ctx.ui.notify(`workflow tools name unknown tools (no effect during runs): ${unknownTools.join(", ")}`, "warning");
+    if (unknownModels.length) ctx.ui.notify(`configured models are unavailable on this machine: ${unknownModels.join(", ")}`, "warning");
     if (diagnostics.length) {
       const summary = diagnostics.map((item) => `${item.path}: ${item.error}`).join("; ");
       ctx.ui.notify(`Skipped invalid workflow metadata: ${summary}`, "warning");
