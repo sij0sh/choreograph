@@ -1,0 +1,10 @@
+{
+  "extensions": {
+    ".cgnotes": "typescript",
+    ".cgmem": "typescript"
+  },
+  "include": [
+    ".pi-files/cgnotes/**",
+    ".pi-files/codegraph-memory/**"
+  ]
+}
