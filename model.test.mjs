@@ -96,6 +96,10 @@ async function startRun(run, name = "modeled") {
   await run.commands.get(name).handler("", run.ctx);
 }
 
+async function settle(run) {
+  await run.handlers.get("agent_settled")({ type: "agent_settled" }, run.ctx);
+}
+
 async function pass(run, summary = "done") {
   return run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: [], checkpoint: { summary } }, undefined, undefined, run.ctx);
 }
@@ -111,9 +115,11 @@ test("start applies step 1's workflow default and completion restores the sessio
   assert.equal(run.modelCalls.length, 1);
 
   await pass(run);
+  await settle(run);
   assert.deepEqual(run.modelCalls, ["base/default-model", "strong/model-b"], "step override applies on delivery");
 
   await pass(run);
+  await settle(run);
   assert.equal(run.modelCalls.at(-1), "base/default-model", "step 3 falls back to the workflow default");
 
   const final = await pass(run);
@@ -154,10 +160,13 @@ steps:
   assert.deepEqual(run.modelCalls, ["strong/model-b"], "the planner step's override applies at start");
   const plan = { version: 1, nodes: [ { id: "n-one", operator: "inspect", objective: "look", done: ["one-done"] }, { id: "n-two", operator: "inspect", objective: "look more", done: ["two-done"] } ] };
   await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: [], checkpoint: { summary: "plan", data: { plan } } }, undefined, undefined, run.ctx);
+  await settle(run);
   assert.equal(run.modelCalls.at(-1), "base/default-model", "node delivery applies the executor step's model");
   await pass(run);
+  await settle(run);
   assert.equal(run.modelCalls.at(-1), "base/default-model", "node positions keep the executor step's model");
   await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: ["two-done"], checkpoint: { summary: "done" } }, undefined, undefined, run.ctx);
+  await settle(run);
   assert.equal(run.modelCalls.at(-1), "base/default-model");
 });
 
@@ -201,12 +210,14 @@ test("runs without configured models and legacy workflows never call setModel", 
   const run = modelHarness(root);
   await startRun(run, "plain");
   await pass(run);
+  await settle(run);
   await pass(run);
   assert.deepEqual(run.modelCalls, [], "structured runs without selectors never call setModel");
   assert.equal(run.entries.at(-1).data.restoreModel, undefined);
 
   await run.commands.get("legacy").handler("", run.ctx);
   await run.tools.get("workflow_advance").execute("call", {}, undefined, undefined, run.ctx);
+  await settle(run);
   await run.tools.get("workflow_advance").execute("call", {}, undefined, undefined, run.ctx);
   assert.deepEqual(run.modelCalls, [], "legacy workflows never call setModel");
 });

@@ -434,12 +434,21 @@ test("accepted follow-ups permit each delivered step to advance", async () => {
   assert.equal(run.sent.length, 1);
 
   await run.tools.get("workflow_advance").execute("call-1", {}, undefined, undefined, run.ctx);
-  await run.tools.get("workflow_advance").execute("call-2", {}, undefined, undefined, run.ctx);
-  assert.equal(run.sent.length, 3);
-  assert.match(run.sent.at(-1).message, /complete: all 2 steps advanced/);
+  assert.equal(run.sent.length, 1, "advancing mid-turn queues no follow-up");
+  const chained = await run.tools.get("workflow_advance").execute("call-2", {}, undefined, undefined, run.ctx);
+  assert.equal(chained.isError, true, "a same-turn advance is rejected");
+  assert.equal(chained.details.status, "delivery-pending");
+  assert.equal(run.sent.length, 1);
 
   await endRun(run);
+  assert.equal(run.sent.length, 2);
+  assert.match(run.sent.at(-1).message, /step 2 \(two\)/);
+
+  const finish = await run.tools.get("workflow_advance").execute("call-3", {}, undefined, undefined, run.ctx);
+  assert.equal(finish.details.status, "completed");
+  await endRun(run);
   assert.equal(run.sent.length, 3);
+  assert.match(run.sent.at(-1).message, /complete: all 2 steps advanced/);
 });
 
 test("workflow_start delegates streaming delivery to the native follow-up queue", async () => {
@@ -479,6 +488,7 @@ test("workflow transitions append resumable snapshots", async () => {
   assert.equal(kickoff.data.delivered, true, "accepted kickoff commits its marker");
 
   await run.tools.get("workflow_advance").execute("call", {}, undefined, undefined, run.ctx);
+  await endRun(run);
   const advance = run.entries.at(-2);
   assert.equal(advance.data.status, "active");
   assert.deepEqual(advance.data.position, { kind: "step", stepId: "two" });
@@ -835,7 +845,7 @@ test("a send that resolves after abort appends no active snapshot", async () => 
   assert.ok(!/auditable/.test(run.statuses.at(-1).value));
 });
 
-test("interleaved abort during advance delivery appends no active snapshot", async () => {
+test("interleaved abort during settle delivery appends no active snapshot", async () => {
   const root = tempRoot("workflow-abort-race-advance-");
   writeWorkflow(root, "auditable", { piVisibility: true });
   const run = harness(root);
@@ -847,10 +857,13 @@ test("interleaved abort during advance delivery appends no active snapshot", asy
     return new Promise((resolve) => (releaseSend = resolve));
   };
 
-  const advancing = run.tools.get("workflow_advance").execute("advance", {}, undefined, undefined, run.ctx);
+  const advanced = await run.tools.get("workflow_advance").execute("advance", {}, undefined, undefined, run.ctx);
+  assert.equal(advanced.isError, undefined);
+
+  const settling = run.handlers.get("agent_settled")({ type: "agent_settled" }, run.ctx);
   const aborting = run.tools.get("workflow_abort").execute("call", {}, undefined, undefined, run.ctx);
   releaseSend();
-  await advancing;
+  await settling;
   await aborting;
   assert.ok(run.attempts.some((attempt) => /step 2 \(two\)/.test(attempt.message)));
   assert.equal(run.sent.length, 1);

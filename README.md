@@ -94,8 +94,8 @@ The planner sees only IDs and descriptions. A node prompt sees only the current 
 ## Runtime behavior
 
 1. `workflow_start <name>` (tool or slash command) starts a run at step 1.
-2. Each position's kickoff is a one-line control message queued through Pi's native follow-up queue (`Continue workflow \`RUN_ID\` at observe.`). Full instructions render in `before_agent_start`, so conversation history never accumulates repeated workflow content.
-3. Structured runs conclude each position with `workflow_transition`; legacy runs use `workflow_advance`.
+2. Each position's kickoff is a one-line control message (`Continue workflow \`RUN_ID\` at observe.`) delivered when the agent settles, so at most one continuation is ever queued and none survive completion. Full instructions render in `before_agent_start`, so conversation history never accumulates repeated workflow content.
+3. Structured runs conclude each position with `workflow_transition`; legacy runs use `workflow_advance`. One transition is accepted per agent turn: chaining a second before its instructions arrive is rejected with `delivery-pending` and must wait for the next message.
 4. `workflow_abort` stops the run and restores idle tools.
 
 ### workflow_transition
@@ -135,7 +135,7 @@ Active tools are the intersection of the captured Pi baseline, the workflow ceil
 
 ### Snapshots and resume
 
-Every transition appends a durable snapshot before the in-memory state moves, and the delivery marker commits only after the follow-up is accepted. Runs survive session close and resume; a pending delivery retries at `agent_settled`.
+Every transition appends a durable snapshot before the in-memory state moves, and the delivery marker commits only after the follow-up is accepted. Runs survive session close and resume; pending deliveries are sent at `agent_settled`, one continuation per turn.
 
 Active snapshots are version 3: `{ v: 3, position, memory, delivered, ... }` with a stable step or node position. Legacy v1/v2 snapshots still restore; their numeric step maps to the derived step ID and the run starts with empty memory. Invalid or stale snapshots drop with one actionable warning. Terminal snapshots stay small and unchanged.
 

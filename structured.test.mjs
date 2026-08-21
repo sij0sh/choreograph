@@ -119,6 +119,10 @@ async function startRun(run, name = "reasoning", target = "the target") {
   await run.commands.get(name).handler(target, run.ctx);
 }
 
+async function settle(run) {
+  await run.handlers.get("agent_settled")({ type: "agent_settled" }, run.ctx);
+}
+
 const ORDER = ["frame", "observe", "plan", "execute", "verify", "converge", "deliver"];
 
 async function advanceTo(run, stepId) {
@@ -128,6 +132,7 @@ async function advanceTo(run, stepId) {
   for (let i = 0; i < target; i += 1) {
     const result = await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: metBy[ORDER[i]] ?? [], checkpoint: { summary: `did ${ORDER[i]}` } }, undefined, undefined, run.ctx);
     if (result.isError) throw new Error(`advance past ${ORDER[i]} failed: ${result.content[0].text}`);
+    await settle(run);
   }
   return run;
 }
@@ -153,7 +158,10 @@ async function reachPlanStep(run) {
 
 async function deliverPlan(run, planValue = PASS_PLAN, outcome = "pass") {
   const checkpoint = { summary: "plan ready", ...(planValue !== undefined ? { data: { plan: planValue } } : {}) };
-  return run.tools.get("workflow_transition").execute("call", { outcome, met: [], checkpoint }, undefined, undefined, run.ctx);
+  const result = await run.tools.get("workflow_transition").execute("call", { outcome, met: [], checkpoint }, undefined, undefined, run.ctx);
+  if (result.isError) return result;
+  await settle(run);
+  return result;
 }
 
 // --- control messages and prompt isolation ---
@@ -230,6 +238,49 @@ test("criteria gate passing transitions", async () => {
   assert.equal(valid.isError, undefined);
 });
 
+test("one continuation per turn blocks stale follow-up accumulation", async () => {
+  const root = tempRoot("structured-turn-guard-");
+  writeReasoning(root);
+  const run = harness(root);
+  await startRun(run);
+  assert.equal(run.sent.length, 1, "the kickoff is the only queued message");
+  const transition = (payload) => run.tools.get("workflow_transition").execute("call", payload, undefined, undefined, run.ctx);
+
+  const frame = await transition({ outcome: "pass", met: ["task-framed"], checkpoint: { summary: "framed" } });
+  assert.equal(frame.isError, undefined);
+  const chained = await transition({ outcome: "pass", met: [], checkpoint: { summary: "early" } });
+  assert.equal(chained.isError, true, "a same-turn transition is rejected");
+  assert.equal(chained.details.status, "delivery-pending");
+  assert.match(chained.content[0].text, /finish the current reply first/);
+  assert.equal(run.sent.length, 1, "no follow-up is queued mid-turn");
+
+  await settle(run);
+  assert.equal(run.sent.length, 2, "settling delivers exactly one continuation");
+  assert.match(run.sent.at(-1).message, /at observe\.$/);
+  await settle(run);
+  assert.equal(run.sent.length, 2, "a delivered position never re-sends");
+
+  await transition({ outcome: "pass", met: [], checkpoint: { summary: "observed" } });
+  await settle(run);
+  await transition({ outcome: "pass", met: [], checkpoint: { summary: "planned", data: { plan: PASS_PLAN } } });
+  await settle(run);
+  await transition({ outcome: "pass", met: ["inspect-basics-done"], checkpoint: { summary: "inspected" } });
+  await settle(run);
+  await transition({ outcome: "pass", met: ["trace-flow-done"], checkpoint: { summary: "traced" } });
+  await settle(run);
+  await transition({ outcome: "pass", met: [], checkpoint: { summary: "verified" } });
+  await settle(run);
+  await transition({ outcome: "pass", met: [], checkpoint: { summary: "converged" } });
+  await settle(run);
+  assert.equal(run.sent.length, 8, "one continuation per position and no more");
+
+  const completed = await transition({ outcome: "pass", met: [], checkpoint: { summary: "final" } });
+  assert.equal(completed.isError, undefined);
+  await settle(run);
+  assert.equal(run.sent.length, 8, "completion queues no continuation");
+  await assert.rejects(() => transition({ outcome: "pass", met: [], checkpoint: { summary: "late" } }), /no active workflow/);
+});
+
 test("blocked transitions commit the checkpoint and stay delivered", async () => {
   const root = tempRoot("structured-blocked-");
   writeReasoning(root);
@@ -302,6 +353,7 @@ test("append failure keeps the prior position and tools", async () => {
   run.setAppendFailure(null);
   const retry = await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: ["task-framed"], checkpoint: { summary: "x" } }, undefined, undefined, run.ctx);
   assert.equal(retry.isError, undefined);
+  await settle(run);
   assert.deepEqual(run.entries.at(-2).data.position, { kind: "step", stepId: "observe" });
 });
 
@@ -381,6 +433,7 @@ test("node passes persist results and run one node per turn", async () => {
   const first = await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: ["inspect-basics-done"], checkpoint: { summary: "found the seam", unknowns: ["auth unclear"] } }, undefined, undefined, run.ctx);
   assert.equal(first.isError, undefined);
   assert.match(first.content[0].text, /execute node 2\/2: trace-flow/);
+  await settle(run);
   assert.equal(run.entries.at(-2).data.memory.execution.results["inspect-basics"].summary, "found the seam");
 
   const prompt = await run.handlers.get("before_agent_start")({ systemPrompt: "base" }, run.ctx);
@@ -393,6 +446,7 @@ test("node passes persist results and run one node per turn", async () => {
   const second = await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: ["trace-flow-done"], checkpoint: { summary: "traced" } }, undefined, undefined, run.ctx);
   assert.equal(second.isError, undefined);
   assert.match(second.content[0].text, /Continue at verify/);
+  await settle(run);
   assert.deepEqual(run.entries.at(-2).data.position, { kind: "step", stepId: "verify" });
 });
 
@@ -416,6 +470,7 @@ test("node rework increments attempts with a hard bound", async () => {
   const rework = (extra) => run.tools.get("workflow_transition").execute("call", { outcome: "rework", met: [], checkpoint: { summary: "stuck" }, ...extra }, undefined, undefined, run.ctx);
   const first = await rework();
   assert.equal(first.isError, undefined);
+  await settle(run);
   assert.deepEqual(run.entries.at(-2).data.position, { kind: "node", stepId: "execute", revision: 1, nodeId: "inspect-basics", attempt: 2 });
   const second = await rework();
   assert.equal(second.isError, true);
@@ -429,8 +484,10 @@ test("node replan returns to the planner and retains results", async () => {
   await reachPlanStep(run);
   await deliverPlan(run);
   await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: ["inspect-basics-done"], checkpoint: { summary: "done" } }, undefined, undefined, run.ctx);
+  await settle(run);
   const replan = await run.tools.get("workflow_transition").execute("call", { outcome: "replan", met: [], checkpoint: { summary: "approach was wrong" } }, undefined, undefined, run.ctx);
   assert.equal(replan.isError, undefined);
+  await settle(run);
   const snapshot = run.entries.at(-2).data;
   assert.deepEqual(snapshot.position, { kind: "step", stepId: "plan" });
   assert.equal(snapshot.memory.execution.revision, 2);
@@ -457,7 +514,9 @@ test("replacement plans must use new ids for new work", async () => {
   await reachPlanStep(run);
   await deliverPlan(run);
   await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: ["inspect-basics-done"], checkpoint: { summary: "done" } }, undefined, undefined, run.ctx);
+  await settle(run);
   await run.tools.get("workflow_transition").execute("call", { outcome: "replan", met: [], checkpoint: { summary: "redo" } }, undefined, undefined, run.ctx);
+  await settle(run);
   const result = await deliverPlan(run, plan([node("inspect-basics", "trace"), node("b", "inspect")]));
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /already a retained result/);
@@ -469,7 +528,11 @@ test("replan has a hard bound", async () => {
   const run = harness(root);
   await reachPlanStep(run);
   await deliverPlan(run);
-  const replan = (label) => run.tools.get("workflow_transition").execute("call", { outcome: "replan", met: [], checkpoint: { summary: label } }, undefined, undefined, run.ctx);
+  const replan = async (label) => {
+    const result = await run.tools.get("workflow_transition").execute("call", { outcome: "replan", met: [], checkpoint: { summary: label } }, undefined, undefined, run.ctx);
+    if (!result.isError) await settle(run);
+    return result;
+  };
   assert.equal((await replan("one")).isError, undefined);
   await deliverPlan(run);
   assert.equal((await replan("two")).isError, undefined);
@@ -485,7 +548,9 @@ async function reachVerify(run) {
   await reachPlanStep(run);
   await deliverPlan(run);
   await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: ["inspect-basics-done"], checkpoint: { summary: "found it" } }, undefined, undefined, run.ctx);
+  await settle(run);
   await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: ["trace-flow-done"], checkpoint: { summary: "traced it" } }, undefined, undefined, run.ctx);
+  await settle(run);
 }
 
 test("the verifier prompt lists results and rework ids", async () => {
@@ -514,6 +579,7 @@ test("verifier rework invalidates requested nodes and transitive dependents", as
     run.ctx,
   );
   assert.equal(result.isError, undefined);
+  await settle(run);
   const snapshot = run.entries.at(-2).data;
   assert.deepEqual(snapshot.position, { kind: "node", stepId: "execute", revision: 1, nodeId: "inspect-basics", attempt: 1 }, "returns to the earliest invalidated node");
   assert.equal(snapshot.memory.execution.results["inspect-basics"], undefined);
@@ -556,12 +622,15 @@ test("structured completion ends without a summary follow-up", async () => {
   const run = harness(root);
   await reachVerify(run);
   await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: [], checkpoint: { summary: "verified" } }, undefined, undefined, run.ctx);
+  await settle(run);
   await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: [], checkpoint: { summary: "converged" } }, undefined, undefined, run.ctx);
+  await settle(run);
   const sentBefore = run.sent.length;
   const result = await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: [], checkpoint: { summary: "delivered" } }, undefined, undefined, run.ctx);
   assert.equal(result.isError, undefined);
   assert.equal(result.terminate, undefined, "no second turn is scheduled");
   assert.match(result.content[0].text, /Present the prepared final result/);
+  await settle(run);
   assert.equal(run.sent.length, sentBefore, "no summary follow-up");
   assert.deepEqual(run.entries.at(-1).data, { v: 2, status: "completed", workflow: "reasoning", runId: run.entries.at(-1).data.runId, totalSteps: 7 });
   assert.ok(!run.activeTools.has("workflow_transition"));
@@ -622,6 +691,7 @@ test("legacy v2 snapshots resume into a derived step id", async () => {
   assert.ok(run.activeTools.has("workflow_transition"));
   const next = await run.tools.get("workflow_transition").execute("call", { outcome: "pass", met: [], checkpoint: { summary: "x", data: { plan: PASS_PLAN } } }, undefined, undefined, run.ctx);
   assert.equal(next.isError, undefined);
+  await settle(run);
   assert.deepEqual(run.entries.at(-2).data.position, { kind: "node", stepId: "execute", revision: 1, nodeId: "inspect-basics", attempt: 1 });
   assert.equal(run.entries.at(-2).data.memory.steps.plan.summary, "x");
 });
@@ -634,6 +704,7 @@ test("entry into the executor without a plan fails closed", async () => {
   await startRun(run);
   const result = await run.tools.get("workflow_transition").execute("call", { outcome: "rework", met: [], checkpoint: { summary: "x" } }, undefined, undefined, run.ctx);
   assert.equal(result.isError, undefined, "default rework stays on the current static step");
+  await settle(run);
   const intoExecutor = await run.tools.get("workflow_transition").execute(
     "call",
     { outcome: "pass", met: ["task-framed"], checkpoint: { summary: "x" } },

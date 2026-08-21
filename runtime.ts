@@ -668,7 +668,7 @@ export class WorkflowRuntime {
     assertNotCancelled(signal);
     if (!current.delivered) {
       return {
-        content: [{ type: "text", text: `Cannot advance step \`${current.run.position.stepId}\` before its instructions are delivered.` }],
+        content: [{ type: "text", text: `Cannot advance step \`${current.run.position.stepId}\` before its instructions are delivered. They arrive as the next message; finish the current reply first.` }],
         details: { workflow: current.run.workflow.name, runId: current.run.runId, status: "delivery-pending" },
         isError: true,
       };
@@ -690,7 +690,6 @@ export class WorkflowRuntime {
     this.state = { status: "active", run, delivered: false };
     this.showStatus(ctx);
     this.setRunTools();
-    await this.deliverPending(ctx);
     return {
       content: [{ type: "text", text: `Step \`${current.run.position.stepId}\` complete. Advancing to \`${run.position.stepId}\`. Its instructions arrive in the next message.` }],
       details: { workflow: workflow.name, runId, step: run.position.stepId, status: "active" },
@@ -710,7 +709,7 @@ export class WorkflowRuntime {
     assertNotCancelled(signal);
     if (!current.delivered) {
       return {
-        content: [{ type: "text", text: `Cannot transition \`${displayPosition(current.run)}\` before its instructions are delivered.` }],
+        content: [{ type: "text", text: `Cannot transition \`${displayPosition(current.run)}\` before its instructions are delivered. They arrive as the next message; finish the current reply first.` }],
         details: { workflow: current.run.workflow.name, runId: current.run.runId, status: "delivery-pending" },
         isError: true,
       };
@@ -767,7 +766,6 @@ export class WorkflowRuntime {
     this.state = { status: "active", run, delivered: false };
     this.showStatus(ctx);
     this.setRunTools();
-    await this.deliverPending(ctx);
     return {
       content: [{ type: "text", text: `Recorded ${request.outcome}. Continue at ${displayPosition(run)}; instructions arrive in the next message.` }],
       details: { workflow: run.workflow.name, runId: run.runId, position: displayPosition(run), status: "active" },
