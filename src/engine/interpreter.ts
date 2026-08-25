@@ -3,8 +3,10 @@ import { validateCheckpoint } from "../domain/checkpoint.ts";
 import type { Execution, Frame, SequenceFrame, TaskFrame } from "../domain/execution.ts";
 import { resolveRecovery } from "../domain/policy.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
-import type { PlanBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
-import { blockOf } from "../domain/workflow.ts";
+import type { ChooseBlock, ForEachBlock, PlanBlock, RepeatBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";import { blockOf } from "../domain/workflow.ts";
+import { resolveReference } from "../authoring/references.ts";
+import { evaluatePredicate } from "../authoring/predicates.ts";
+import { canonicalJson, type JsonValue } from "../domain/json.ts";
 
 export interface Issue {
   readonly target: string;
@@ -54,10 +56,17 @@ function childKey(parentKey: string, childId: string): string {
 
 type PushResult = { leaf: boolean } | { error: string };
 
-function pushChild(workflow: Workflow, stack: Frame[], parent: SequenceFrame, childId: string): PushResult {
+function caseNameOf(value: JsonValue | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value === "object") return canonicalJson(value);
+  return String(value);
+}
+
+function pushBlock(workflow: Workflow, state: Execution, stack: Frame[], parentKey: string, childId: string): PushResult {
   const child = blockOf(workflow, childId);
   if (!child) return { error: `unknown block id: ${childId}` };
-  const key = childKey(parent.key, child.id);
+  const key = childKey(parentKey, child.id);
+  const view: Execution = { ...state, stack };
   switch (child.kind) {
     case "task":
       stack.push({ kind: "task", blockId: child.id, key, attempt: 1 });
@@ -65,9 +74,36 @@ function pushChild(workflow: Workflow, stack: Frame[], parent: SequenceFrame, ch
     case "sequence":
       stack.push({ kind: "sequence", blockId: child.id, key, index: 0 });
       return { leaf: false };
+    case "foreach": {
+      const items = resolveReference(view, child.items);
+      if (items === undefined) return { leaf: false };
+      if (!Array.isArray(items)) return { error: `${key} resolved $${child.items.root} to a non-list value` };
+      if (items.length > LIMITS.forEachItems) return { error: `${key} iterates ${items.length} items; the bound is ${LIMITS.forEachItems}` };
+      stack.push({ kind: "foreach", blockId: child.id, key, items, index: 0, variable: child.as });
+      return { leaf: false };
+    }
+    case "repeat": {
+      stack.push({ kind: "repeat", blockId: child.id, key, iteration: 0 });
+      return { leaf: false };
+    }
+    case "choose": {
+      const chosen = chooseBranch(view, child);
+      if (!chosen) return { leaf: false };
+      stack.push({ kind: "choose", blockId: child.id, key, caseName: chosen.name });
+      stack.push({ kind: "sequence", blockId: chosen.body.id, key: childKey(`${key}:${chosen.name}`, chosen.body.id), index: 0 });
+      return { leaf: false };
+    }
     default:
       return { error: `block kind "${child.kind}" is not supported yet` };
   }
+}
+
+function chooseBranch(state: Execution, block: ChooseBlock): { name: string; body: SequenceBlock } | undefined {
+  const value = resolveReference(state, block.value);
+  const name = caseNameOf(value);
+  if (name !== undefined && block.cases[name]) return { name, body: block.cases[name] };
+  if (block.fallback) return { name: "fallback", body: block.fallback };
+  return undefined;
 }
 
 type AdvanceResult = { ok: true; stack: readonly Frame[] } | { ok: false; error: string };
@@ -86,22 +122,58 @@ function advance(workflow: Workflow, state: Execution): AdvanceResult {
         const child = block.children[top.index];
         if (!child) {
           stack.pop();
+          const parent = stack[stack.length - 1];
+          if (parent?.kind === "foreach") {
+            stack[stack.length - 1] = { ...parent, index: parent.index + 1 };
+          } else if (parent?.kind === "repeat") {
+            stack[stack.length - 1] = { ...parent, iteration: parent.iteration + 1 };
+          }
           continue;
         }
-        const parent: SequenceFrame = { ...top, index: top.index + 1 };
-        stack[topIndex] = parent;
-        const pushed = pushChild(workflow, stack, parent, child.id);
+        const advanced: SequenceFrame = { ...top, index: top.index + 1 };
+        stack[topIndex] = advanced;
+        const pushed = pushBlock(workflow, state, stack, advanced.key, child.id);
         if ("error" in pushed) return { ok: false, error: pushed.error };
         if (pushed.leaf) return { ok: true, stack };
         continue;
       }
+      case "foreach": {
+        const block = blockOf(workflow, top.blockId);
+        if (!block || block.kind !== "foreach") return { ok: false, error: `frame ${top.key} does not name a for_each block` };
+        if (top.index >= top.items.length) {
+          stack.pop();
+          continue;
+        }
+        const bodyKey = `${top.key}[${top.index}]`;
+        stack.push({ kind: "sequence", blockId: block.body.id, key: childKey(bodyKey, block.body.id), index: 0 });
+        continue;
+      }
+      case "repeat": {
+        const block = blockOf(workflow, top.blockId);
+        if (!block || block.kind !== "repeat") return { ok: false, error: `frame ${top.key} does not name a repeat block` };
+        const view: Execution = { ...state, stack };
+        if (top.iteration >= block.max) {
+          stack.pop();
+          continue;
+        }
+        if (top.iteration > 0 && block.until && evaluatePredicate(view, block.until)) {
+          stack.pop();
+          continue;
+        }
+        const bodyKey = `${top.key}#${top.iteration}`;
+        stack.push({ kind: "sequence", blockId: block.body.id, key: childKey(bodyKey, block.body.id), index: 0 });
+        continue;
+      }
+      case "choose":
+        stack.pop();
+        continue;
       case "task":
       case "node":
         return { ok: true, stack };
       case "plan":
         return { ok: false, error: "plan blocks arrive with dynamic planning support" };
       default:
-        return { ok: false, error: `frame kind "${top.kind}" is not supported yet` };
+        return { ok: false, error: `frame kind "${(top as Frame).kind}" is not supported yet` };
     }
   }
   return { ok: true, stack };
