@@ -4,12 +4,13 @@ import { start as engineStart, currentPosition, transition as engineTransition }
 import type { Execution } from "../domain/execution.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
-import { ID_PATTERN } from "../domain/limits.ts";
+import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Issue, TaskOutcome } from "../engine/interpreter.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { workflowBlocks } from "../domain/workflow.ts";
 import { latestSnapshot, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
 import { activeSnapshot, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
+import { withinMemoryBound } from "../persistence/codec.ts";
 import { validateAgainstWorkflow } from "../persistence/migrate.ts";
 import { effectiveTools, CONTROL_TOOLS, TRANSITION_TOOL_NAME, ABORT_TOOL_NAME } from "./capabilities.ts";
 import { desiredModel } from "./models.ts";
@@ -284,6 +285,14 @@ export class RuntimeCoordinator {
       return this.finishRun(current, ctx, "completed");
     }
     const next: ActiveState = { ...current, execution: result.state, delivered: result.effect.kind === "stay" };
+    const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: next.delivered, ...(next.restoreModel !== undefined ? { restoreModel: next.restoreModel } : {}) });
+    if (!withinMemoryBound(pendingSnapshot)) {
+      return {
+        content: [{ type: "text", text: `The run's persisted state would exceed ${LIMITS.memoryBytes / 1024} KiB; the transition was rejected. Abort the run or narrow the checkpoint data.` }],
+        details: { workflow: current.workflow.name, runId: current.execution.runId, status: "memory-bound" },
+        isError: true,
+      };
+    }
     try {
       this.commit(this.snapshotOf(next, next.delivered), `transition of ${current.workflow.title} run ${current.execution.runId} to ${result.state.stack.at(-1)?.key ?? "completion"}`);
     } catch (error) {

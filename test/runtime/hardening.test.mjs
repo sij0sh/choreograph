@@ -161,3 +161,31 @@ test("storage failure on abort keeps the run active", async () => {
   const prompt = runtime.handleBeforeAgentStart({ systemPrompt: "" });
   assert.ok(prompt, "the run stays active and rendered");
 });
+
+test("transitions that exceed the memory bound are rejected without state change", async () => {
+  const h = harness();
+  const files = { root: "steps/frame.md" };
+  const wf = workflow([
+    task("discover"),
+    { kind: "foreach", id: "review", items: { root: "discover", path: ["files"] }, as: "file", body: { kind: "sequence", id: "review-body", children: [task("inspect")] } },
+  ]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const ctx = h.ctx();
+  runtime.handleSessionStart(ctx);
+  await runtime.startWorkflow(ctx, wf, "");
+  await runtime.handleAgentSettled(ctx);
+  const transition = runtime.transition.bind(runtime);
+  const big = "x".repeat(16_000);
+  const files64 = Array.from({ length: 64 }, (_, i) => `f${i}`);
+  let result = await transition({ status: "completed", checkpoint: { summary: "found", data: { files: files64 } } }, undefined, ctx);
+  assert.ok(!result.isError, result.content[0].text);
+  for (let i = 0; i < 64; i += 1) {
+    await runtime.handleAgentSettled(ctx);
+    result = await transition({ status: "completed", checkpoint: { summary: "inspected", data: { blob: big } } }, undefined, ctx);
+    if (result.isError) break;
+  }
+  assert.ok(result.isError, "accumulating loop checkpoints eventually hits the bound");
+  assert.match(result.details.status, /memory-bound/);
+  const prompt = runtime.handleBeforeAgentStart({ systemPrompt: "" });
+  assert.ok(prompt, "the run stays active at the last valid position");
+});
