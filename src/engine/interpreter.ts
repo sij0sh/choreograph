@@ -1,12 +1,16 @@
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
-import type { Execution, Frame, SequenceFrame, TaskFrame } from "../domain/execution.ts";
+import type { Execution, Frame, NodeFrame, PlanExecution, SequenceFrame, TaskFrame } from "../domain/execution.ts";
 import { resolveRecovery } from "../domain/policy.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
-import type { ChooseBlock, ForEachBlock, PlanBlock, RepeatBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";import { blockOf } from "../domain/workflow.ts";
+import type { ChooseBlock, ForEachBlock, PlanBlock, RepeatBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
+import { blockOf } from "../domain/workflow.ts";
 import { resolveReference } from "../authoring/references.ts";
 import { evaluatePredicate } from "../authoring/predicates.ts";
 import { canonicalJson, type JsonValue } from "../domain/json.ts";
+import { firstIncompleteNode } from "../planning/graph.ts";
+import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
+import { validateNodeResult, type NodeResult } from "../planning/schema.ts";
 
 export interface Issue {
   readonly target: string;
@@ -93,8 +97,18 @@ function pushBlock(workflow: Workflow, state: Execution, stack: Frame[], parentK
       stack.push({ kind: "sequence", blockId: chosen.body.id, key: childKey(`${key}:${chosen.name}`, chosen.body.id), index: 0 });
       return { leaf: false };
     }
+    case "plan": {
+      const existing = state.plans[key];
+      if (existing && firstIncompleteNode(existing)) {
+        stack.push({ kind: "plan", blockId: child.id, key, mode: "execute" });
+        return { leaf: false };
+      }
+      if (existing) return { leaf: false };
+      stack.push({ kind: "plan", blockId: child.id, key, mode: "create" });
+      return { leaf: true };
+    }
     default:
-      return { error: `block kind "${child.kind}" is not supported yet` };
+      return { error: `block kind "${(child as { kind: string }).kind}" is not supported yet` };
   }
 }
 
@@ -167,11 +181,21 @@ function advance(workflow: Workflow, state: Execution): AdvanceResult {
       case "choose":
         stack.pop();
         continue;
+      case "plan": {
+        if (top.mode === "create") return { ok: true, stack };
+        const execution = state.plans[top.key];
+        if (!execution || execution.blockId !== top.blockId) return { ok: false, error: `plan frame ${top.key} has no execution` };
+        const node = firstIncompleteNode(execution);
+        if (!node) {
+          stack.pop();
+          continue;
+        }
+        stack.push({ kind: "node", blockId: top.blockId, key: `${top.key}/${node.id}`, nodeId: node.id, attempt: 1 });
+        return { ok: true, stack };
+      }
       case "task":
       case "node":
         return { ok: true, stack };
-      case "plan":
-        return { ok: false, error: "plan blocks arrive with dynamic planning support" };
       default:
         return { ok: false, error: `frame kind "${(top as Frame).kind}" is not supported yet` };
     }
@@ -240,6 +264,68 @@ function needsWork(workflow: Workflow, state: Execution, outcome: Extract<TaskOu
   return { ok: true, state: { ...state, checkpoints: commitCheckpoint(state, leaf.key, outcome.checkpoint) }, effect: { kind: "stay" } };
 }
 
+function planKeyOfNode(node: NodeFrame): string {
+  return node.key.slice(0, node.key.lastIndexOf("/"));
+}
+
+function finishAdvance(workflow: Workflow, state: Execution, stack: readonly Frame[]): EngineResult {
+  const advanced = advance(workflow, { ...state, stack });
+  if (!advanced.ok) return fail(advanced.error);
+  if (advanced.stack.length === 0) {
+    return { ok: true, state: { ...state, stack: [], status: "completed" }, effect: { kind: "complete" } };
+  }
+  return { ok: true, state: { ...state, stack: advanced.stack }, effect: { kind: "deliver" } };
+}
+
+function completePlanCreation(workflow: Workflow, state: Execution, leaf: Extract<Frame, { kind: "plan" }>, outcome: Extract<TaskOutcome, { status: "completed" }>): EngineResult {
+  const block = blockOf(workflow, leaf.blockId);
+  if (!block || block.kind !== "plan") return fail(`frame ${leaf.key} does not name a plan block`);
+  const planValue = (outcome.checkpoint.data as { plan?: unknown } | undefined)?.plan;
+  if (planValue === undefined) return fail("plan creation completion must carry checkpoint.data.plan");
+  const previous = state.plans[leaf.key];
+  const validation = validateDynamicPlan(planValue, planInputFor(workflow, block.operators, new Set(Object.keys(previous?.results ?? {}))));
+  if ("errors" in validation) return fail(`invalid plan: ${validation.errors.join("; ")}`);
+  const execution: PlanExecution = {
+    blockId: block.id,
+    revision: previous ? previous.revision : 1,
+    replans: previous ? previous.replans : 0,
+    plan: validation.plan,
+    results: previous ? previous.results : {},
+  };
+  const plans = { ...state.plans, [leaf.key]: execution };
+  const stack: Frame[] = [...state.stack.slice(0, -1), { kind: "plan", blockId: block.id, key: leaf.key, mode: "execute" as const }];
+  return finishAdvance(workflow, { ...state, plans }, stack);
+}
+
+function completeNode(workflow: Workflow, state: Execution, leaf: NodeFrame, outcome: Extract<TaskOutcome, { status: "completed" }>): EngineResult {
+  const planKey = planKeyOfNode(leaf);
+  const execution = state.plans[planKey];
+  if (!execution || execution.blockId !== leaf.blockId) return fail(`node frame ${leaf.key} has no plan execution`);
+  const node = execution.plan.nodes.find((entry) => entry.id === leaf.nodeId);
+  if (!node) return fail(`node ${leaf.nodeId} is not in the active plan`);
+  const criteriaError = checkCriteria(node.done, outcome.met ?? []);
+  if (criteriaError) return fail(criteriaError);
+  const { checkpoint } = outcome;
+  let result: NodeResult;
+  try {
+    result = validateNodeResult(
+      {
+        id: node.id,
+        summary: checkpoint.summary,
+        ...(checkpoint.evidence ? { evidence: checkpoint.evidence } : {}),
+        ...(checkpoint.decisions ? { decisions: checkpoint.decisions } : {}),
+        ...(checkpoint.unknowns ? { unknowns: checkpoint.unknowns } : {}),
+        ...(checkpoint.data !== undefined ? { data: checkpoint.data } : {}),
+      },
+      `node result ${node.id}`,
+    );
+  } catch (error) {
+    return fail(error instanceof Error ? error.message : String(error));
+  }
+  const plans = { ...state.plans, [planKey]: { ...execution, results: { ...execution.results, [node.id]: result } } };
+  return finishAdvance(workflow, { ...state, plans }, state.stack.slice(0, -1));
+}
+
 export function start(workflow: Workflow, input: StartInput): EngineResult {
   if (workflow.root.children.length === 0) return fail("workflow has no steps");
   const base: Execution = {
@@ -275,19 +361,16 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
     case "needs-work":
       return needsWork(workflow, state, outcome);
     case "completed": {
-      if (leaf.kind !== "task") return fail("completion for this position arrives with dynamic planning support");
+      if (leaf.kind === "plan") return completePlanCreation(workflow, state, leaf, outcome);
+      if (leaf.kind === "node") return completeNode(workflow, state, leaf, outcome);
+      if (leaf.kind !== "task") return fail("completion for this position is not supported");
       const block = blockOf(workflow, leaf.blockId);
       if (!block || block.kind !== "task") return fail(`frame ${leaf.key} does not name a task`);
       const criteriaError = checkCriteria(block.done ?? [], outcome.met ?? []);
       if (criteriaError) return fail(criteriaError);
       const checkpoints = commitCheckpoint(state, leaf.key, outcome.checkpoint);
       const popped: Execution = { ...state, stack: state.stack.slice(0, -1), checkpoints };
-      const advanced = advance(workflow, popped);
-      if (!advanced.ok) return fail(advanced.error);
-      if (advanced.stack.length === 0) {
-        return { ok: true, state: { ...popped, stack: [], status: "completed" }, effect: { kind: "complete" } };
-      }
-      return { ok: true, state: { ...popped, stack: advanced.stack }, effect: { kind: "deliver" } };
+      return finishAdvance(workflow, popped, popped.stack);
     }
   }
 }
@@ -298,6 +381,8 @@ export interface PositionInfo {
   readonly attempt: number;
   readonly task?: TaskBlock;
   readonly plan?: PlanBlock;
+  readonly node?: import("../planning/schema.ts").PlanNode;
+  readonly execution?: PlanExecution;
   readonly stack: readonly Frame[];
 }
 
@@ -309,6 +394,23 @@ export function currentPosition(workflow: Workflow, state: Execution): PositionI
     const block = blockOf(workflow, leaf.blockId);
     if (block?.kind === "task") {
       return { type: "task", key: leaf.key, attempt: leaf.attempt, task: block, stack: state.stack };
+    }
+    return undefined;
+  }
+  if (leaf.kind === "plan") {
+    const block = blockOf(workflow, leaf.blockId);
+    if (block?.kind === "plan") {
+      return { type: "plan-create", key: leaf.key, attempt: 1, plan: block, execution: state.plans[leaf.key], stack: state.stack };
+    }
+    return undefined;
+  }
+  if (leaf.kind === "node") {
+    const block = blockOf(workflow, leaf.blockId);
+    const planKey = leaf.key.slice(0, leaf.key.lastIndexOf("/"));
+    const execution = state.plans[planKey];
+    const node = execution?.plan.nodes.find((entry) => entry.id === leaf.nodeId);
+    if (block?.kind === "plan" && execution && node) {
+      return { type: "node", key: leaf.key, attempt: leaf.attempt, plan: block, node, execution, stack: state.stack };
     }
     return undefined;
   }
