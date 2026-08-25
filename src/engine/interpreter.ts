@@ -1,1 +1,244 @@
-// src/engine/interpreter.ts: scaffolded in M0.
+import type { Checkpoint } from "../domain/checkpoint.ts";
+import { validateCheckpoint } from "../domain/checkpoint.ts";
+import type { Execution, Frame, SequenceFrame, TaskFrame } from "../domain/execution.ts";
+import { resolveRecovery } from "../domain/policy.ts";
+import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
+import type { PlanBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
+import { blockOf } from "../domain/workflow.ts";
+
+export interface Issue {
+  readonly target: string;
+  readonly reason: string;
+}
+
+export type TaskOutcome =
+  | { readonly status: "completed"; readonly met?: readonly string[]; readonly checkpoint: Checkpoint }
+  | { readonly status: "needs-work"; readonly checkpoint: Checkpoint; readonly issues?: readonly Issue[] }
+  | { readonly status: "blocked"; readonly checkpoint: Checkpoint };
+
+export type WorkflowEvent =
+  | { readonly type: "outcome"; readonly outcome: TaskOutcome }
+  | { readonly type: "abort" };
+
+export type Effect =
+  | { readonly kind: "deliver" }
+  | { readonly kind: "stay" }
+  | { readonly kind: "complete" }
+  | { readonly kind: "aborted" };
+
+export type EngineResult =
+  | { readonly ok: true; readonly state: Execution; readonly effect: Effect }
+  | { readonly ok: false; readonly error: string };
+
+export interface StartInput {
+  readonly runId: string;
+  readonly target?: string;
+}
+
+function fail(error: string): EngineResult {
+  return { ok: false, error };
+}
+
+function isLeafFrame(frame: Frame): boolean {
+  return frame.kind === "task" || frame.kind === "node" || (frame.kind === "plan" && frame.mode === "create");
+}
+
+function sequenceAt(workflow: Workflow, frame: SequenceFrame): SequenceBlock | undefined {
+  const block = blockOf(workflow, frame.blockId);
+  return block?.kind === "sequence" ? block : undefined;
+}
+
+function childKey(parentKey: string, childId: string): string {
+  return `${parentKey}/${childId}`;
+}
+
+type PushResult = { leaf: boolean } | { error: string };
+
+function pushChild(workflow: Workflow, stack: Frame[], parent: SequenceFrame, childId: string): PushResult {
+  const child = blockOf(workflow, childId);
+  if (!child) return { error: `unknown block id: ${childId}` };
+  const key = childKey(parent.key, child.id);
+  switch (child.kind) {
+    case "task":
+      stack.push({ kind: "task", blockId: child.id, key, attempt: 1 });
+      return { leaf: true };
+    case "sequence":
+      stack.push({ kind: "sequence", blockId: child.id, key, index: 0 });
+      return { leaf: false };
+    default:
+      return { error: `block kind "${child.kind}" is not supported yet` };
+  }
+}
+
+type AdvanceResult = { ok: true; stack: readonly Frame[] } | { ok: false; error: string };
+
+function advance(workflow: Workflow, state: Execution): AdvanceResult {
+  const stack = [...state.stack];
+  let steps = 0;
+  while (stack.length > 0) {
+    if (++steps > LIMITS.advanceSteps) return { ok: false, error: "execution advance exceeded its step bound" };
+    const topIndex = stack.length - 1;
+    const top = stack[topIndex];
+    switch (top.kind) {
+      case "sequence": {
+        const block = sequenceAt(workflow, top);
+        if (!block) return { ok: false, error: `frame ${top.key} does not name a sequence` };
+        const child = block.children[top.index];
+        if (!child) {
+          stack.pop();
+          continue;
+        }
+        const parent: SequenceFrame = { ...top, index: top.index + 1 };
+        stack[topIndex] = parent;
+        const pushed = pushChild(workflow, stack, parent, child.id);
+        if ("error" in pushed) return { ok: false, error: pushed.error };
+        if (pushed.leaf) return { ok: true, stack };
+        continue;
+      }
+      case "task":
+      case "node":
+        return { ok: true, stack };
+      case "plan":
+        return { ok: false, error: "plan blocks arrive with dynamic planning support" };
+      default:
+        return { ok: false, error: `frame kind "${top.kind}" is not supported yet` };
+    }
+  }
+  return { ok: true, stack };
+}
+
+function checkCriteria(criteria: readonly string[], met: readonly string[]): string | undefined {
+  const known = new Set(criteria);
+  for (const id of met) {
+    if (!known.has(id)) return `unknown criterion id: ${id}`;
+  }
+  const metSet = new Set(met);
+  if (metSet.size !== met.length) return "met must not contain duplicates";
+  for (const id of criteria) {
+    if (!metSet.has(id)) return `completion must list every required criterion; missing: ${id}`;
+  }
+  return undefined;
+}
+
+function validateOutcome(outcome: TaskOutcome): string | undefined {
+  const raw = outcome as { met?: unknown; issues?: unknown };
+  if (outcome.status !== "completed" && raw.met !== undefined) return "met is only valid with status \"completed\"";
+  if (outcome.status !== "needs-work" && raw.issues !== undefined) return "issues is only valid with status \"needs-work\"";
+  if (raw.met !== undefined) {
+    if (!Array.isArray(raw.met)) return "met must be a list of criterion ids";
+    for (const id of raw.met) {
+      if (typeof id !== "string" || !ID_PATTERN.test(id)) return "met entries must match ^[a-z][a-z0-9-]*$";
+    }
+  }
+  if (raw.issues !== undefined) {
+    if (!Array.isArray(raw.issues)) return "issues must be a list";
+    for (const issue of raw.issues) {
+      if (!issue || typeof issue !== "object" || Array.isArray(issue)) return "issues entries must be objects";
+      if (typeof issue.target !== "string" || !issue.target.trim()) return "issues entries need a non-empty target";
+      if (typeof issue.reason !== "string" || !issue.reason.trim()) return "issues entries need a non-empty reason";
+    }
+  }
+  try {
+    validateCheckpoint(outcome.checkpoint, "checkpoint");
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return undefined;
+}
+
+function commitCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): Execution["checkpoints"] {
+  return { ...state.checkpoints, [key]: checkpoint };
+}
+
+function needsWork(workflow: Workflow, state: Execution, outcome: Extract<TaskOutcome, { status: "needs-work" }>): EngineResult {
+  const stack = [...state.stack];
+  const leaf = stack[stack.length - 1];
+  if (!leaf || !isLeafFrame(leaf)) return fail("execution has no current leaf task");
+  if (leaf.kind !== "task") return fail("needs-work recovery for this position arrives with recovery support");
+  const block = blockOf(workflow, leaf.blockId);
+  if (!block || block.kind !== "task") return fail(`frame ${leaf.key} does not name a task`);
+  const policy = resolveRecovery(block.recovery);
+  const nextAttempt = leaf.attempt + 1;
+  const canRetry = policy.strategy.includes("retry") && nextAttempt <= policy.maxAttempts;
+  if (canRetry) {
+    const retried: TaskFrame = { ...leaf, attempt: nextAttempt };
+    stack[stack.length - 1] = retried;
+    return { ok: true, state: { ...state, stack }, effect: { kind: "deliver" } };
+  }
+  return { ok: true, state: { ...state, checkpoints: commitCheckpoint(state, leaf.key, outcome.checkpoint) }, effect: { kind: "stay" } };
+}
+
+export function start(workflow: Workflow, input: StartInput): EngineResult {
+  if (workflow.root.children.length === 0) return fail("workflow has no steps");
+  const base: Execution = {
+    workflowName: workflow.name,
+    runId: input.runId,
+    target: input.target ?? "",
+    status: "active",
+    stack: [],
+    checkpoints: {},
+    plans: {},
+  };
+  const entered: Execution = { ...base, stack: [{ kind: "sequence", blockId: workflow.root.id, key: workflow.root.id, index: 0 }] };
+  const advanced = advance(workflow, entered);
+  if (!advanced.ok) return fail(advanced.error);
+  if (advanced.stack.length === 0) return fail("workflow has no runnable steps");
+  return { ok: true, state: { ...entered, stack: advanced.stack }, effect: { kind: "deliver" } };
+}
+
+export function transition(workflow: Workflow, state: Execution, event: WorkflowEvent): EngineResult {
+  if (state.status !== "active") return fail("execution is not active");
+  if (event.type === "abort") {
+    return { ok: true, state: { ...state, status: "aborted" }, effect: { kind: "aborted" } };
+  }
+  const outcome = event.outcome;
+  const invalid = validateOutcome(outcome);
+  if (invalid) return fail(invalid);
+  const leaf = state.stack[state.stack.length - 1];
+  if (!leaf || !isLeafFrame(leaf)) return fail("execution has no current leaf task");
+  switch (outcome.status) {
+    case "blocked": {
+      return { ok: true, state: { ...state, checkpoints: commitCheckpoint(state, leaf.key, outcome.checkpoint) }, effect: { kind: "stay" } };
+    }
+    case "needs-work":
+      return needsWork(workflow, state, outcome);
+    case "completed": {
+      if (leaf.kind !== "task") return fail("completion for this position arrives with dynamic planning support");
+      const block = blockOf(workflow, leaf.blockId);
+      if (!block || block.kind !== "task") return fail(`frame ${leaf.key} does not name a task`);
+      const criteriaError = checkCriteria(block.done ?? [], outcome.met ?? []);
+      if (criteriaError) return fail(criteriaError);
+      const checkpoints = commitCheckpoint(state, leaf.key, outcome.checkpoint);
+      const popped: Execution = { ...state, stack: state.stack.slice(0, -1), checkpoints };
+      const advanced = advance(workflow, popped);
+      if (!advanced.ok) return fail(advanced.error);
+      if (advanced.stack.length === 0) {
+        return { ok: true, state: { ...popped, stack: [], status: "completed" }, effect: { kind: "complete" } };
+      }
+      return { ok: true, state: { ...popped, stack: advanced.stack }, effect: { kind: "deliver" } };
+    }
+  }
+}
+
+export interface PositionInfo {
+  readonly type: "task" | "plan-create" | "node";
+  readonly key: string;
+  readonly attempt: number;
+  readonly task?: TaskBlock;
+  readonly plan?: PlanBlock;
+  readonly stack: readonly Frame[];
+}
+
+export function currentPosition(workflow: Workflow, state: Execution): PositionInfo | undefined {
+  if (state.status !== "active") return undefined;
+  const leaf = state.stack[state.stack.length - 1];
+  if (!leaf || !isLeafFrame(leaf)) return undefined;
+  if (leaf.kind === "task") {
+    const block = blockOf(workflow, leaf.blockId);
+    if (block?.kind === "task") {
+      return { type: "task", key: leaf.key, attempt: leaf.attempt, task: block, stack: state.stack };
+    }
+    return undefined;
+  }
+  return undefined;
+}
