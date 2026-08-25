@@ -1,11 +1,11 @@
 ---
-name: pi-workflows
-description: Set up and maintain pi-workflows definitions for the pi coding agent. Use when creating or editing a workflow directory, writing WORKFLOW.md frontmatter, authoring step, operator, loop, branch, or plan markdown files, or diagnosing workflow discovery and validation errors.
+name: choreograph
+description: Set up and maintain choreograph definitions for the pi coding agent. Use when creating or editing a workflow directory, writing WORKFLOW.md frontmatter, authoring step, operator, loop, branch, or plan markdown files, or diagnosing workflow discovery and validation errors.
 ---
 
-# pi-workflows
+# choreograph
 
-pi-workflows is a pi coding-agent extension that runs hierarchical workflows from markdown definitions. A workflow resembles a skill, but its structure is explicit, ordered, and typed. The engine lives in this repository. Workflow definitions live outside it, under the agent data directory.
+choreograph is a pi coding-agent extension that runs hierarchical workflows from markdown definitions. A workflow resembles a skill, but its structure is explicit, ordered, and typed. The engine lives in this repository. Workflow definitions live outside it, under the agent data directory.
 
 Use this skill to create, edit, and validate workflow definitions. Do not use it to modify the engine itself; engine internals are documented in the repository README.md.
 

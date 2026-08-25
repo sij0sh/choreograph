@@ -158,7 +158,7 @@ export class RuntimeCoordinator {
   }
 
   private showStatus(ctx: ExtensionContextLike): void {
-    ctx.ui.setStatus("pi-workflows", this.state.status === "active" ? statusValue(this.state.workflow, this.state.execution) : undefined);
+    ctx.ui.setStatus("choreograph", this.state.status === "active" ? statusValue(this.state.workflow, this.state.execution) : undefined);
   }
 
   private requireActive(): ActiveState {

@@ -113,7 +113,7 @@ test("semantic restore rejects stale positions", () => {
 });
 
 test("latestSnapshot finds the newest custom entry on the branch", () => {
-  const entry = (data) => ({ type: "custom", customType: "pi-workflows", data });
+  const entry = (data) => ({ type: "custom", customType: "choreograph", data });
   const { state } = midLoopState();
   const snap = activeSnapshot({ workflow: "demo", execution: state, delivered: true });
   const branch = [entry({ v: 4, status: "aborted", workflow: "demo", runId: "old" }), entry(snap), { type: "user", text: "hi" }];
@@ -121,4 +121,12 @@ test("latestSnapshot finds the newest custom entry on the branch", () => {
   assert.equal(parsed.status, "active");
   assert.equal(parsed.execution.runId, "run-1");
   assert.equal(latestSnapshot([{ type: "custom", customType: "other", data: {} }]), null);
+});
+
+test("latestSnapshot still reads snapshots persisted under the pre-rename type", () => {
+  const { state } = midLoopState();
+  const snap = activeSnapshot({ workflow: "demo", execution: state, delivered: true });
+  const parsed = latestSnapshot([{ type: "custom", customType: "pi-workflows", data: snap }]);
+  assert.equal(parsed.status, "active");
+  assert.equal(parsed.execution.runId, "run-1");
 });

@@ -1,4 +1,4 @@
-# pi-workflows
+# choreograph
 
 A [pi](https://github.com/earendil-works/pi-coding-agent) coding-agent extension that runs hierarchical workflows from markdown definitions.
 

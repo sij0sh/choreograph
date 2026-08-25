@@ -6,7 +6,8 @@ import type { PlanExecution } from "../domain/execution.ts";
 import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth } from "../domain/json.ts";
 
-export const SNAPSHOT_TYPE = "pi-workflows";
+export const SNAPSHOT_TYPE = "choreograph";
+export const LEGACY_SNAPSHOT_TYPES = ["pi-workflows"] as const;
 
 export type ActiveSnapshotV4 = {
   readonly v: 4;

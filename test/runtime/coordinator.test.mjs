@@ -69,7 +69,7 @@ test("starting a run swaps in run tools and persists an active snapshot", async 
   const run = await runtime.startWorkflow(h.ctx, wf, "target");
   assert.ok(run);
   assert.deepEqual([...h.activeTools], ["read", "bash", "workflow_transition", "workflow_abort"]);
-  const snapshots = h.entries.filter((entry) => entry.customType === "pi-workflows");
+  const snapshots = h.entries.filter((entry) => entry.customType === "choreograph");
   assert.equal(snapshots[0].data.delivered, false, "the start snapshot commits before delivery");
   assert.ok(snapshots.some((entry) => entry.data.delivered === true), "the delivered marker follows the send");
   assert.equal(h.sent.length, 1, "the follow-up is sent");
@@ -95,7 +95,7 @@ test("transitions persist the next snapshot before adopting it", async () => {
   const result = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
   assert.ok(!result.isError, result.content[0].text);
   assert.equal(runtime.handleBeforeAgentStart({ systemPrompt: "" }).systemPrompt.includes("deliver"), true, "the next position renders");
-  const snapshots = h.entries.filter((entry) => entry.customType === "pi-workflows").map((entry) => entry.data);
+  const snapshots = h.entries.filter((entry) => entry.customType === "choreograph").map((entry) => entry.data);
   assert.ok(snapshots.some((snapshot) => snapshot.delivered === false), "the pending position snapshot commits first");
   assert.equal(Object.keys(snapshots[0].execution.checkpoints).length + Object.keys(snapshots.at(-1).execution?.checkpoints ?? {}).length >= 1, true);
   const stored = snapshots.find((snapshot) => snapshot.execution && Object.keys(snapshot.execution.checkpoints).length === 1);
@@ -219,7 +219,7 @@ test("resume drops invalid snapshots with one warning", () => {
   const h = harness();
   const wf = simpleWorkflow();
   const state = start(wf, { runId: "broken" }).state;
-  h.entries.push({ type: "custom", customType: "pi-workflows", data: { ...activeSnapshot({ workflow: wf.name, execution: state, delivered: true }), execution: { ...state, stack: [{ kind: "task", blockId: "ghost", key: "root/ghost", attempt: 1 }] } } });
+  h.entries.push({ type: "custom", customType: "choreograph", data: { ...activeSnapshot({ workflow: wf.name, execution: state, delivered: true }), execution: { ...state, stack: [{ kind: "task", blockId: "ghost", key: "root/ghost", attempt: 1 }] } } });
   const runtime = coordinator(h, [wf]);
   runtime.handleSessionStart(h.ctx);
   assert.ok(h.ctx.ui.notices.some((notice) => notice.level === "warning" && /Cannot resume|Dropped/.test(notice.message)));

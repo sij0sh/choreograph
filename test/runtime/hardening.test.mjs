@@ -69,7 +69,7 @@ async function midPlanState() {
 test("restore drops the run when the workflow was removed", async () => {
   const { wf, state } = await midPlanState();
   const h = harness();
-  h.entries.push({ type: "custom", customType: "pi-workflows", data: activeSnapshot({ workflow: wf.name, execution: state, delivered: true }) });
+  h.entries.push({ type: "custom", customType: "choreograph", data: activeSnapshot({ workflow: wf.name, execution: state, delivered: true }) });
   const runtime = new RuntimeCoordinator(h.pi, [], () => "# x");
   const context = h.ctx();
   runtime.handleSessionStart(context);

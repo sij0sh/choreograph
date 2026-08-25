@@ -1,4 +1,4 @@
-import { SNAPSHOT_TYPE, parseSnapshot, type ParsedSnapshot } from "./snapshot.ts";
+import { LEGACY_SNAPSHOT_TYPES, SNAPSHOT_TYPE, parseSnapshot, type ParsedSnapshot } from "./snapshot.ts";
 
 export class WorkflowStorageError extends Error {
   constructor(operation: string, cause: unknown) {
@@ -20,9 +20,10 @@ export function commitSnapshot(store: SnapshotStore, snapshot: unknown, operatio
 }
 
 export function latestSnapshot(branch: readonly unknown[]): ParsedSnapshot | null {
+  const readableTypes = new Set<string>([SNAPSHOT_TYPE, ...LEGACY_SNAPSHOT_TYPES]);
   for (let i = branch.length - 1; i >= 0; i -= 1) {
     const entry = branch[i] as { type?: unknown; customType?: unknown; data?: unknown };
-    if (entry.type === "custom" && entry.customType === SNAPSHOT_TYPE) return parseSnapshot(entry.data);
+    if (entry.type === "custom" && typeof entry.customType === "string" && readableTypes.has(entry.customType)) return parseSnapshot(entry.data);
   }
   return null;
 }
