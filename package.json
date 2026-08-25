@@ -5,6 +5,11 @@
   "license": "MIT",
   "private": true,
   "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
   "engines": {
     "node": ">=22.19.0"
   },
