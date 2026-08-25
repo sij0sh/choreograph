@@ -152,6 +152,47 @@ test("a successful send with a failing marker retries only the marker", async ()
   assert.equal(h.entries.at(-1).data.delivered, true);
 });
 
+test("status and field mismatches are rejected without state change", async () => {
+  const h = harness();
+  const wf = simpleWorkflow();
+  const runtime = coordinator(h, [wf]);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  await runtime.handleAgentSettled(h.ctx);
+  const blockedWithMet = await runtime.transition(
+    { status: "blocked", met: ["framed"], checkpoint: cp("stuck") },
+    undefined,
+    h.ctx,
+  );
+  assert.ok(blockedWithMet.isError);
+  assert.match(blockedWithMet.content[0].text, /met is only valid with status "completed"/);
+  const completedWithIssues = await runtime.transition(
+    { status: "completed", met: [], issues: [{ target: "frame", reason: "still broken" }], checkpoint: cp("framed") },
+    undefined,
+    h.ctx,
+  );
+  assert.ok(completedWithIssues.isError);
+  assert.match(completedWithIssues.content[0].text, /issues is only valid with status "needs-work"/);
+  const resumed = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  assert.ok(!resumed.isError);
+  assert.equal(resumed.details.position, "root/deliver", "the run never moved for the rejected calls");
+});
+
+test("a retry re-delivers the retried position", async () => {
+  const h = harness();
+  const wf = simpleWorkflow();
+  const runtime = coordinator(h, [wf]);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  await runtime.handleAgentSettled(h.ctx);
+  assert.equal(h.sent.length, 1);
+  const result = await runtime.transition({ status: "needs-work", checkpoint: cp("attempt failed") }, undefined, h.ctx);
+  await runtime.handleAgentSettled(h.ctx);
+  assert.match(result.content[0].text, /instructions arrive in the next message/);
+  assert.equal(h.sent.length, 2, "the retry sends a new control message");
+  assert.ok(h.sent[1].message.includes("root/frame"));
+});
+
 test("a send that resolves after abort appends no active snapshot", async () => {
   const send = [];
   const h = harness();

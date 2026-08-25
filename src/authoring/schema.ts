@@ -74,8 +74,8 @@ export function parseRecovery(raw: unknown, label: string, defaults: RecoveryPol
   if (raw === undefined) return undefined;
   const body = objectAt(raw, label);
   assertKeys(body, RECOVERY_KEYS, label);
-  const maxAttempts = body.max_attempts === undefined ? undefined : positiveIntAt(body.max_attempts, `${label}.max_attempts`, 4);
-  const maxReplans = body.max_replans === undefined ? undefined : positiveIntAt(body.max_replans, `${label}.max_replans`, 4);
+  const maxAttempts = body.max_attempts === undefined ? undefined : positiveIntAt(body.max_attempts, `${label}.max_attempts`, LIMITS.nodeAttempts + 1);
+  const maxReplans = body.max_replans === undefined ? undefined : positiveIntAt(body.max_replans, `${label}.max_replans`, LIMITS.replans);
   let strategy: readonly RecoveryAction[] | undefined;
   if (body.strategy !== undefined) {
     if (!Array.isArray(body.strategy) || body.strategy.length === 0) throw new Error(`${label}.strategy must be a non-empty list`);

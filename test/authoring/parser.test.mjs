@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { discoverWorkflows, loadWorkflowManifest } from "../../src/authoring/parser.ts";
+import { LIMITS } from "../../src/domain/limits.ts";
 
 const roots = [];
 
@@ -214,6 +215,36 @@ steps:
     tools: [read]
 `);
   assert.throws(() => loadWorkflowManifest(taskKeyOnBlock), /only applies to/);
+});
+
+test("repair bounds stay within the persisted run bounds", () => {
+  const attempts = workflowDir("attempts", `
+description: x
+steps:
+  - run: steps/frame.md
+    repair:
+      max_attempts: ${LIMITS.nodeAttempts + 2}
+`);
+  assert.throws(() => loadWorkflowManifest(attempts), new RegExp(`between 1 and ${LIMITS.nodeAttempts + 1}`));
+  const replans = workflowDir("replans", `
+description: x
+steps:
+  - run: steps/frame.md
+    repair:
+      max_replans: ${LIMITS.replans + 1}
+`);
+  assert.throws(() => loadWorkflowManifest(replans), new RegExp(`between 1 and ${LIMITS.replans}`));
+  const edge = loadWorkflowManifest(workflowDir("edge", `
+description: x
+steps:
+  - run: steps/frame.md
+    repair:
+      max_attempts: ${LIMITS.nodeAttempts + 1}
+      max_replans: ${LIMITS.replans}
+`));
+  const task = edge.root.children[0];
+  assert.equal(task.recovery.maxAttempts, LIMITS.nodeAttempts + 1);
+  assert.equal(task.recovery.maxReplans, LIMITS.replans);
 });
 
 test("containment and size rules still hold", () => {

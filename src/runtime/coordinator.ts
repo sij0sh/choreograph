@@ -97,6 +97,8 @@ export function parseTransitionRequest(params: unknown): TransitionRequest {
       return { target: issue.target, reason: issue.reason };
     });
   }
+  if (raw.status !== "completed" && raw.met !== undefined) throw new Error("met is only valid with status \"completed\"");
+  if (raw.status !== "needs-work" && raw.issues !== undefined) throw new Error("issues is only valid with status \"needs-work\"");
   return { status: raw.status, met, checkpoint, ...(issues ? { issues } : {}) };
 }
 
@@ -215,9 +217,10 @@ export class RuntimeCoordinator {
   private async deliverPending(ctx: ExtensionContextLike): Promise<void> {
     if (this.state.status !== "active" || this.state.delivered) return;
     const pending = this.state;
+    const leaf = pending.execution.stack[pending.execution.stack.length - 1];
     const delivered = await this.delivery.deliver({
       runId: pending.execution.runId,
-      key: pending.execution.stack[pending.execution.stack.length - 1]?.key ?? "start",
+      key: leaf ? `${leaf.key}#attempt-${"attempt" in leaf ? leaf.attempt : 1}` : "start",
       message: controlMessage(pending.execution),
       isLive: () => this.state === pending,
       beforeSend: () => this.applyModelFor(pending, ctx),
