@@ -11,6 +11,7 @@ function harness(options = {}) {
   const activeTools = new Set(options.baseline ?? ["read", "bash"]);
   const pi = {
     getActiveTools: () => [...activeTools],
+    getAllTools: options.allTools ? () => options.allTools.map((name) => ({ name })) : undefined,
     setActiveTools: (names) => {
       activeTools.clear();
       names.forEach((name) => activeTools.add(name));
@@ -73,6 +74,15 @@ test("starting a run swaps in run tools and persists an active snapshot", async 
   assert.equal(snapshots[0].data.delivered, false, "the start snapshot commits before delivery");
   assert.ok(snapshots.some((entry) => entry.data.delivered === true), "the delivered marker follows the send");
   assert.equal(h.sent.length, 1, "the follow-up is sent");
+});
+
+test("reload uses all registered tools instead of the narrowed active set", () => {
+  const h = harness({ allTools: ["read", "bash", "edit", "write"] });
+  const wf = simpleWorkflow({ piVisibility: true, tools: ["read", "bash", "edit", "write"] });
+  const runtime = coordinator(h, [wf]);
+  const warnings = runtime.handleSessionStart(h.ctx);
+  assert.deepEqual(warnings.unknownTools, []);
+  assert.deepEqual([...h.activeTools], ["read", "bash", "edit", "write", "workflow_start"]);
 });
 
 test("storage failure on start keeps the session idle", async () => {

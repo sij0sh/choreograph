@@ -57,7 +57,13 @@ type RunState = { status: "idle" } | ActiveState;
 export class RuntimeCoordinator {
   readonly workflows: readonly Workflow[];
   readonly visibleWorkflows: readonly Workflow[];
-  private readonly pi: { getActiveTools(): string[]; setActiveTools(names: string[]): void; appendEntry(type: string, data: unknown): void; sendUserMessage(message: string, options?: { deliverAs?: "steer" | "followUp" }): void };
+  private readonly pi: {
+    getActiveTools(): string[];
+    getAllTools?: () => readonly { name: string }[];
+    setActiveTools(names: string[]): void;
+    appendEntry(type: string, data: unknown): void;
+    sendUserMessage(message: string, options?: { deliverAs?: "steer" | "followUp" }): void;
+  };
   private readonly store: SnapshotStore;
   private readonly read: ReturnType<typeof readBlockFrom>;
   private state: RunState = { status: "idle" };
@@ -97,7 +103,8 @@ export class RuntimeCoordinator {
   }
 
   private readonly isWorkflowTool = (name: string): boolean => [START_TOOL_NAME, ...CONTROL_TOOLS].includes(name);
-  private readonly captureBaseline = (): string[] => this.pi.getActiveTools().filter((name) => !this.isWorkflowTool(name));
+  private readonly knownTools = (): string[] => this.pi.getAllTools?.().map((tool) => tool.name) ?? this.pi.getActiveTools();
+  private readonly captureBaseline = (): string[] => this.knownTools().filter((name) => !this.isWorkflowTool(name));
 
   private activeToolsFor(state: RunState): string[] {
     this.baselineTools ??= this.captureBaseline();
@@ -341,7 +348,7 @@ export class RuntimeCoordinator {
     this.baselineTools = null;
     this.delivery.reset();
     this.notifyCtx.current = ctx;
-    const available = new Set(this.pi.getActiveTools());
+    const available = new Set(this.knownTools());
     const unknownTools: string[] = [];
     for (const workflow of this.workflows) {
       const configured = new Set<string>([
