@@ -1,0 +1,163 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
+import { activeSnapshot } from "../../src/persistence/snapshot.ts";
+import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
+import { completed, cp, task, workflow } from "../engine/helpers.mjs";
+import { start, transition } from "../../src/engine/interpreter.ts";
+
+function harness(options = {}) {
+  const sent = [];
+  const entries = [];
+  const activeTools = new Set(options.baseline ?? ["read", "bash"]);
+  const pi = {
+    getActiveTools: () => [...activeTools],
+    setActiveTools: (names) => {
+      activeTools.clear();
+      names.forEach((name) => activeTools.add(name));
+    },
+    appendEntry: (type, data) => {
+      if (options.failAppend) throw options.failAppend;
+      entries.push({ type: "custom", customType: type, data });
+    },
+    sendUserMessage: async (message) => {
+      if (options.failSend) throw options.failSend;
+      sent.push(message);
+    },
+  };
+  const ctx = () => {
+    const context = {
+      notices: [],
+      sessionManager: { getBranch: () => entries },
+      models: new Map(),
+      model: undefined,
+      modelRegistry: undefined,
+      setModel: undefined,
+    };
+    context.ui = { setStatus() {}, notify: (message, level) => context.notices.push({ message, level }) };
+    return context;
+  };
+  return { pi, sent, entries, activeTools, ctx };
+}
+
+const OPERATORS = new Map([
+  ["inspect", { id: "inspect", path: "operators/inspect.md", description: "Inspect." }],
+  ["trace", { id: "trace", path: "operators/trace.md", description: "Trace." }],
+]);
+
+function planWorkflow() {
+  return workflow(
+    [task("frame"), { kind: "plan", id: "investigate", operators: ["inspect", "trace"] }, task("deliver")],
+    { operators: OPERATORS },
+  );
+}
+
+async function midPlanState() {
+  const wf = planWorkflow();
+  let state = start(wf, { runId: "run-9" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed")) }).state;
+  state = transition(wf, state, {
+    type: "outcome",
+    outcome: completed(cp("planned", { plan: { version: 1, nodes: [
+      { id: "probe", operator: "inspect", objective: "o", done: ["probe-done"] },
+      { id: "flow", operator: "trace", objective: "o", done: ["flow-done"] },
+    ] } })),
+  }).state;
+  return { wf, state };
+}
+
+test("restore drops the run when the workflow was removed", async () => {
+  const { wf, state } = await midPlanState();
+  const h = harness();
+  h.entries.push({ type: "custom", customType: "pi-workflows", data: activeSnapshot({ workflow: wf.name, execution: state, delivered: true }) });
+  const runtime = new RuntimeCoordinator(h.pi, [], () => "# x");
+  const context = h.ctx();
+  runtime.handleSessionStart(context);
+  assert.ok(context.notices.some((notice) => /no longer exists/.test(notice.message)));
+});
+
+test("restore drops the run when an operator was removed", async () => {
+  const { wf, state } = await midPlanState();
+  const shrunk = workflow(
+    [task("frame"), { kind: "plan", id: "investigate", operators: ["inspect"] }, task("deliver")],
+    { operators: new Map([["inspect", OPERATORS.get("inspect")]]) },
+  );
+  const migrated = validateAgainstWorkflow(shrunk, state);
+  assert.ok(!migrated.ok);
+  assert.match(migrated.error, /not trusted/);
+});
+
+test("restore drops the run when a task was renamed", async () => {
+  const { state } = await midPlanState();
+  const renamed = workflow(
+    [task("frame-2"), { kind: "plan", id: "investigate", operators: ["inspect", "trace"] }, task("deliver")],
+    { operators: OPERATORS },
+  );
+  const migrated = validateAgainstWorkflow(renamed, state);
+  assert.ok(!migrated.ok);
+});
+
+test("malformed dynamic plans never resume", async () => {
+  const { wf, state } = await midPlanState();
+  const forged = structuredClone(state);
+  forged.plans["root/investigate"] = {
+    ...forged.plans["root/investigate"],
+    plan: { version: 1, nodes: [{ id: "evil", operator: "inspect", objective: "no criteria", done: [] }] },
+  };
+  const migrated = validateAgainstWorkflow(wf, forged);
+  assert.ok(!migrated.ok);
+});
+
+test("delivery failure leaves the run pending and retries after settle", async () => {
+  const h = harness({ failSend: new Error("queue closed") });
+  const wf = workflow([task("frame"), task("deliver")]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const ctx = h.ctx();
+  runtime.handleSessionStart(ctx);
+  await runtime.startWorkflow(ctx, wf, "");
+  assert.equal(h.sent.length, 0);
+  const early = await runtime.transition({ status: "completed", checkpoint: cp("framed") }, undefined, ctx);
+  assert.ok(early.isError);
+  assert.match(early.details.status, /delivery-pending/);
+  h.pi.sendUserMessage = async (message) => h.sent.push(message);
+  await runtime.handleAgentSettled(ctx);
+  assert.equal(h.sent.length, 1, "delivery retries once the queue recovers");
+  const after = await runtime.transition({ status: "completed", checkpoint: cp("done") }, undefined, ctx);
+  assert.ok(!after.isError, "the run continues after recovery");
+});
+
+test("model restore failure warns without blocking", async () => {
+  const h = harness();
+  const wf = workflow([task("frame")], { model: "anthropic/claude-haiku-4-5" });
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const context = h.ctx();
+  context.models.set("anthropic/claude-haiku-4-5", { id: "haiku" });
+  context.model = { provider: "gone", id: "old" };
+  context.models.set("gone/old", { id: "old" });
+  context.modelRegistry = { find: (provider, id) => context.models.get(`${provider}/${id}`) };
+  context.setModel = async () => true;
+  runtime.handleSessionStart(context);
+  await runtime.startWorkflow(context, wf, "");
+  await runtime.handleAgentSettled(context);
+  context.models.delete("gone/old");
+  await runtime.transition({ status: "completed", checkpoint: cp("done") }, undefined, context);
+  assert.ok(context.notices.some((notice) => /Cannot restore session model/.test(notice.message)));
+  assert.equal(runtime.handleBeforeAgentStart({ systemPrompt: "x" }), undefined, "the run still completes");
+});
+
+test("storage failure on abort keeps the run active", async () => {
+  const h = harness();
+  const wf = workflow([task("frame")]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const ctx = h.ctx();
+  runtime.handleSessionStart(ctx);
+  await runtime.startWorkflow(ctx, wf, "");
+  h.entries.push = () => {
+    throw new Error("append broke");
+  };
+  const result = await runtime.abort(undefined, ctx);
+  assert.ok(result.isError);
+  assert.match(result.details.status, /storage-failed/);
+  const prompt = runtime.handleBeforeAgentStart({ systemPrompt: "" });
+  assert.ok(prompt, "the run stays active and rendered");
+});

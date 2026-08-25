@@ -1,21 +1,21 @@
 ---
 name: pi-workflows
-description: Set up and maintain pi-workflows definitions for the pi coding agent. Use when creating or editing a workflow directory, writing WORKFLOW.md frontmatter, authoring step or operator markdown files, or diagnosing workflow discovery and validation errors.
+description: Set up and maintain pi-workflows definitions for the pi coding agent. Use when creating or editing a workflow directory, writing WORKFLOW.md frontmatter, authoring step, operator, loop, branch, or plan markdown files, or diagnosing workflow discovery and validation errors.
 ---
 
 # pi-workflows
 
-pi-workflows is a pi coding-agent extension that runs stepped workflows from markdown definitions. A workflow resembles a skill, but its steps are explicit, ordered, and typed. The engine lives in this repository. Workflow definitions live outside it, under the agent data directory.
+pi-workflows is a pi coding-agent extension that runs hierarchical workflows from markdown definitions. A workflow resembles a skill, but its structure is explicit, ordered, and typed. The engine lives in this repository. Workflow definitions live outside it, under the agent data directory.
 
 Use this skill to create, edit, and validate workflow definitions. Do not use it to modify the engine itself; engine internals are documented in the repository README.md.
 
 ## Where workflows live
 
 - Default location: `~/.pi/agent/workflows/`
-- Override with the `PI_CODING_AGENT_DIR` environment variable: definitions resolve under `$PI_CODING_AGENT_DIR/workflows`.
+- Override with the `PI_CODING_AGENT_DIR` environment variable; definitions resolve under `$PI_CODING_AGENT_DIR/workflows`.
 - One workflow per directory. The directory name is the workflow name and must match `^[a-z][a-z0-9-]*$`.
 - The engine discovers workflows at session start. Directories without a `WORKFLOW.md` are ignored.
-- All step and operator paths must stay inside the workflow directory. `..` and absolute paths are rejected.
+- All instruction paths must stay inside the workflow directory. `..` and absolute paths are rejected.
 
 ## Workflow structure
 
@@ -23,9 +23,9 @@ Use this skill to create, edit, and validate workflow definitions. Do not use it
 my-workflow/
 ├── WORKFLOW.md          # Frontmatter + overview (required)
 ├── steps/
-│   ├── 01-frame.md      # One markdown file per step
+│   ├── 01-frame.md      # One markdown task file
 │   └── ...
-└── operators/           # Optional; only for workflows with a planner
+└── operators/           # Optional; trusted operator registry
     ├── inspect.md
     └── trace.md
 ```
@@ -33,9 +33,9 @@ my-workflow/
 ## Procedure: create a workflow
 
 1. Create a directory under `~/.pi/agent/workflows/` named with the workflow name.
-2. Create a `steps/` subdirectory with one numbered markdown file per step.
+2. Create a `steps/` subdirectory with one markdown file per task.
 3. Write `WORKFLOW.md` with the frontmatter schema below plus a short overview body.
-4. Add an `operators/` subdirectory only when the workflow uses a planner/executor pair.
+4. Add an `operators/` subdirectory when any `plan:` block will reference operators.
 5. Validate the definition with the check under "Validate a workflow" below.
 6. Restart the pi session so discovery picks up the new directory.
 
@@ -48,102 +48,82 @@ piVisibility: true              # Optional; exposes the workflow to the model
 tools: [read, bash]             # Optional; workflow tool ceiling
 model: anthropic/claude-haiku-4-5   # Optional; workflow default model
 steps:
-  - steps/01-frame.md           # String steps are legacy
-  - path: steps/02-observe.md   # Mapping steps are structured
+  - steps/01-frame.md           # String steps are legacy shorthand
+  - run: steps/02-observe.md    # Task
     id: observe
-  - path: steps/03-plan.md
-    kind: planner
-  - path: steps/04-execute.md
-    kind: executor
-  - path: steps/05-verify.md
-    done: [verdict-recorded]
-    on:
-      pass: converge
-      rework: execute
-      replan: plan
-  - path: steps/06-deliver.md
+    done: [evidence-recorded]
+  - id: review                  # Loop over a snapshot list
+    for_each:
+      items: $observe.data.files
+      as: file
+      do:
+        - run: steps/inspect.md
+  - id: refine                  # Iterate to a condition
+    repeat:
+      max: 3
+      until:
+        equals: [$verify.passed, true]
+      do:
+        - run: steps/improve.md
+  - id: route                   # Branch on data
+    choose:
+      value: $observe.data.mode
+      cases:
+        fast:
+          - run: steps/quick.md
+      fallback:
+        - run: steps/thorough.md
+  - id: investigate             # Model-planned, engine-run
+    plan:
+      operators: [inspect, trace]
+      repair:
+        max_attempts: 2
+        max_replans: 2
+  - run: steps/06-deliver.md
+    id: deliver
+    repair:
+      strategy: [invalidate, block]
+      scope: investigate
 ---
 ```
 
-Unknown keys are rejected. Required keys: `description` and `steps`.
+### Rules
 
-| Key | Required | Effect |
-|---|---|---|
-| `description` | Yes | Appears in the workflow roster. |
-| `steps` | Yes | Ordered list of markdown files inside the workflow directory. Each file must stay below 128,000 bytes. |
-| `piVisibility` | No | Set `true` to expose the workflow to the model through the roster and the `workflow_start` tool enum. Defaults to `false`. |
-| `tools` | No | When set, only these baseline tools stay active during a run. An empty list removes all baseline tools. `legalTools` is accepted as a legacy alias; providing both is invalid. |
-| `model` | No | Workflow default model selector in `provider/model-id` form. Applies while steps run. |
+- Every block needs one unique id across the whole workflow. Tasks may derive ids from file stems.
+- Use exactly one of `run`, `for_each`, `repeat`, `choose`, or `plan` per step entry.
+- `for_each` snapshots `items` once on entry. Reference the active item with `$current.<as>`.
+- `choose` runs the matching case; WHEN no case matches and `fallback` is absent, the engine skips the block.
+- `plan` blocks need operator files for every listed operator id.
+- `repair.strategy` may list any of `retry`, `invalidate`, `replan`, `block` in order.
+- The old `kind: planner/executor` and `on:` route keys are rejected with migration errors. Use `plan:` blocks and `repair:` policy.
 
-A workflow with at least one mapping step is a structured workflow. An all-string workflow is a legacy workflow. Prefer structured workflows for new definitions.
+### Operators
 
-## Structured step schema
-
-| Key | Required | Effect |
-|---|---|---|
-| `path` | Yes | Markdown file relative to the workflow directory. |
-| `id` | No | Stable routing ID matching `^[a-z][a-z0-9-]*$`. Defaults to the derived file label. |
-| `kind` | No | `planner` or `executor`. Omit for a static step. |
-| `tools` | No | Step tool ceiling, intersected with the workflow ceiling and the baseline. |
-| `model` | No | `provider/model-id` override for this step. |
-| `done` | No | Criterion IDs that a passing transition must list in `met`. |
-| `on` | No | Non-default routes: `pass`, `rework`, or `replan`, each naming an existing step ID. |
-
-Rules:
-
-- Derive step labels from file stems: `01-surface.md` yields `surface`. Labels must be unique. Set an explicit `id` when stems collide or contain other characters.
-- Declare exactly one `planner` and one later `executor` when either is present. A planner requires at least one operator file.
-- Route defaults: `pass` goes to the next step (or completion after the last), `rework` returns to the current step, `replan` returns to the planner. Declare `on` only for non-default routes.
-- Write each step file as the complete authority for its position. State the step's goal, rules, and expected checkpoint contents. Earlier steps are not repeated in later prompts.
-
-## Operator schema
-
-Operators are trusted instruction files under `operators/`. The file stem is the operator ID. The planner sees only IDs and descriptions; node prompts see only the operator body. Operator files are read when used, so edits take effect at the next invocation.
+Operators are trusted instruction files under `operators/`. The file stem is the operator id.
 
 ```yaml
 ---
-description: Trace control and data flow through one relevant path.
+description: Trace control and data flow through the relevant path.
 tools: [read, bash]    # Optional; operator tool ceiling
 ---
 # Trace
-
 ...operator instructions...
 ```
 
-Unknown frontmatter keys are rejected. Keep operators generic and reusable across nodes. Model-generated plans reference operators by ID only; they cannot inject instructions.
-
-## Model selection
-
-- Use full `provider/model-id` selectors. Bare IDs and malformed shapes are rejected at parse time.
-- Set `model` at workflow scope for the default, and at step scope to override.
-- The session model is captured before a run and restored at completion or abort. Unresolvable selectors warn and continue; they never block a run.
-- Model selection requires a structured manifest. Legacy workflows ignore model selectors.
+Planners see only ids and descriptions. Node execution sees only the current operator's body.
 
 ## Validate a workflow
 
-Run from the pi-workflows repository root:
+Run from this repository after editing definitions:
 
 ```sh
-node -e "import('./manifest.ts').then(({ discoverWorkflows }) => {
-  const { workflows, diagnostics } = discoverWorkflows(require('node:os').homedir() + '/.pi/agent/workflows');
-  console.log('workflows:', workflows.length);
-  for (const d of diagnostics) console.log(d.path, d.error);
-})"
+node -e "import('./src/authoring/parser.ts').then(async (m) => { const r = await m.discoverWorkflows(process.env.HOME + '/.pi/agent/workflows'); console.log(r.diagnostics.length ? r.diagnostics : 'all workflows valid'); })"
 ```
 
-A valid definition reports zero diagnostics. Fix every diagnostic before committing.
+Fix every reported diagnostic before restarting the session.
 
-Also run the engine's suite when you change anything in this repository: `npm test`.
+## Diagnosing discovery
 
-## Common failures and fixes
-
-| Failure | Fix |
-|---|---|
-| Workflow missing from the roster. | Add or fix `WORKFLOW.md`, check the directory name pattern, restart the session. |
-| `unknown key` error. | Remove the unsupported key from frontmatter. |
-| Duplicate step label. | Set an explicit unique `id` on the colliding step. |
-| Planner without operators. | Add at least one file under `operators/` or drop the `planner` kind. |
-| Invalid `on` route. | Route only to existing step IDs: `pass`, `rework`, and `replan` targets must name a declared `id` or default label. |
-| Planner/executor pairing error. | Declare exactly one `planner` and one `executor` that comes after it, or remove both kinds. |
-| Path rejected. | Keep paths inside the workflow directory and relative to it. Remove `..` segments and absolute paths. |
-| Step file too large. | Split the step or trim the file below 128,000 bytes. |
+- A workflow missing from the roster usually has invalid frontmatter; check the session-start warning for the parse error.
+- References must resolve at runtime: `$task.field` reads the latest checkpoint of that task id.
+- `delivery-pending` transition rejections mean the position's instructions have not arrived yet; finish the current reply first.

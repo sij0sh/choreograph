@@ -1,10 +1,8 @@
 # pi-workflows
 
-A [pi](https://github.com/earendil-works/pi-coding-agent) coding-agent extension that runs stepped workflows from markdown definitions.
+A [pi](https://github.com/earendil-works/pi-coding-agent) coding-agent extension that runs hierarchical workflows from markdown definitions.
 
-A workflow resembles a skill. It differs in one way. Its steps are explicit, ordered, and typed.
-
-Structured workflows add a second layer: a developer-authored state machine plus a model-generated, bounded reasoning plan that the runtime executes one trusted operator at a time.
+A workflow resembles a skill with one difference: its structure is explicit, ordered, and typed. Workflows compose six block kinds, execute resumably one position at a time, and keep recovery policy-driven.
 
 ## Workflow definitions
 
@@ -16,7 +14,7 @@ Definitions are agent data. They live under `$PI_CODING_AGENT_DIR/workflows` (de
 my-workflow/
 ├── WORKFLOW.md          # Frontmatter + overview
 ├── steps/
-│   ├── 01-frame.md      # Markdown step
+│   ├── 01-frame.md      # Markdown task instructions
 │   └── ...
 └── operators/           # Optional; trusted operator registry
     ├── inspect.md
@@ -25,7 +23,7 @@ my-workflow/
 
 ### Frontmatter
 
-The workflow name equals its directory name and must match `^[a-z][a-z0-9-]*$`. The display title derives from the name. Directories without `WORKFLOW.md` are ignored. Unknown keys are rejected.
+The workflow name equals its directory name and must match `^[a-z][a-z0-9-]*$`. Unknown keys are rejected.
 
 ```yaml
 ---
@@ -34,51 +32,108 @@ piVisibility: true              # Optional; exposes the workflow to the model
 tools: [read, bash]             # Optional; workflow tool ceiling
 model: anthropic/claude-haiku-4-5   # Optional; workflow default model
 steps:
-  - steps/01-frame.md           # String steps are legacy
-  - path: steps/02-observe.md   # Structured step
+  - steps/01-frame.md           # String steps are legacy shorthand for run:
+  - run: steps/02-observe.md    # A task
     id: observe
-  - path: steps/03-plan.md
-    kind: planner
-    done: [plan-ready]
-  - path: steps/04-execute.md
-    kind: executor
-  - path: steps/05-verify.md
-    on:
-      pass: converge
-      rework: execute
-      replan: plan
-  - path: steps/06-deliver.md
-    model: anthropic/claude-opus-4-5
+    done: [evidence-recorded]
+  - id: review                  # A loop
+    for_each:
+      items: $observe.data.files
+      as: file
+      do:
+        - run: steps/inspect.md
+  - id: refine                  # An iterative block
+    repeat:
+      max: 3
+      until:
+        equals: [$verify.passed, true]
+      do:
+        - run: steps/improve.md
+  - id: route                   # A branch
+    choose:
+      value: $observe.data.mode
+      cases:
+        fast:
+          - run: steps/quick.md
+      fallback:
+        - run: steps/thorough.md
+  - id: investigate             # A dynamic plan
+    plan:
+      operators: [inspect, trace]
+      repair:
+        max_attempts: 2
+        max_replans: 2
+  - run: steps/06-deliver.md
+    id: deliver
+    repair:
+      strategy: [invalidate, block]
+      scope: investigate
 ---
 ```
 
 | Field | Required | Effect |
 |---|---|---|
 | `description` | Yes | Appears in the roster. |
-| `steps` | Yes | Ordered Markdown (`.md`) files inside the workflow directory. Each file must stay below 128,000 bytes. |
-| `piVisibility` | No | Set `true` to expose the workflow to the model through the roster and the `workflow_start` enum. Defaults to `false`. |
-| `tools` | No | When set, only these baseline tools stay active during a run. An empty list removes all baseline tools. `legalTools` stays accepted as a legacy alias; providing both is invalid. Unknown entries produce a session-start warning. |
-| `model` | No | Workflow default `provider/model-id` selector applied while steps run. See [Model selection](#model-selection). |
+| `steps` | Yes | Non-empty list of blocks. String entries are legacy shorthand for task `run:` entries. |
+| `piVisibility` | No | Exposes the workflow through the roster and the `workflow_start` enum. Defaults to `false`. |
+| `tools` | No | Workflow tool ceiling. `legalTools` stays accepted as a legacy alias. |
+| `model` | No | Workflow default `provider/model-id` applied while the run is active. |
 
-A workflow with at least one structured (mapping) step is a **structured workflow**. An all-string workflow is a **legacy workflow**.
+### Block kinds
 
-### Structured steps
-
-| Field | Required | Effect |
+| Kind | Keys | Effect |
 |---|---|---|
-| `path` | Yes | Contained Markdown file. |
-| `id` | No | Stable routing ID matching `^[a-z][a-z0-9-]*$`. Defaults to the derived file label. |
-| `kind` | No | `planner` or `executor`. Missing means a static step. Exactly one planner and one later executor are required when either is present, and a planner requires at least one operator file. |
-| `tools` | No | Step tool ceiling, intersected with the workflow ceiling and the baseline. |
-| `model` | No | `provider/model-id` override for this step. |
-| `done` | No | Criterion IDs required for a passing transition. |
-| `on` | No | Non-default `pass`, `rework`, or `replan` destinations naming existing step IDs. `pass` defaults to the next step (or completion after the last), `rework` defaults to the current step, `replan` defaults to the planner. |
+| Task | `run`, `id?`, `tools?`, `model?`, `done?`, `repair?` | Runs one markdown instruction file to completion. |
+| `for_each` | `items`, `as`, `do` | Snapshots `items` once on entry, then runs `do` per item. `$current.<var>` resolves to the active item. |
+| `repeat` | `max`, `until?`, `do` | Runs `do` up to `max` times, stopping early when `until` holds. |
+| `choose` | `value`, `cases`, `fallback?` | Runs the matching case body; unmatched values use `fallback` or skip the block. |
+| `plan` | `operators`, `repair?` | The model composes a bounded plan from trusted operators; the engine runs it one node per turn. |
 
-Step labels derive from file stems (`01-surface.md` yields `surface`) and must be unique; set explicit IDs when stems collide or contain other characters.
+Every block needs a unique `id` across the workflow; task ids may derive from their file stem.
+
+### Data references
+
+References resolve against checkpoint `data` of the most recent occurrence of a task id, or the current loop iteration:
+
+```text
+$discover.files        # discover's latest checkpoint data.files
+$verify.passed         # verify's latest checkpoint data.passed
+$current.file          # the active for_each item's file field
+```
+
+### Predicates
+
+`repeat.until` and future conditions use six composable operations; complex logic belongs in a task that emits a value:
+
+```yaml
+until:
+  any:
+    - equals: [$verify.passed, true]
+    - exists: $verify.good-enough
+```
+
+### Recovery
+
+Tasks report `needs-work` with `issues: [{ target, reason }]`. Recovery policy decides what happens; authors never wire graph edges:
+
+```yaml
+repair:
+  max_attempts: 2     # runs of the position per occurrence
+  max_replans: 2      # invalidate + replan budget
+  strategy: [retry, invalidate, replan, block]
+  scope: investigate  # the plan block that invalidate and replan target
+```
+
+- **retry** re-runs the current position while attempts remain.
+- **invalidate** removes the targeted plan results or task checkpoints plus transitive dependents, then resumes at the earliest invalidated node.
+- **replan** returns to plan creation, retaining valid completed results.
+- **block** records the checkpoint and waits for the user.
+
+Defaults: tasks use `retry, block`; plan blocks use the full ladder.
 
 ### Operators
 
-Operators are trusted instruction files under `operators/`. The file stem is the operator ID. Small frontmatter, unknown keys rejected:
+Operators are trusted instruction files under `operators/`. The file stem is the operator id. Plan creation sees only ids and descriptions; node execution sees only that node's operator body.
 
 ```yaml
 ---
@@ -89,72 +144,76 @@ tools: [read, bash]    # Optional; operator tool ceiling
 ...operator instructions...
 ```
 
-The planner sees only IDs and descriptions. A node prompt sees only the current operator's body (frontmatter stripped). Operator files are read when used, so edits take effect at the next invocation.
+### Dynamic plans
+
+A plan creation pass carries `checkpoint.data.plan`:
+
+```json
+{ "version": 1, "nodes": [ { "id", "operator", "objective", "dependsOn"?, "evidence"?, "done" } ] }
+```
+
+Validation happens before anything commits: 2-8 nodes, unique ids, only the block's trusted operators, dependencies on earlier nodes or retained results, and size bounds. Nodes never carry their own tools; the operator ceiling governs.
+
+Hard limits: 2 node attempts, 2 replans, 2 invalidations per plan, 8 nodes, 64 loop items, 16 repeat iterations, 4 KiB summaries, 16 KiB checkpoints, 8 KiB results, 32 KiB plans, 512 KiB total memory.
 
 ## Runtime behavior
 
-1. `workflow_start <name>` (tool or slash command) starts a run at step 1.
-2. Each position's kickoff is a one-line control message (`Continue workflow \`RUN_ID\` at observe.`) delivered when the agent settles, so at most one continuation is ever queued and none survive completion. Full instructions render in `before_agent_start`, so conversation history never accumulates repeated workflow content.
-3. Structured runs conclude each position with `workflow_transition`; legacy runs use `workflow_advance`. One transition is accepted per agent turn: chaining a second before its instructions arrive is rejected with `delivery-pending` and must wait for the next message.
-4. `workflow_abort` stops the run and restores idle tools.
+1. `workflow_start <name>` (tool or slash command) starts a run at the first position.
+2. Each position's kickoff is a one-line control message delivered when the agent settles, so at most one continuation is queued and none survive completion. Full instructions render in `before_agent_start`, so history never accumulates workflow content.
+3. Every position concludes with `workflow_transition`:
 
-### workflow_transition
-
-```ts
+```json
 {
-  outcome: "pass" | "blocked" | "rework" | "replan",
-  met: string[],        // criterion IDs claimed complete
-  checkpoint: { summary, evidence?, decisions?, unknowns?, data? },
-  nodes?: string[]      // verifier rework only: node IDs to invalidate
+  "status": "completed",
+  "met": ["scope-clear"],
+  "checkpoint": { "summary": "Scope established." }
 }
 ```
 
-- A pass must list every configured criterion in `met`; unknown or duplicate IDs are rejected.
-- A blocked transition commits the checkpoint and stays delivered at the same position.
-- Rework follows the step's `on.rework` destination. A verifier (a step whose rework routes to the executor) may name completed node IDs in `nodes`; their transitive dependents are invalidated too, and the run returns to the earliest invalidated node.
-- Replan returns to the planner, preserves completed results, and burns one of two replans.
-- Invalid transitions return concrete errors without changing state.
+or, WHEN the position has problems:
 
-### Dynamic plans
-
-A planner pass must carry `checkpoint.data.plan`:
-
-```ts
-{ "version": 1, "nodes": [ { "id", "operator", "objective", "dependsOn"?, "evidence"?, "done", "tools"? } ] }
+```json
+{
+  "status": "needs-work",
+  "checkpoint": { "summary": "Evidence is incomplete." },
+  "issues": [{ "target": "inspect-auth", "reason": "No direct test evidence." }]
+}
 ```
 
-Plans are validated in full before anything is committed: 2-8 nodes, unique IDs, known operators, dependencies only on earlier nodes or retained completed results, baseline tools only, and a 32 KiB canonical-JSON bound. Unknown keys, prompt-like fields, and per-node model selectors are rejected.
-
-The executor runs exactly one node per turn in declaration order. A node prompt contains only the node's objective, its operator's body, declared dependency summaries, open unknowns, and its criteria. A node pass persists a bounded result; a node rework increments the attempt (max 2); a node replan returns to the planner with results retained.
-
-Hard limits: 2 node attempts, 2 replans, 8 nodes, 4 KiB summaries, 16 KiB checkpoints, 8 KiB results, 32 KiB plans, 128 KiB total memory, JSON depth 8.
+`workflow_abort` stops the run. WHEN a second transition arrives before its instructions, the engine rejects it with `delivery-pending`; one transition is accepted per agent turn.
 
 ### Tool authority
 
-Active tools are the intersection of the captured Pi baseline, the workflow ceiling, the current step's ceiling, the current operator's ceiling, and the current node's requested tools, plus the active control tools. Structured runs expose `workflow_transition` + `workflow_abort`; legacy runs expose `workflow_advance` + `workflow_abort`; they never appear together.
+Active tools are the intersection of the captured Pi baseline, the workflow ceiling, the current task's ceiling, and the current operator's ceiling, plus `workflow_transition` and `workflow_abort`.
 
 ### Snapshots and resume
 
-Every transition appends a durable snapshot before the in-memory state moves, and the delivery marker commits only after the follow-up is accepted. Runs survive session close and resume; pending deliveries are sent at `agent_settled`, one continuation per turn.
-
-Active snapshots are version 3: `{ v: 3, position, memory, delivered, ... }` with a stable step or node position. Legacy v1/v2 snapshots still restore; their numeric step maps to the derived step ID and the run starts with empty memory. Invalid or stale snapshots drop with one actionable warning. Terminal snapshots stay small and unchanged.
+Every transition appends a durable snapshot before the in-memory state moves, and the delivery marker commits only after the follow-up is accepted. Active snapshots are version 4 and carry the full frame stack, checkpoints, and plan executions; restore revalidates them semantically against the current workflow. Snapshots from earlier engine versions drop with one actionable warning. Terminal snapshots stay minimal.
 
 ### Model selection
 
-Optional `model` selectors at workflow or step scope run different models at different steps while the session default stays untouched outside the run.
+Optional `model` selectors at workflow or task scope run different models at different positions while the session default stays untouched outside the run. The pre-run session model is captured once and restored at completion or abort. Unresolvable selectors and failed switches warn without blocking.
 
-- Selectors use the full `provider/model-id` form; bare IDs and malformed shapes are rejected at parse time.
-- The runtime resolves a selector with `ctx.modelRegistry.find(provider, modelId)` and applies it with `ctx.setModel(model)` immediately before queuing each delivery, so the next turn uses it.
-- The pre-run session model is captured once as `restoreModel` and restored at completion or abort.
-- Resume re-applies the current position's model and never restores the session model.
-- Unresolvable selectors and failed `setModel` calls warn and continue; a missing model catalog entry never blocks a run.
-- Model selection requires a structured manifest; legacy workflows and generated plans never change the model. A manual `/model` change during a run is overridden at the next delivery.
+## Architecture
+
+```text
+src/
+  authoring/   YAML schema, compiler, references, predicates
+  domain/      Block AST, execution frames, checkpoints, policy, limits
+  engine/      Pure stack interpreter and policy-driven recovery
+  planning/    Dynamic plan schema, validation, graph helpers
+  persistence/ v4 snapshot codec, semantic restore, session store
+  runtime/     Capabilities, models, prompts, status, delivery, coordinator
+  pi/          Tool, command, and lifecycle registration
+```
+
+The interpreter knows nothing about Pi, the filesystem, models, or the UI. Invariants live in `test/engine/invariants.test.mjs`.
 
 ## Tests
-
-`npm test` type-checks the sources with `tsc --strict` via `tsconfig.json`, then runs the behavioral suites: `index.test.mjs` (legacy and registration), `manifest.test.mjs` (parsing and operators), `structured.test.mjs` (transitions, plans, execution, resume), and `model.test.mjs` (model selection). A type error fails the suite before any tests run.
 
 ```sh
 npm install
 npm test
 ```
+
+`tsc --strict` type-checks `src/`, then `node --test` runs the suites: pure engine tests (no mocks), authoring compiler tests, persistence round-trips, runtime contract tests, and end-to-end extension tests.

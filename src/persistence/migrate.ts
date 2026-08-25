@@ -106,8 +106,15 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
     if (!block && !isNode) return `checkpoint key ${key} does not belong to any block in the current workflow`;
   }
   for (const [key, plan] of Object.entries(state.plans)) {
-    if (plan.results[key]) continue;
-    if (!blockOf(workflow, plan.blockId)) return `plan execution ${key} names unknown block ${plan.blockId}`;
+    const block = blockOf(workflow, plan.blockId);
+    if (!block) return `plan execution ${key} names unknown block ${plan.blockId}`;
+    if (block.kind !== "plan") return `plan execution ${key} names block ${plan.blockId}, which is not a plan`;
+    const allowed = new Set(block.operators);
+    for (const node of plan.plan.nodes) {
+      if (!workflow.operators.has(node.operator) || !allowed.has(node.operator)) {
+        return `plan node ${node.id} uses operator ${node.operator}, which is not trusted by ${plan.blockId}`;
+      }
+    }
   }
   return undefined;
 }
