@@ -2,6 +2,7 @@ import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
 import type { Execution, Frame, NodeFrame, PlanExecution, SequenceFrame, TaskFrame } from "../domain/execution.ts";
 import { resolveRecovery } from "../domain/policy.ts";
+import { applyNeedsWork } from "./recovery.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { ChooseBlock, ForEachBlock, PlanBlock, RepeatBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
@@ -99,12 +100,16 @@ function pushBlock(workflow: Workflow, state: Execution, stack: Frame[], parentK
     }
     case "plan": {
       const existing = state.plans[key];
-      if (existing && firstIncompleteNode(existing)) {
-        stack.push({ kind: "plan", blockId: child.id, key, mode: "execute" });
+      if (existing && !existing.awaitingPlan && firstIncompleteNode(existing)) {
+        stack.push({ kind: "plan", blockId: child.id, key, mode: "execute", attempt: 1 });
         return { leaf: false };
       }
+      if (existing && existing.awaitingPlan) {
+        stack.push({ kind: "plan", blockId: child.id, key, mode: "create", attempt: 1 });
+        return { leaf: true };
+      }
       if (existing) return { leaf: false };
-      stack.push({ kind: "plan", blockId: child.id, key, mode: "create" });
+      stack.push({ kind: "plan", blockId: child.id, key, mode: "create", attempt: 1 });
       return { leaf: true };
     }
     default:
@@ -122,7 +127,7 @@ function chooseBranch(state: Execution, block: ChooseBlock): { name: string; bod
 
 type AdvanceResult = { ok: true; stack: readonly Frame[] } | { ok: false; error: string };
 
-function advance(workflow: Workflow, state: Execution): AdvanceResult {
+export function advance(workflow: Workflow, state: Execution): AdvanceResult {
   const stack = [...state.stack];
   let steps = 0;
   while (stack.length > 0) {
@@ -247,21 +252,7 @@ function commitCheckpoint(state: Execution, key: string, checkpoint: Checkpoint)
 }
 
 function needsWork(workflow: Workflow, state: Execution, outcome: Extract<TaskOutcome, { status: "needs-work" }>): EngineResult {
-  const stack = [...state.stack];
-  const leaf = stack[stack.length - 1];
-  if (!leaf || !isLeafFrame(leaf)) return fail("execution has no current leaf task");
-  if (leaf.kind !== "task") return fail("needs-work recovery for this position arrives with recovery support");
-  const block = blockOf(workflow, leaf.blockId);
-  if (!block || block.kind !== "task") return fail(`frame ${leaf.key} does not name a task`);
-  const policy = resolveRecovery(block.recovery);
-  const nextAttempt = leaf.attempt + 1;
-  const canRetry = policy.strategy.includes("retry") && nextAttempt <= policy.maxAttempts;
-  if (canRetry) {
-    const retried: TaskFrame = { ...leaf, attempt: nextAttempt };
-    stack[stack.length - 1] = retried;
-    return { ok: true, state: { ...state, stack }, effect: { kind: "deliver" } };
-  }
-  return { ok: true, state: { ...state, checkpoints: commitCheckpoint(state, leaf.key, outcome.checkpoint) }, effect: { kind: "stay" } };
+  return applyNeedsWork(workflow, state, outcome);
 }
 
 function planKeyOfNode(node: NodeFrame): string {
@@ -289,11 +280,11 @@ function completePlanCreation(workflow: Workflow, state: Execution, leaf: Extrac
     blockId: block.id,
     revision: previous ? previous.revision : 1,
     replans: previous ? previous.replans : 0,
+    invalidations: previous ? previous.invalidations : 0,
     plan: validation.plan,
     results: previous ? previous.results : {},
-  };
-  const plans = { ...state.plans, [leaf.key]: execution };
-  const stack: Frame[] = [...state.stack.slice(0, -1), { kind: "plan", blockId: block.id, key: leaf.key, mode: "execute" as const }];
+  };  const plans = { ...state.plans, [leaf.key]: execution };
+  const stack: Frame[] = [...state.stack.slice(0, -1), { kind: "plan", blockId: block.id, key: leaf.key, mode: "execute" as const, attempt: 1 }];
   return finishAdvance(workflow, { ...state, plans }, stack);
 }
 

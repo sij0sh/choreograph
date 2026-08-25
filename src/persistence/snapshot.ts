@@ -79,7 +79,7 @@ function frameAt(value: unknown, label: string): Frame {
       return { kind, blockId, key, caseName: stringAt(raw.caseName, `${label}.caseName`) };
     case "plan": {
       if (raw.mode !== "create" && raw.mode !== "execute") throw new Error(`${label}.mode must be create or execute`);
-      return { kind, blockId, key, mode: raw.mode };
+      return { kind, blockId, key, mode: raw.mode, attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
     }
     case "node":
       return { kind, blockId, key, nodeId: stringAt(raw.nodeId, `${label}.nodeId`), attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
@@ -107,14 +107,19 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
   for (const [key, entry] of Object.entries(raw)) {
     const planRaw = objectAt(entry, `${label}.${key}`);
     for (const field of Object.keys(planRaw)) {
-      if (!["blockId", "revision", "replans", "plan", "results"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted plan field`);
+      if (!["blockId", "revision", "replans", "invalidations", "awaitingPlan", "plan", "results"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted plan field`);
     }
+    if (planRaw.awaitingPlan !== undefined && typeof planRaw.awaitingPlan !== "boolean") throw new Error(`${label}.${key}.awaitingPlan must be a boolean`);
     const blockId = stringAt(planRaw.blockId, `${label}.${key}.blockId`);
     const revision = planRaw.revision;
     const replans = planRaw.replans;
+    const invalidations = planRaw.invalidations ?? 0;
     if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1) throw new Error(`${label}.${key}.revision must be a positive integer`);
     if (typeof replans !== "number" || !Number.isInteger(replans) || replans < 0 || replans > LIMITS.replans) {
       throw new Error(`${label}.${key}.replans must be an integer between 0 and ${LIMITS.replans}`);
+    }
+    if (typeof invalidations !== "number" || !Number.isInteger(invalidations) || invalidations < 0 || invalidations > LIMITS.replans) {
+      throw new Error(`${label}.${key}.invalidations must be an integer between 0 and ${LIMITS.replans}`);
     }
     const plan = planRaw.plan;
     if (!plan || typeof plan !== "object") throw new Error(`${label}.${key}.plan must be an object`);
@@ -126,6 +131,8 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
       blockId,
       revision,
       replans,
+      invalidations,
+      ...(planRaw.awaitingPlan === true ? { awaitingPlan: true } : {}),
       plan: { version: 1, nodes: nodes as PlanExecution["plan"]["nodes"] },
       results: results as PlanExecution["results"],
     };

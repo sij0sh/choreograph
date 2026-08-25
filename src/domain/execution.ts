@@ -44,6 +44,7 @@ export interface PlanFrame {
   readonly blockId: string;
   readonly key: string;
   readonly mode: "create" | "execute";
+  readonly attempt: number;
 }
 
 export interface NodeFrame {
@@ -60,6 +61,8 @@ export interface PlanExecution {
   readonly blockId: string;
   readonly revision: number;
   readonly replans: number;
+  readonly invalidations: number;
+  readonly awaitingPlan?: boolean;
   readonly plan: DynamicPlan;
   readonly results: Readonly<Record<string, NodeResult>>;
 }
