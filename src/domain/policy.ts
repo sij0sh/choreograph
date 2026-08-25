@@ -9,7 +9,7 @@ export interface RecoveryPolicy {
 
 export const DEFAULT_TASK_RECOVERY: RecoveryPolicy = {
   maxAttempts: 2,
-  maxReplans: 0,
+  maxReplans: 2,
   strategy: ["retry", "block"],
 };
 

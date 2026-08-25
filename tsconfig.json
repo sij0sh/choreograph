@@ -6,8 +6,12 @@
     "moduleResolution": "nodenext",
     "target": "es2023",
     "skipLibCheck": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "allowImportingTsExtensions": true
   },
-  "include": ["index.ts", "manifest.ts", "runtime.ts", "state.ts", "plan.ts", "types.ts"]
+  "include": [
+    "src/**/*.ts"
+  ]
 }

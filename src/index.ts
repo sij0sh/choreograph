@@ -1,1 +1,19 @@
-// src/index.ts: scaffolded in M0.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { discoverWorkflows } from "./authoring/parser.ts";
+import { RuntimeCoordinator } from "./runtime/coordinator.ts";
+import { registerWorkflowCommands } from "./pi/commands.ts";
+import { registerLifecycleHandlers } from "./pi/events.ts";
+import { registerWorkflowTools } from "./pi/tools.ts";
+
+const AGENT_ROOT = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const WORKFLOWS_ROOT = join(AGENT_ROOT, "workflows");
+
+export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WORKFLOWS_ROOT): void {
+  const { workflows, diagnostics } = discoverWorkflows(workflowsRoot);
+  const runtime = new RuntimeCoordinator(pi, workflows);
+  registerWorkflowTools(pi, runtime, workflows);
+  registerWorkflowCommands(pi, runtime, workflows);
+  registerLifecycleHandlers(pi, runtime, diagnostics);
+}
