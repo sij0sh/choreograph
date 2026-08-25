@@ -1,7 +1,6 @@
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
 import type { Execution, Frame, NodeFrame, PlanExecution, SequenceFrame, TaskFrame } from "../domain/execution.ts";
-import { resolveRecovery } from "../domain/policy.ts";
 import { applyNeedsWork } from "./recovery.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { ChooseBlock, ForEachBlock, PlanBlock, RepeatBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";

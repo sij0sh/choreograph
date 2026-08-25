@@ -77,10 +77,10 @@ test("terminal snapshots parse as terminal", () => {
   assert.equal(legacy.status, "terminal");
 });
 
-test("legacy active snapshots report as legacy", () => {
-  const legacy = parseSnapshot({ v: 3, status: "active", workflow: "demo", runId: "r1", position: { kind: "step", stepId: "frame" }, target: "", delivered: false, memory: { steps: {} } });
-  assert.equal(legacy.status, "legacy");
-  assert.equal(legacy.workflow, "demo");
+test("pre-version-4 active snapshots report as invalid", () => {
+  const stale = parseSnapshot({ v: 3, status: "active", workflow: "demo", runId: "r1", position: { kind: "step", stepId: "frame" }, target: "", delivered: false, memory: { steps: {} } });
+  assert.equal(stale.status, "invalid");
+  assert.match(stale.error, /version must be 4/);
 });
 
 test("invalid snapshots never partially resume", () => {
@@ -123,10 +123,9 @@ test("latestSnapshot finds the newest custom entry on the branch", () => {
   assert.equal(latestSnapshot([{ type: "custom", customType: "other", data: {} }]), null);
 });
 
-test("latestSnapshot still reads snapshots persisted under the pre-rename type", () => {
+test("latestSnapshot ignores snapshots persisted under the pre-rename type", () => {
   const { state } = midLoopState();
   const snap = activeSnapshot({ workflow: "demo", execution: state, delivered: true });
   const parsed = latestSnapshot([{ type: "custom", customType: "pi-workflows", data: snap }]);
-  assert.equal(parsed.status, "active");
-  assert.equal(parsed.execution.runId, "run-1");
+  assert.equal(parsed, null);
 });

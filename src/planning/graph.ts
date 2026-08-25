@@ -31,10 +31,3 @@ export function invalidateResults(execution: PlanExecution, requested: readonly 
   return { execution: { ...execution, results }, removed: ordered };
 }
 
-export function completedNodes(execution: PlanExecution): readonly PlanNode[] {
-  return execution.plan.nodes.filter((node) => execution.results[node.id] !== undefined);
-}
-
-export function resultOf(execution: PlanExecution, nodeId: string): NodeResult | undefined {
-  return execution.results[nodeId];
-}

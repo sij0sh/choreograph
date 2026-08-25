@@ -19,10 +19,6 @@ export function parseReference(raw: string, label = "reference"): DataReference 
   return { root, path };
 }
 
-export function formatReference(reference: DataReference): string {
-  return `$${reference.root}${reference.path.length ? `.${reference.path.join(".")}` : ""}`;
-}
-
 function descend(value: JsonValue | undefined, path: readonly string[]): JsonValue | undefined {
   let current: JsonValue | undefined = value;
   for (const segment of path) {

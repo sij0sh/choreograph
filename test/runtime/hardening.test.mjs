@@ -126,6 +126,24 @@ test("delivery failure leaves the run pending and retries after settle", async (
   assert.ok(!after.isError, "the run continues after recovery");
 });
 
+test("malformed met entries are rejected without state change", async () => {
+  const h = harness();
+  const wf = workflow([task("frame", { done: ["scope-clear"] }), task("deliver")]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const ctx = h.ctx();
+  runtime.handleSessionStart(ctx);
+  await runtime.startWorkflow(ctx, wf, "");
+  await runtime.handleAgentSettled(ctx);
+  const badId = await runtime.transition({ status: "completed", met: ["NOT-VALID"], checkpoint: cp("framed") }, undefined, ctx);
+  assert.ok(badId.isError);
+  assert.match(badId.details.status, /invalid-transition/);
+  const dupes = await runtime.transition({ status: "completed", met: ["scope-clear", "scope-clear"], checkpoint: cp("framed") }, undefined, ctx);
+  assert.ok(dupes.isError);
+  assert.match(dupes.details.status, /invalid-transition/);
+  const fine = await runtime.transition({ status: "completed", met: ["scope-clear"], checkpoint: cp("framed") }, undefined, ctx);
+  assert.ok(!fine.isError);
+});
+
 test("model restore failure warns without blocking", async () => {
   const h = harness();
   const wf = workflow([task("frame")], { model: "anthropic/claude-haiku-4-5" });

@@ -1,8 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { ID_PATTERN } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator, ToolResult } from "../runtime/coordinator.ts";
-import { ABORT_TOOL_NAME, START_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/coordinator.ts";
+import { START_TOOL_NAME } from "../runtime/coordinator.ts";
+import { ABORT_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/capabilities.ts";
 
 const NO_PARAMETERS = { type: "object", properties: {}, additionalProperties: false } as const;
 
@@ -61,7 +63,12 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
           enum: ["completed", "needs-work", "blocked"],
           description: "The outcome of the current position.",
         }),
-        met: Type.Optional(Type.Array(Type.String(), { description: "Criterion ids claimed complete. A completion must list every required criterion." })),
+        met: Type.Optional(
+          Type.Array(Type.String({ pattern: ID_PATTERN.source, description: "A criterion id matching ^[a-z][a-z0-9-]*$." }), {
+            uniqueItems: true,
+            description: "Criterion ids claimed complete. A completion must list every required criterion.",
+          }),
+        ),
         checkpoint: Type.Object(
           {
             summary: Type.String({ description: "What was done and concluded at this position." }),
@@ -76,8 +83,8 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
           Type.Array(
             Type.Object(
               {
-                target: Type.String({ description: "The block, node, or task id the problem concerns." }),
-                reason: Type.String({ description: "Why the target needs work." }),
+                target: Type.String({ minLength: 1, description: "The block, node, or task id the problem concerns." }),
+                reason: Type.String({ minLength: 1, description: "Why the target needs work." }),
               },
               { additionalProperties: false },
             ),

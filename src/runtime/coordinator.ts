@@ -3,24 +3,22 @@ import { readFileSync } from "node:fs";
 import { start as engineStart, currentPosition, transition as engineTransition } from "../engine/interpreter.ts";
 import type { Execution } from "../domain/execution.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
-import { validateCheckpoint } from "../domain/checkpoint.ts";
-import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
+import { LIMITS } from "../domain/limits.ts";
 import type { Issue, TaskOutcome } from "../engine/interpreter.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { workflowBlocks } from "../domain/workflow.ts";
-import { latestSnapshot, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
+import { latestSnapshot, withinMemoryBound, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
 import { activeSnapshot, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
-import { withinMemoryBound } from "../persistence/codec.ts";
 import { validateAgainstWorkflow } from "../persistence/migrate.ts";
-import { effectiveTools, CONTROL_TOOLS, TRANSITION_TOOL_NAME, ABORT_TOOL_NAME } from "./capabilities.ts";
+import { effectiveTools, CONTROL_TOOLS } from "./capabilities.ts";
 import { desiredModel } from "./models.ts";
 import { controlMessage, readBlockFrom, renderPrompt, rosterPrompt, summaryMessage } from "./prompts.ts";
 import { statusValue } from "./status.ts";
 import { DeliveryCoordinator } from "./delivery.ts";
 
-export { TRANSITION_TOOL_NAME, ABORT_TOOL_NAME };
+
 export const START_TOOL_NAME = "workflow_start";
-export const RUN_TOOLS = CONTROL_TOOLS;
+
 
 export function newRunId(): string {
   const stamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
@@ -46,8 +44,6 @@ type UiContext = {
   setModel?: (model: unknown) => Promise<boolean>;
 };
 
-export interface ExtensionContextLike extends UiContext {}
-
 type ActiveState = {
   status: "active";
   workflow: Workflow;
@@ -57,50 +53,6 @@ type ActiveState = {
 };
 
 type RunState = { status: "idle" } | ActiveState;
-
-export interface TransitionRequest {
-  readonly status: "completed" | "needs-work" | "blocked";
-  readonly met: readonly string[];
-  readonly checkpoint: Checkpoint;
-  readonly issues?: readonly Issue[];
-}
-
-export function parseTransitionRequest(params: unknown): TransitionRequest {
-  if (typeof params !== "object" || params === null || Array.isArray(params)) throw new Error("transition must be an object");
-  const raw = params as Record<string, unknown>;
-  for (const key of Object.keys(raw)) {
-    if (!["status", "met", "checkpoint", "issues"].includes(key)) throw new Error(`unknown transition field: ${key}`);
-  }
-  if (raw.status !== "completed" && raw.status !== "needs-work" && raw.status !== "blocked") {
-    throw new Error("status must be completed, needs-work, or blocked");
-  }
-  if (raw.met !== undefined && !Array.isArray(raw.met)) throw new Error("met must be a list of criterion ids");
-  const met = (raw.met ?? []).map((value, index) => {
-    const id = typeof value === "string" ? value : "";
-    if (!ID_PATTERN.test(id)) throw new Error(`met[${index}] must match ^[a-z][a-z0-9-]*$`);
-    return id;
-  });
-  if (new Set(met).size !== met.length) throw new Error("met must not contain duplicates");
-  if (raw.checkpoint === undefined) throw new Error("checkpoint is required");
-  const checkpoint = validateCheckpoint(raw.checkpoint, "checkpoint");
-  let issues: Issue[] | undefined;
-  if (raw.issues !== undefined) {
-    if (!Array.isArray(raw.issues)) throw new Error("issues must be a list");
-    issues = raw.issues.map((value, index) => {
-      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`issues[${index}] must be an object`);
-      const issue = value as Record<string, unknown>;
-      for (const key of Object.keys(issue)) {
-        if (!["target", "reason"].includes(key)) throw new Error(`issues[${index}].${key} is not an accepted field`);
-      }
-      if (typeof issue.target !== "string" || !issue.target.trim()) throw new Error(`issues[${index}].target must be non-empty`);
-      if (typeof issue.reason !== "string" || !issue.reason.trim()) throw new Error(`issues[${index}].reason must be non-empty`);
-      return { target: issue.target, reason: issue.reason };
-    });
-  }
-  if (raw.status !== "completed" && raw.met !== undefined) throw new Error("met is only valid with status \"completed\"");
-  if (raw.status !== "needs-work" && raw.issues !== undefined) throw new Error("issues is only valid with status \"needs-work\"");
-  return { status: raw.status, met, checkpoint, ...(issues ? { issues } : {}) };
-}
 
 export class RuntimeCoordinator {
   readonly workflows: readonly Workflow[];
@@ -129,7 +81,7 @@ export class RuntimeCoordinator {
     });
   }
 
-  private notifyCtx: { current?: ExtensionContextLike } = {};
+  private notifyCtx: { current?: UiContext } = {};
 
   private commit(snapshot: unknown, operation: string): void {
     try {
@@ -144,7 +96,7 @@ export class RuntimeCoordinator {
     return activeSnapshot({ workflow: state.workflow.name, execution: state.execution, delivered, ...(state.restoreModel !== undefined ? { restoreModel: state.restoreModel } : {}) });
   }
 
-  private readonly isWorkflowTool = (name: string): boolean => [START_TOOL_NAME, ...RUN_TOOLS].includes(name);
+  private readonly isWorkflowTool = (name: string): boolean => [START_TOOL_NAME, ...CONTROL_TOOLS].includes(name);
   private readonly captureBaseline = (): string[] => this.pi.getActiveTools().filter((name) => !this.isWorkflowTool(name));
 
   private activeToolsFor(state: RunState): string[] {
@@ -159,7 +111,7 @@ export class RuntimeCoordinator {
     this.pi.setActiveTools(this.activeToolsFor(this.state));
   }
 
-  private showStatus(ctx: ExtensionContextLike): void {
+  private showStatus(ctx: UiContext): void {
     ctx.ui.setStatus("choreograph", this.state.status === "active" ? statusValue(this.state.workflow, this.state.execution) : undefined);
   }
 
@@ -168,7 +120,7 @@ export class RuntimeCoordinator {
     return this.state;
   }
 
-  private async applyModelFor(state: ActiveState, ctx: ExtensionContextLike): Promise<void> {
+  private async applyModelFor(state: ActiveState, ctx: UiContext): Promise<void> {
     const selector = desiredModel(state.workflow, state.execution);
     if (selector === undefined) return;
     const registry = ctx.modelRegistry;
@@ -194,7 +146,7 @@ export class RuntimeCoordinator {
     if (!applied) ctx.ui.notify(`Could not switch to model ${selector}; keeping the current model.`, "warning");
   }
 
-  private async restoreSessionModel(state: ActiveState, ctx: ExtensionContextLike): Promise<void> {
+  private async restoreSessionModel(state: ActiveState, ctx: UiContext): Promise<void> {
     if (state.restoreModel === undefined) return;
     const registry = ctx.modelRegistry;
     const setModel = ctx.setModel;
@@ -214,7 +166,7 @@ export class RuntimeCoordinator {
     if (!restored) ctx.ui.notify(`Could not restore session model ${state.restoreModel}; keeping the current model.`, "warning");
   }
 
-  private async deliverPending(ctx: ExtensionContextLike): Promise<void> {
+  private async deliverPending(ctx: UiContext): Promise<void> {
     if (this.state.status !== "active" || this.state.delivered) return;
     const pending = this.state;
     const leaf = pending.execution.stack[pending.execution.stack.length - 1];
@@ -228,13 +180,13 @@ export class RuntimeCoordinator {
     if (delivered && this.state === pending) this.state = { ...pending, delivered: true };
   }
 
-  private adoptActive(state: ActiveState, ctx: ExtensionContextLike): void {
+  private adoptActive(state: ActiveState, ctx: UiContext): void {
     this.state = state;
     this.setTools();
     this.showStatus(ctx);
   }
 
-  async startWorkflow(ctx: ExtensionContextLike, workflow: Workflow, target: string, signal?: AbortSignal): Promise<ActiveState | null> {
+  async startWorkflow(ctx: UiContext, workflow: Workflow, target: string, signal?: AbortSignal): Promise<ActiveState | null> {
     if (this.state.status === "active") {
       ctx.ui.notify(`${this.state.workflow.title} run ${this.state.execution.runId} is already active.`, "error");
       return null;
@@ -250,7 +202,7 @@ export class RuntimeCoordinator {
     return next;
   }
 
-  async transition(params: unknown, signal: AbortSignal | undefined, ctx: ExtensionContextLike): Promise<ToolResult> {
+  async transition(params: unknown, signal: AbortSignal | undefined, ctx: UiContext): Promise<ToolResult> {
     const current = this.requireActive();
     assertNotCancelled(signal);
     if (!current.delivered) {
@@ -260,22 +212,13 @@ export class RuntimeCoordinator {
         isError: true,
       };
     }
-    let request: TransitionRequest;
-    try {
-      request = parseTransitionRequest(params);
-    } catch (error) {
-      return {
-        content: [{ type: "text", text: `Invalid transition: ${error instanceof Error ? error.message : String(error)}.` }],
-        details: { workflow: current.workflow.name, runId: current.execution.runId, status: "invalid-request" },
-        isError: true,
-      };
-    }
-    const outcome: TaskOutcome =
-      request.status === "completed"
-        ? { status: "completed", ...(request.met.length ? { met: request.met } : {}), checkpoint: request.checkpoint }
-        : request.status === "needs-work"
-          ? { status: "needs-work", checkpoint: request.checkpoint, ...(request.issues ? { issues: request.issues } : {}) }
-          : { status: "blocked", checkpoint: request.checkpoint };
+    const raw = params as { status: "completed" | "needs-work" | "blocked"; met?: readonly string[]; checkpoint: Checkpoint; issues?: readonly Issue[] };
+    const outcome: TaskOutcome = {
+      status: raw.status,
+      ...(raw.met !== undefined ? { met: raw.met } : {}),
+      checkpoint: raw.checkpoint,
+      ...(raw.issues !== undefined ? { issues: [...raw.issues] } : {}),
+    };
     const result = engineTransition(current.workflow, current.execution, { type: "outcome", outcome });
     if (!result.ok) {
       return {
@@ -314,15 +257,15 @@ export class RuntimeCoordinator {
           type: "text",
           text:
             result.effect.kind === "stay"
-              ? `Recorded ${request.status}. The run stays at ${next.execution.stack.at(-1)?.key}; the checkpoint is saved.`
-              : `Recorded ${request.status}. Continue at ${next.execution.stack.at(-1)?.key}; instructions arrive in the next message.`,
+              ? `Recorded ${raw.status}. The run stays at ${next.execution.stack.at(-1)?.key}; the checkpoint is saved.`
+              : `Recorded ${raw.status}. Continue at ${next.execution.stack.at(-1)?.key}; instructions arrive in the next message.`,
         },
       ],
-      details: { workflow: next.workflow.name, runId: next.execution.runId, position: next.execution.stack.at(-1)?.key, status: request.status === "blocked" ? "blocked" : "active" },
+      details: { workflow: next.workflow.name, runId: next.execution.runId, position: next.execution.stack.at(-1)?.key, status: raw.status === "blocked" ? "blocked" : "active" },
     };
   }
 
-  private async finishRun(current: ActiveState, ctx: ExtensionContextLike, status: "completed" | "aborted"): Promise<ToolResult> {
+  private async finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted"): Promise<ToolResult> {
     try {
       this.commit(terminalSnapshot(status, current.workflow.name, current.execution.runId), `${status === "completed" ? "completion" : "abort"} of ${current.workflow.title} run ${current.execution.runId}`);
     } catch (error) {
@@ -356,22 +299,18 @@ export class RuntimeCoordinator {
     };
   }
 
-  async abort(signal: AbortSignal | undefined, ctx: ExtensionContextLike): Promise<ToolResult> {
+  async abort(signal: AbortSignal | undefined, ctx: UiContext): Promise<ToolResult> {
     const current = this.requireActive();
     assertNotCancelled(signal);
     return this.finishRun(current, ctx, "aborted");
   }
 
-  restoreRun(ctx: ExtensionContextLike): void {
+  restoreRun(ctx: UiContext): void {
     const branch = ctx.sessionManager?.getBranch() ?? [];
     const snapshot = latestSnapshot(branch);
     if (!snapshot) return;
     if (snapshot.status === "invalid") {
       ctx.ui.notify(`Dropped active workflow run: malformed snapshot (${snapshot.error}). Start the workflow again.`, "warning");
-      return;
-    }
-    if (snapshot.status === "legacy") {
-      ctx.ui.notify(`Dropped ${snapshot.workflow} run from a previous engine version. Start the workflow again.`, "warning");
       return;
     }
     if (snapshot.status !== "active") return;
@@ -397,7 +336,7 @@ export class RuntimeCoordinator {
     void this.applyModelFor(state, ctx);
   }
 
-  handleSessionStart(ctx: ExtensionContextLike): { unknownTools: string[]; unknownModels: string[] } {
+  handleSessionStart(ctx: UiContext): { unknownTools: string[]; unknownModels: string[] } {
     this.state = { status: "idle" };
     this.baselineTools = null;
     this.delivery.reset();
@@ -433,7 +372,7 @@ export class RuntimeCoordinator {
     return { unknownTools, unknownModels };
   }
 
-  async handleAgentSettled(ctx: ExtensionContextLike): Promise<void> {
+  async handleAgentSettled(ctx: UiContext): Promise<void> {
     this.notifyCtx.current = ctx;
     await this.deliverPending(ctx);
   }

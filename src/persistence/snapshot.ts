@@ -7,7 +7,6 @@ import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth } from "../domain/json.ts";
 
 export const SNAPSHOT_TYPE = "choreograph";
-export const LEGACY_SNAPSHOT_TYPES = ["pi-workflows"] as const;
 
 export type ActiveSnapshotV4 = {
   readonly v: 4;
@@ -28,7 +27,6 @@ export type ParsedSnapshot =
   | ActiveSnapshotV4
   | TerminalSnapshot
   | { readonly status: "terminal" }
-  | { readonly status: "legacy"; readonly workflow: string }
   | { readonly status: "invalid"; readonly error: string };
 
 function objectAt(value: unknown, label: string): Record<string, unknown> {
@@ -172,8 +170,7 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
   if (snapshot.status === "completed" || snapshot.status === "aborted") return { status: "terminal" };
   if (snapshot.status !== "active") return null;
   if (snapshot.v !== 4) {
-    if (typeof snapshot.workflow === "string") return { status: "legacy", workflow: snapshot.workflow };
-    return null;
+    return { status: "invalid", error: "snapshot version must be 4; snapshots from earlier engine versions are not resumable" };
   }
   try {
     const execution = executionAt(snapshot.execution, "snapshot.execution");

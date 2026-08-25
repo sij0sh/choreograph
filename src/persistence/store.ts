@@ -1,4 +1,6 @@
-import { LEGACY_SNAPSHOT_TYPES, SNAPSHOT_TYPE, parseSnapshot, type ParsedSnapshot } from "./snapshot.ts";
+import { canonicalJsonBytes, type JsonValue } from "../domain/json.ts";
+import { LIMITS } from "../domain/limits.ts";
+import { SNAPSHOT_TYPE, parseSnapshot, type ActiveSnapshotV4, type ParsedSnapshot } from "./snapshot.ts";
 
 export class WorkflowStorageError extends Error {
   constructor(operation: string, cause: unknown) {
@@ -11,19 +13,18 @@ export interface SnapshotStore {
   append(snapshot: unknown): void;
 }
 
-export function commitSnapshot(store: SnapshotStore, snapshot: unknown, operation: string): void {
-  try {
-    store.append(snapshot);
-  } catch (cause) {
-    throw new WorkflowStorageError(operation, cause);
-  }
+export function withinMemoryBound(snapshot: ActiveSnapshotV4): boolean {
+  const bytes = canonicalJsonBytes({
+    checkpoints: snapshot.execution.checkpoints,
+    plans: snapshot.execution.plans,
+  } as unknown as JsonValue);
+  return bytes <= LIMITS.memoryBytes;
 }
 
 export function latestSnapshot(branch: readonly unknown[]): ParsedSnapshot | null {
-  const readableTypes = new Set<string>([SNAPSHOT_TYPE, ...LEGACY_SNAPSHOT_TYPES]);
   for (let i = branch.length - 1; i >= 0; i -= 1) {
     const entry = branch[i] as { type?: unknown; customType?: unknown; data?: unknown };
-    if (entry.type === "custom" && typeof entry.customType === "string" && readableTypes.has(entry.customType)) return parseSnapshot(entry.data);
+    if (entry.type === "custom" && entry.customType === SNAPSHOT_TYPE) return parseSnapshot(entry.data);
   }
   return null;
 }
