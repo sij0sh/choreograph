@@ -3,6 +3,7 @@ import type { Checkpoint } from "../domain/checkpoint.ts";
 import type { Execution, ForEachFrame, RepeatFrame } from "../domain/execution.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
+import { blockOf } from "../domain/workflow.ts";
 import type { NodeResult } from "../planning/schema.ts";
 
 export type ReadBlock = (path: string, label: string) => string;
@@ -37,7 +38,7 @@ const TRANSITION_CONTRACT = [
   "Invalid transitions return errors without changing the run.",
 ].join("\n");
 
-function loopContext(state: Execution): string {
+function loopContext(workflow: Workflow, state: Execution): string {
   const lines: string[] = [];
   for (const frame of state.stack) {
     if (frame.kind === "foreach") {
@@ -46,7 +47,9 @@ function loopContext(state: Execution): string {
       lines.push(`Iteration ${of.index + 1}/${of.items.length}`, `${of.variable} = ${JSON.stringify(current ?? null)}`);
     } else if (frame.kind === "repeat") {
       const of: RepeatFrame = frame;
-      lines.push(`Attempt ${of.iteration + 1}`);
+      const block = blockOf(workflow, of.blockId);
+      const total = block?.kind === "repeat" ? `/${block.max}` : "";
+      lines.push(`Attempt ${of.iteration + 1}${total}`);
     }
   }
   return lines.length ? ["## Loop context", ...lines].join("\n") : "";
@@ -108,7 +111,7 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
       "",
       ...controls,
       "",
-      loopContext(state),
+      loopContext(workflow, state),
       "",
       "## Workflow overview",
       "",

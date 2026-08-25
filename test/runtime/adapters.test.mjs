@@ -96,6 +96,15 @@ test("the foreach prompt shows iteration context", () => {
   assert.match(prompt, /file = "a\.ts"/);
 });
 
+test("the repeat prompt shows attempt context", () => {
+  const wf = workflow([
+    { kind: "repeat", id: "refine", max: 3, body: sequence("body", [task("improve")]) },
+  ]);
+  const state = start(wf, { runId: "r1" }).state;
+  const prompt = renderPrompt(wf, state, reader({ "WORKFLOW.md": "# Overview", "steps/improve.md": "# Improve" }));
+  assert.match(prompt, /Attempt 1\/3/);
+});
+
 test("the plan-create prompt lists operator descriptions but never bodies", () => {
   const OPERATORS = new Map([
     ["inspect", { id: "inspect", path: "operators/inspect.md", description: "Inspect code." }],

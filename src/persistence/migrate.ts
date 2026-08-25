@@ -2,6 +2,7 @@ import type { Execution, Frame, PlanExecution } from "../domain/execution.ts";
 import { LIMITS } from "../domain/limits.ts";
 import type { Block, SequenceBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
+import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
 
 export type MigrationResult = { ok: true; execution: Execution } | { ok: false; error: string };
 
@@ -114,6 +115,12 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
       if (!workflow.operators.has(node.operator) || !allowed.has(node.operator)) {
         return `plan node ${node.id} uses operator ${node.operator}, which is not trusted by ${plan.blockId}`;
       }
+    }
+    const nodeIds = new Set(plan.plan.nodes.map((node) => node.id));
+    const retained = new Set(Object.keys(plan.results).filter((id) => !nodeIds.has(id)));
+    const validation = validateDynamicPlan(plan.plan, planInputFor(workflow, block.operators, retained));
+    if ("errors" in validation) {
+      return `invalid plan for ${key}: ${validation.errors.join("; ")}`;
     }
   }
   return undefined;

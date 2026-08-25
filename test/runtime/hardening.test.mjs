@@ -108,6 +108,22 @@ test("malformed dynamic plans never resume", async () => {
   assert.ok(!migrated.ok);
 });
 
+test("restored plans are re-validated with creation-time semantics", async () => {
+  const { wf, state } = await midPlanState();
+  const forged = structuredClone(state);
+  const plan = forged.plans["root/investigate"];
+  forged.plans["root/investigate"] = {
+    ...plan,
+    plan: { version: 1, nodes: [
+      { ...plan.plan.nodes[0] },
+      { ...plan.plan.nodes[1], dependsOn: ["ghost"] },
+    ] },
+  };
+  const migrated = validateAgainstWorkflow(wf, forged);
+  assert.ok(!migrated.ok);
+  assert.match(migrated.error, /ghost/);
+});
+
 test("delivery failure leaves the run pending and retries after settle", async () => {
   const h = harness({ failSend: new Error("queue closed") });
   const wf = workflow([task("frame"), task("deliver")]);
