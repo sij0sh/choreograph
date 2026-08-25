@@ -72,15 +72,31 @@ test("invariant: tasks describe failure while policy chooses recovery", () => {
   assert.equal(result.effect.kind, "stay", "a retry-free policy blocks immediately regardless of issues");
 });
 
-test.todo("invariant: a completed checkpoint is immutable unless invalidated (covered by recovery invalidation tests)");
-test.todo("invariant: model-generated work selects trusted operators only (needs plan blocks)");
-test.todo("invariant: model-generated work cannot widen capabilities (needs plan blocks)");
-test.todo("invariant: dependency references resolve (covered by planning validation tests)");
-test.todo("invariant: retained results survive replanning unless invalidated (covered by recovery tests)");
-test.todo("invariant: retry and replan budgets are finite (covered above and by recovery tests)");
-test.todo("invariant: runtime state changes only after a durable snapshot commit (needs the coordinator)");
-test.todo("invariant: restored snapshots pass semantic validation against the current workflow (needs persistence)");
-test.todo("invariant: invalid snapshots never partially resume (covered by persistence tests)");
-test.todo("invariant: tasks describe failure while policy chooses recovery (covered above)");
-test.todo("invariant: recovery never exceeds configured bounds (covered above and by recovery tests)");
-test.todo("invariant: blocking always leaves a resumable checkpoint (needs the coordinator)");
+
+test("invariant: model-generated work selects trusted operators only", () => {
+  const wf = workflow([
+    task("a"),
+    { kind: "plan", id: "p", operators: ["inspect", "trace"] },
+  ]);
+  let state = transition(wf, start(wf, { runId: "r1" }).state, { type: "outcome", outcome: completed(cp("a")) }).state;
+  const result = transition(wf, state, {
+    type: "outcome",
+    outcome: completed(cp("planned", { plan: { version: 1, nodes: [
+      { id: "n1", operator: "inspect", objective: "o" },
+      { id: "n2", operator: "shell", objective: "o", dependsOn: ["n1"] },
+    ] } })),
+  });
+  assert.ok(!result.ok, "an untrusted operator is rejected at plan validation");
+  assert.match(result.error, /operator/i);
+});
+
+test("invariant: blocking always leaves a resumable checkpoint", () => {
+  const wf = workflow([task("only", { recovery: { maxAttempts: 1, maxReplans: 0, strategy: ["block"] } })]);
+  let state = start(wf, { runId: "r1" }).state;
+  const blocked = transition(wf, state, { type: "outcome", outcome: { status: "needs-work", checkpoint: cp("stuck", { hint: "ask user" }) } });
+  assert.ok(blocked.ok);
+  assert.equal(blocked.effect.kind, "stay");
+  assert.equal(Object.keys(blocked.state.checkpoints).length, 1, "the blocked position keeps its checkpoint");
+  const resumed = transition(wf, blocked.state, { type: "outcome", outcome: completed(cp("unstuck")) });
+  assert.ok(resumed.ok, "the blocked position resumes by transition");
+});
