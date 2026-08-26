@@ -317,7 +317,7 @@ export function currentPosition(workflow: Workflow, state: Execution): PositionI
   if (leaf.kind === "plan") {
     const block = blockOf(workflow, leaf.blockId);
     if (block?.kind === "plan") {
-      return { type: "plan-create", key: leaf.key, attempt: 1, plan: block, execution: state.plans[leaf.key], stack: state.stack };
+      return { type: "plan-create", key: leaf.key, attempt: leaf.attempt, plan: block, execution: state.plans[leaf.key], stack: state.stack };
     }
     return undefined;
   }

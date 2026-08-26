@@ -26,7 +26,7 @@ export class DeliveryCoordinator {
 
   async deliver(target: DeliveryTarget): Promise<boolean> {
     if (this.sentDelivery?.runId !== target.runId || this.sentDelivery.key !== target.key) {
-      if (target.beforeSend) await target.beforeSend();
+      await target.beforeSend?.();
       if (!target.isLive()) return false;
       try {
         await this.deps.send(target.message);

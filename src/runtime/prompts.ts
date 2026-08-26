@@ -12,7 +12,11 @@ type ReadBlock = (path: string, label: string) => string;
 export function readBlockFrom(fs: { readFileSync(path: string, encoding: "utf8"): string }): ReadBlock {
   return (path: string, label: string): string => {
     try {
-      return fs.readFileSync(path, "utf8");
+      const content = fs.readFileSync(path, "utf8");
+      if (Buffer.byteLength(content, "utf8") > LIMITS.instructionFileBytes) {
+        return `${label} exceeds ${LIMITS.instructionFileBytes} bytes; restore or edit the file, or abort the run.`;
+      }
+      return content;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       return `${label} unavailable: ${detail}. Restore the file or abort the run.`;

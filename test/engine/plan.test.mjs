@@ -161,3 +161,14 @@ test("a plan up to the plan bound passes the checkpoint cap at plan creation", (
   assert.ok(!smuggled.ok, "a task position carries no exemption for data.plan");
   assert.match(smuggled.error, /exceeds 16384 bytes/);
 });
+
+test("plan-create positions report the frame attempt after recovery", () => {
+  const wf = planWorkflow();
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: { status: "completed", checkpoint: { summary: "framed" } } }).state;
+  assert.equal(currentPosition(wf, state).attempt, 1);
+  const retry = transition(wf, state, { type: "outcome", outcome: { status: "needs-work", checkpoint: { summary: "stuck" } } });
+  assert.ok(retry.ok);
+  assert.equal(retry.state.stack.at(-1).attempt, 2);
+  assert.equal(currentPosition(wf, retry.state).attempt, 2, "the position reports the frame's true attempt");
+});

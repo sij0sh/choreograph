@@ -220,3 +220,31 @@ test("transitions that exceed the memory bound are rejected without state change
   const prompt = runtime.handleBeforeAgentStart({ systemPrompt: "" });
   assert.ok(prompt, "the run stays active at the last valid position");
 });
+
+test("an abort while delivery is pending suppresses the continuation message", async () => {
+  const { DeliveryCoordinator } = await import("../../src/runtime/delivery.ts");
+  let live = true;
+  let releaseBeforeSend;
+  const beforeSendGate = new Promise((resolve) => { releaseBeforeSend = resolve; });
+  const sent = [];
+  const notices = [];
+  const coordinator = new DeliveryCoordinator({
+    send: async (message) => { sent.push(message); },
+    commitDelivered: () => {},
+    notify: (message, level) => notices.push({ message, level }),
+  });
+  const delivery = coordinator.deliver({
+    runId: "r1",
+    key: "root/second#attempt-1",
+    message: "Continue workflow `r1` at root/second.",
+    isLive: () => live,
+    beforeSend: async () => { await beforeSendGate; },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  live = false; // the run aborts while beforeSend is still pending
+  releaseBeforeSend();
+  const delivered = await delivery;
+  assert.equal(delivered, false);
+  assert.equal(sent.length, 0, "the send is never invoked once the run is no longer live");
+  assert.equal(coordinator.sentDelivery, null, "no delivery marker is recorded");
+});

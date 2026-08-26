@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { effectiveTools, CONTROL_TOOLS } from "../../src/runtime/capabilities.ts";
 import { statusValue } from "../../src/runtime/status.ts";
-import { renderPrompt, rosterPrompt } from "../../src/runtime/prompts.ts";
+import { readBlockFrom, renderPrompt, rosterPrompt } from "../../src/runtime/prompts.ts";
 import { completed, cp, sequence, task, workflow } from "../engine/helpers.mjs";
 import { start, transition } from "../../src/engine/interpreter.ts";
 
@@ -154,4 +154,19 @@ test("rule-led bodies render verbatim while real frontmatter still strips", () =
   const stripped = renderPrompt(wf, state, fmReader);
   assert.ok(!stripped.includes("description: fm"), "a real frontmatter mapping still strips");
   assert.ok(stripped.includes("# Body"));
+});
+
+test("runtime instruction reads enforce the authoring size cap", () => {
+  const grown = { "WORKFLOW.md": "# Overview", "steps/frame.md": "# " + "x".repeat(200_000) };
+  const grownRead = readBlockFrom({ readFileSync: (path) => grown[path] });
+  const wf = workflow([task("frame")]);
+  const state = start(wf, { runId: "r1" }).state;
+  const prompt = renderPrompt(wf, state, grownRead);
+  assert.ok(prompt.includes("exceeds 128000 bytes"), "an oversized body yields actionable guidance instead of its content");
+  assert.ok(!prompt.includes("xxx"), "the oversized content never renders");
+
+  const normal = { "WORKFLOW.md": "# Overview", "steps/frame.md": "# Fine" };
+  const normalRead = readBlockFrom({ readFileSync: (path) => normal[path] });
+  const okPrompt = renderPrompt(wf, state, normalRead);
+  assert.ok(okPrompt.includes("# Fine"), "in-bound bodies still render");
 });
