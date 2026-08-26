@@ -1,13 +1,22 @@
 import { parseDocument } from "yaml";
 import { currentPosition } from "../engine/interpreter.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
-import type { Execution } from "../domain/execution.ts";
-import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
+import type { Execution, PlanExecution } from "../domain/execution.ts";
+import { canonicalJson, canonicalJsonBytes } from "../domain/json.ts";
+import { ID_PATTERN, LIMITS } from "../domain/limits.ts"
 import type { Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { lastSegment } from "../domain/keys.ts";
+import { inputSection } from "./prompts-inputs.ts";
 
 type ReadBlock = (path: string, label: string) => string;
+
+function clip(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  let clipped = value;
+  while (Buffer.byteLength(clipped, "utf8") > maxBytes - 3) clipped = clipped.slice(0, Math.max(0, clipped.length - 16));
+  return `${clipped}...`;
+}
 
 export function readBlockFrom(fs: { readFileSync(path: string, encoding: "utf8"): string }): ReadBlock {
   return (path: string, label: string): string => {
@@ -49,6 +58,7 @@ const TRANSITION_CONTRACT = [
   "- `status`: `completed` when the criteria are met, `needs-work` when the output has problems, or `blocked` when you cannot proceed.",
   "- `met`: the required criterion IDs below that are complete. Only valid with `status: \"completed\"`; a completion must list every required criterion.",
   "- `checkpoint`: an object with a required `summary` and optional `evidence`, `decisions`, `unknowns`, and `data` fields.",
+  "- `checkpoint.data` must satisfy the current position's declared output contract when one exists.",
   "- `issues`: problems found, each `{ target, reason }`. Only valid with `status: \"needs-work\"`; recovery policy decides what happens next.",
   "Invalid transitions return errors without changing the run.",
 ].join("\n");
@@ -74,6 +84,24 @@ function operatorRoster(workflow: Workflow, allowed: readonly string[]): string 
   return ["## Operator registry", ...lines].join("\n");
 }
 
+function outputContractSection(workflow: Workflow, contractId: string | undefined): string {
+  if (contractId === undefined) return "";
+  const contract = workflow.contracts?.get(contractId);
+  if (!contract) return ["## Output contract", `Contract \`${contractId}\` is unavailable.`, "The transition will be rejected until the workflow declares this contract."].join("\n");
+  const schema = contract.schema === undefined ? "Schema is unavailable in this workflow descriptor." : canonicalJson(contract.schema);
+  const bounded = contract.schema === undefined || canonicalJsonBytes(contract.schema) <= LIMITS.positionInputsBytes
+    ? schema
+    : `Schema omitted because it exceeds ${LIMITS.positionInputsBytes} bytes; contract source: ${contract.path}`;
+  return [
+    "## Output contract",
+    `Contract: \`${contractId}\``,
+    "Set `checkpoint.data` to a JSON value that satisfies this schema.",
+    "```json",
+    bounded,
+    "```",
+  ].join("\n");
+}
+
 const PLAN_SCHEMA_SECTION = [
   "## Plan schema",
   "On completion, `checkpoint.data.plan` must be a JSON object:",
@@ -84,10 +112,17 @@ const PLAN_SCHEMA_SECTION = [
   `- Unknown keys and plans above ${LIMITS.planBytes / 1024} KiB are rejected.`,
 ].join("\n");
 
-function retainedResults(execution: { plan: { nodes: readonly { id: string; operator: string }[] }; results: Readonly<Record<string, Checkpoint>> }): string {
-  const lines = execution.plan.nodes
-    .filter((node) => execution.results[node.id])
-    .map((node) => `- \`${node.id}\` [${node.operator}]: ${execution.results[node.id].summary}`);
+function retainedResults(workflow: Workflow, execution: PlanExecution): string {
+  const lines: string[] = [];
+  for (const node of execution.plan.nodes) {
+    if (!Object.hasOwn(execution.results, node.id)) continue;
+    lines.push(`- \`${node.id}\` [${node.operator}]: ${execution.results[node.id].summary}`);
+  }
+  for (const id of Object.keys(execution.results).filter((resultId) => !execution.plan.nodes.some((node) => node.id === resultId)).sort()) {
+    const operator = execution.resultOperators?.[id];
+    const suffix = operator ? ` [${operator}]` : "";
+    lines.push(`- \`${id}\`${suffix} (retained from an earlier revision): ${execution.results[id].summary}`);
+  }
   return lines.length ? ["## Retained completed results", ...lines].join("\n") : "";
 }
 
@@ -114,10 +149,12 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
       "## Workflow overview",
       "",
       readBody(read, workflow.overviewPath, "Workflow overview"),
-      priorCheckpoints(workflow, state, position.key),
+      inputSection(workflow, state, position.task!.inputs),
+      position.task!.inputs ? "" : priorCheckpoints(workflow, state, position.key),
       "## Current task instructions",
       "",
       readBody(read, position.task!.instructionPath, "Task instructions"),
+      outputContractSection(workflow, position.task!.output),
       criteriaList(position.task!.done),
       TRANSITION_CONTRACT,
     ]
@@ -133,11 +170,15 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
       "## Task: create a bounded plan",
       "",
       `Compose a plan of ${position.plan!.operators.length === 1 ? "2 to 8" : "2 to 8"} nodes using only the trusted operators below.`,
+      "## Workflow overview",
+      "",
+      readBody(read, workflow.overviewPath, "Workflow overview"),
+      inputSection(workflow, state, position.plan!.inputs),
       operatorRoster(workflow, position.plan!.operators),
       PLAN_SCHEMA_SECTION,
     ];
     if (position.execution) {
-      sections.push(retainedResults(position.execution));
+      sections.push(retainedResults(workflow, position.execution));
       sections.push(`Plan revision ${position.execution.revision}; ${position.execution.replans} replans used.`);
     }
     sections.push(TRANSITION_CONTRACT);
@@ -146,12 +187,35 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
   const node = position.node!;
   const operator = workflow.operators.get(node.operator)!;
   const execution = position.execution!;
-  const dependencies = (node.dependsOn ?? [])
-    .map((dependency) => execution.results[dependency])
-    .filter((result): result is Checkpoint => Boolean(result))
-    .map((result, index) => `- \`${(node.dependsOn ?? [])[index]}\`: ${result.summary}`);
+  const dependencyEntries = (node.dependsOn ?? [])
+    .filter((dependency) => Object.hasOwn(execution.results, dependency))
+    .map((dependency) => ({ dependency, result: execution.results[dependency] }))
+    .map((entry) => {
+      const producer = execution.plan.nodes.find((candidate) => candidate.id === entry.dependency);
+      const operatorId = producer?.operator ?? execution.resultOperators?.[entry.dependency];
+      const producerOperator = operatorId ? workflow.operators?.get(operatorId) : undefined;
+      if (!producerOperator?.output) return { ...entry, operator: undefined, value: undefined };
+      const value = entry.result.data === undefined ? {} : entry.result.data;
+      return { ...entry, operator: producerOperator, value };
+    });
+  const dataEntries = dependencyEntries.filter((entry): entry is typeof entry & { operator: NonNullable<typeof entry.operator>; value: NonNullable<typeof entry.value> } => Boolean(entry.operator && entry.value !== undefined));
+  const dependencyLine = (entry: (typeof dependencyEntries)[number], omitted = false): string => {
+    const summary = clip(entry.result.summary, 1_024);
+    if (!entry.operator || entry.value === undefined) return `- \`${clip(entry.dependency, 256)}\`: ${summary}`;
+    const data = omitted
+      ? `Input omitted because the dependency data exceeds the shared ${LIMITS.positionInputsBytes}-byte budget. ${entry.value !== null && typeof entry.value === "object" && !Array.isArray(entry.value) ? `Top-level keys: ${clip(Object.keys(entry.value).join(", ") || "(none)", 512)}.` : "Use a narrower dependency or revise the plan."}`
+      : canonicalJson(entry.value);
+    return `- \`${clip(entry.dependency, 256)}\` [${entry.operator.id}, contract \`${entry.operator.output}\`]: ${summary}\n\`\`\`json\n${data}\n\`\`\``;
+  };
+  let renderedDependencies = dependencyEntries.map((entry) => dependencyLine(entry));
+  const renderedDependencyBytes = (): number => Buffer.byteLength(["## Dependency results", ...renderedDependencies].join("\n"), "utf8");
+  for (const entry of [...dataEntries].sort((left, right) => Buffer.byteLength(dependencyLine(right), "utf8") - Buffer.byteLength(dependencyLine(left), "utf8") || left.dependency.localeCompare(right.dependency))) {
+    if (renderedDependencyBytes() <= LIMITS.positionInputsBytes) break;
+    renderedDependencies = renderedDependencies.map((line, index) => (dependencyEntries[index].dependency === entry.dependency ? dependencyLine(entry, true) : line));
+  }
+  const dependencies = renderedDependencies;
   const unknowns = execution.plan.nodes
-    .map((entry) => execution.results[entry.id]?.unknowns ?? [])
+    .map((entry) => (Object.hasOwn(execution.results, entry.id) ? execution.results[entry.id].unknowns ?? [] : []))
     .flat()
     .slice(0, LIMITS.planNodeListItems);
   const nodeIndex = execution.plan.nodes.findIndex((entry) => entry.id === node.id);
@@ -164,6 +228,7 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
     `## Operator: ${operator.id}`,
     "",
     readBody(read, operator.path, "Operator instructions"),
+    outputContractSection(workflow, operator.output),
     dependencies.length ? ["## Dependency results", ...dependencies].join("\n") : "",
     unknowns.length ? ["## Open unknowns", ...unknowns.map((item) => `- ${item}`)].join("\n") : "",
     "## Node objective",
