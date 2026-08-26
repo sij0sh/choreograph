@@ -4,9 +4,8 @@ import type { RuntimeCoordinator } from "../runtime/coordinator.ts";
 
 export function registerLifecycleHandlers(pi: ExtensionAPI, runtime: RuntimeCoordinator, diagnostics: readonly WorkflowDiagnostic[]): void {
   pi.on("session_start", (_event, ctx: ExtensionContext) => {
-    const { unknownTools, unknownModels } = runtime.handleSessionStart(ctx);
+    const { unknownTools } = runtime.handleSessionStart(ctx);
     if (unknownTools.length) ctx.ui.notify(`workflow tools name unknown tools (no effect during runs): ${unknownTools.join(", ")}`, "warning");
-    if (unknownModels.length) ctx.ui.notify(`configured models are unavailable on this machine: ${unknownModels.join(", ")}`, "warning");
     if (diagnostics.length) {
       const summary = diagnostics.map((item) => `${item.path}: ${item.error}`).join("; ");
       ctx.ui.notify(`Skipped invalid workflow metadata: ${summary}`, "warning");

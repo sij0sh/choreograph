@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { effectiveTools, CONTROL_TOOLS } from "../../src/runtime/capabilities.ts";
-import { desiredModel } from "../../src/runtime/models.ts";
 import { statusValue } from "../../src/runtime/status.ts";
 import { renderPrompt, rosterPrompt } from "../../src/runtime/prompts.ts";
 import { completed, cp, sequence, task, workflow } from "../engine/helpers.mjs";
@@ -45,16 +44,6 @@ test("operator ceilings narrow node positions", () => {
   assert.deepEqual(toolsFor(wf, state), ["read", ...CONTROL_TOOLS], "the inspect operator narrows to read");
   state = transition(wf, state, { type: "outcome", outcome: { status: "completed", met: ["a-done"], checkpoint: cp("a") } }).state;
   assert.deepEqual(toolsFor(wf, state), ["read", "bash", "edit", ...CONTROL_TOOLS], "the trace operator has no ceiling");
-});
-
-test("model selection prefers the task override over the workflow default", () => {
-  const wf = workflow([task("a", { model: "anthropic/claude-haiku-4-5" }), task("b")], { model: "anthropic/claude-opus-4-5" });
-  let state = start(wf, { runId: "r1" }).state;
-  assert.equal(desiredModel(wf, state), "anthropic/claude-haiku-4-5");
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("a")) }).state;
-  assert.equal(desiredModel(wf, state), "anthropic/claude-opus-4-5");
-  const bare = workflow([task("a")]);
-  assert.equal(desiredModel(bare, start(bare, { runId: "r" }).state), undefined);
 });
 
 test("status renders the workflow name and position path", () => {

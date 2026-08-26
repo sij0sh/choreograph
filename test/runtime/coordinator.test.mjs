@@ -277,44 +277,6 @@ test("resume drops invalid snapshots with one warning", () => {
   assert.equal(runtime.handleBeforeAgentStart({ systemPrompt: "base" }), undefined, "no run prompt while idle");
 });
 
-test("model lifecycle switches per position and restores on completion", async () => {
-  const h = harness();
-  const wf = workflow(
-    [task("frame", { done: ["framed"], model: "anthropic/claude-haiku-4-5" }), task("deliver")],
-    { model: "anthropic/claude-opus-4-5" },
-  );
-  const applied = [];
-  h.ctx.models.set("anthropic/claude-haiku-4-5", { id: "haiku" });
-  h.ctx.models.set("anthropic/claude-opus-4-5", { id: "opus" });
-  h.ctx.model = { provider: "openai", id: "gpt" };
-  h.ctx.models.set("openai/gpt", { id: "gpt" });
-  h.ctx.setModel = async (model) => {
-    applied.push(model.id);
-    return true;
-  };
-  const runtime = coordinator(h, [wf]);
-  runtime.handleSessionStart(h.ctx);
-  await runtime.startWorkflow(h.ctx, wf, "");
-  await runtime.handleAgentSettled(h.ctx);
-  assert.deepEqual(applied, ["haiku"], "the task override applies before delivery");
-  await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
-  await runtime.handleAgentSettled(h.ctx);
-  assert.deepEqual(applied, ["haiku", "opus"], "the workflow default applies at the next position");
-  await runtime.transition({ status: "completed", checkpoint: cp("done") }, undefined, h.ctx);
-  assert.deepEqual(applied, ["haiku", "opus", "gpt"], "the session model is restored at completion");
-});
-
-test("unknown models warn without blocking", async () => {
-  const h = harness();
-  const wf = simpleWorkflow({ model: "anthropic/claude-ghost-9" });
-  const runtime = coordinator(h, [wf]);
-  const warnings = runtime.handleSessionStart(h.ctx);
-  assert.deepEqual(warnings.unknownModels, [`demo: anthropic/claude-ghost-9`]);
-  await runtime.startWorkflow(h.ctx, wf, "");
-  await runtime.handleAgentSettled(h.ctx);
-  assert.ok(h.ctx.ui.notices.some((notice) => /unavailable/.test(notice.message)));
-});
-
 test("run ids are unique and timestamped", () => {
   const first = newRunId();
   const second = newRunId();

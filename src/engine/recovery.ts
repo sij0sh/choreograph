@@ -89,6 +89,8 @@ function tryInvalidate(workflow: Workflow, state: Execution, outcome: Outcome, p
       checkpointsRemoved = true;
     }
   }
+  const checkpointOrder = state.checkpointOrder.filter((key) => checkpoints[key] !== undefined);
+  const withoutInvalid: Execution = { ...state, checkpoints, checkpointOrder };
   if (matched) {
     const plans = {
       ...state.plans,
@@ -96,14 +98,14 @@ function tryInvalidate(workflow: Workflow, state: Execution, outcome: Outcome, p
     };
     const rewound = rewindToChild(workflow, state.stack, matched.execution.blockId);
     if (!rewound) return undefined;
-    return resume(workflow, { ...state, plans, checkpoints }, rewound);
+    return resume(workflow, { ...withoutInvalid, plans }, rewound);
   }
   if (checkpointsRemoved) {
     for (const target of targets) {
       const block = blockOf(workflow, target);
       if (!block) continue;
       const rewound = rewindToChild(workflow, state.stack, block.id);
-      if (rewound) return resume(workflow, { ...state, checkpoints }, rewound);
+      if (rewound) return resume(workflow, withoutInvalid, rewound);
     }
   }
   return undefined;
@@ -176,5 +178,7 @@ export function applyNeedsWork(workflow: Workflow, state: Execution, outcome: Ou
 }
 
 function stayWithCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): EngineResult {
-  return { ok: true, state: { ...state, checkpoints: { ...state.checkpoints, [key]: checkpoint } }, effect: { kind: "stay" } as Effect };
+  const checkpoints = { ...state.checkpoints, [key]: checkpoint };
+  const checkpointOrder = state.checkpointOrder.includes(key) ? state.checkpointOrder : [...state.checkpointOrder, key];
+  return { ok: true, state: { ...state, checkpoints, checkpointOrder }, effect: { kind: "stay" } as Effect };
 }

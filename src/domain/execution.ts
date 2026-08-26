@@ -53,5 +53,6 @@ export interface Execution {
   readonly status: ExecutionStatus;
   readonly stack: readonly Frame[];
   readonly checkpoints: Readonly<Record<string, Checkpoint>>;
+  readonly checkpointOrder: readonly string[];
   readonly plans: Readonly<Record<string, PlanExecution>>;
 }

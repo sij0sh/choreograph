@@ -5,7 +5,6 @@ export interface TaskBlock {
   readonly id: string;
   readonly instructionPath: string;
   readonly tools?: readonly string[];
-  readonly model?: string;
   readonly done?: readonly string[];
   readonly recovery?: RecoveryPolicy;
 }
@@ -39,7 +38,6 @@ export interface Workflow {
   readonly overviewPath: string;
   readonly piVisibility: boolean;
   readonly tools?: readonly string[];
-  readonly model?: string;
   readonly root: SequenceBlock;
   readonly operators: ReadonlyMap<string, OperatorDescriptor>;
 }

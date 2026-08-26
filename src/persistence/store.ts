@@ -16,6 +16,7 @@ export interface SnapshotStore {
 export function withinMemoryBound(snapshot: ActiveSnapshotV4): boolean {
   const bytes = canonicalJsonBytes({
     checkpoints: snapshot.execution.checkpoints,
+    checkpointOrder: snapshot.execution.checkpointOrder,
     plans: snapshot.execution.plans,
   } as unknown as JsonValue);
   return bytes <= LIMITS.memoryBytes;

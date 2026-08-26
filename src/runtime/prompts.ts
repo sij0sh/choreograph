@@ -40,9 +40,10 @@ const TRANSITION_CONTRACT = [
 ].join("\n");
 
 function priorCheckpoints(workflow: Workflow, state: Execution, beforeKey: string): string {
-  const entries = Object.entries(state.checkpoints).filter(([key]) => key < beforeKey && !key.startsWith(beforeKey));
-  if (entries.length === 0) return "";
-  const lines = entries.slice(-8).map(([key, checkpoint]: [string, Checkpoint]) => `- \`${lastSegment(key)}\`: ${checkpoint.summary}`);
+  const order = state.checkpointOrder ?? Object.keys(state.checkpoints);
+  const prior = order.filter((key) => key !== beforeKey && !key.startsWith(`${beforeKey}/`));
+  if (prior.length === 0) return "";
+  const lines = prior.slice(-8).map((key) => `- \`${lastSegment(key)}\`: ${state.checkpoints[key].summary}`);
   return lines.length ? ["## Prior checkpoints", ...lines].join("\n") : "";
 }
 

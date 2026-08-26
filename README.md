@@ -30,7 +30,6 @@ The workflow name equals its directory name and must match `^[a-z][a-z0-9-]*$`. 
 description: What it does and when to use it.
 piVisibility: true              # Optional; exposes the workflow to the model
 tools: [read, bash]             # Optional; workflow tool ceiling
-model: anthropic/claude-haiku-4-5   # Optional; workflow default model
 steps:
   - steps/01-frame.md           # String steps are legacy shorthand for run:
   - run: steps/02-observe.md    # A task
@@ -56,13 +55,12 @@ steps:
 | `steps` | Yes | Non-empty list of blocks. String entries are legacy shorthand for task `run:` entries. |
 | `piVisibility` | No | Exposes the workflow through the roster and the `workflow_start` enum. Defaults to `false`. |
 | `tools` | No | Workflow tool ceiling. `legalTools` stays accepted as a legacy alias. |
-| `model` | No | Workflow default `provider/model-id` applied while the run is active. |
 
 ### Block kinds
 
 | Kind | Keys | Effect |
 |---|---|---|
-| Task | `run`, `id?`, `tools?`, `model?`, `done?`, `repair?` | Runs one markdown instruction file to completion. |
+| Task | `run`, `id?`, `tools?`, `done?`, `repair?` | Runs one markdown instruction file to completion. |
 | `plan` | `operators`, `repair?` | The model composes a bounded plan from trusted operators; the engine runs it one node per turn. |
 
 Every block needs a unique `id` across the workflow; task ids may derive from their file stem. Workflows are static sequences and plans: loop (`for_each`), iterate (`repeat`), branch (`choose`), predicate (`until`), and data-reference (`$task.field`, `$current`) authoring were removed in v0.2 and now fail as unknown keys.
@@ -147,10 +145,6 @@ Active tools are the intersection of the captured Pi baseline, the workflow ceil
 
 Every transition appends a durable snapshot before the in-memory state moves, and the delivery marker commits only after the follow-up is accepted. Active snapshots are version 4 and carry the full frame stack, checkpoints, and plan executions; restore revalidates them semantically against the current workflow. Snapshots from earlier engine versions drop with one actionable warning. Terminal snapshots stay minimal.
 
-### Model selection
-
-Optional `model` selectors at workflow or task scope run different models at different positions while the session default stays untouched outside the run. The pre-run session model is captured once and restored at completion or abort. Unresolvable selectors and failed switches warn without blocking.
-
 ## Architecture
 
 ```text
@@ -160,7 +154,7 @@ src/
   engine/      Pure stack interpreter and policy-driven recovery
   planning/    Dynamic plan schema, validation, graph helpers
   persistence/ v4 snapshot codec, semantic restore, session store
-  runtime/     Capabilities, models, prompts, status, delivery, coordinator
+  runtime/     Capabilities, prompts, status, delivery, coordinator
   pi/          Tool, command, and lifecycle registration
 ```
 

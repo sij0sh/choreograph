@@ -27,7 +27,7 @@ function dataAt(value: unknown, label: string): JsonValue | undefined {
   return value as JsonValue;
 }
 
-export function validateCheckpoint(value: unknown, label: string): Checkpoint {
+export function validateCheckpoint(value: unknown, label: string, exemptsPlan = false): Checkpoint {
   const raw = objectAt(value, label);
   for (const key of Object.keys(raw)) {
     if (!["summary", "evidence", "decisions", "unknowns", "data"].includes(key)) throw new Error(`${label}.${key} is not an accepted checkpoint field`);
@@ -43,6 +43,15 @@ export function validateCheckpoint(value: unknown, label: string): Checkpoint {
   if (decisions) checkpoint.decisions = decisions;
   if (unknowns) checkpoint.unknowns = unknowns;
   if (data !== undefined) checkpoint.data = data;
-  if (canonicalJsonBytes(checkpoint as unknown as JsonValue) > LIMITS.checkpointBytes) throw new Error(`${label} exceeds ${LIMITS.checkpointBytes} bytes`);
+  const measured = exemptsPlan && data !== undefined && (data as { plan?: unknown })?.plan !== undefined
+    ? (Object.keys(data as object).length === 1
+      ? { summary: checkpoint.summary } as typeof checkpoint
+      : (() => {
+          const rest: Record<string, unknown> = { ...(data as Record<string, unknown>) };
+          delete rest.plan;
+          return { ...checkpoint, data: rest as import("./json.ts").JsonValue };
+        })())
+    : checkpoint;
+  if (canonicalJsonBytes(measured as unknown as JsonValue) > LIMITS.checkpointBytes) throw new Error(`${label} exceeds ${LIMITS.checkpointBytes} bytes`);
   return checkpoint;
 }

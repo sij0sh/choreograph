@@ -57,7 +57,6 @@ test("plan blocks compile with shared fields and unique ids", () => {
 description: Structural run.
 piVisibility: true
 legalTools: [read, bash]
-model: anthropic/claude-haiku-4-5
 steps:
   - id: frame
     run: steps/frame.md

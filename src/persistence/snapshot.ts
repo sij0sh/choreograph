@@ -1,10 +1,11 @@
 import type { Execution, Frame } from "../domain/execution.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
-import { LIMITS, MODEL_SELECTOR_PATTERN, PLAN_CREATE_ATTEMPT_MAX } from "../domain/limits.ts";
+import { LIMITS, PLAN_CREATE_ATTEMPT_MAX } from "../domain/limits.ts";
 import type { PlanExecution } from "../domain/execution.ts";
 import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.ts";
+import { validateNodeResult } from "../planning/schema.ts";
 
 export const SNAPSHOT_TYPE = "choreograph";
 
@@ -14,7 +15,6 @@ export type ActiveSnapshotV4 = {
   readonly workflow: string;
   readonly execution: Execution;
   readonly delivered: boolean;
-  readonly restoreModel?: string;
 };
 
 type TerminalSnapshot =
@@ -96,7 +96,13 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
     if ((plan as { version?: unknown }).version !== 1) throw new Error(`${label}.${key}.plan.version must be 1`);
     const nodes = (plan as { nodes?: unknown }).nodes;
     if (!Array.isArray(nodes)) throw new Error(`${label}.${key}.plan.nodes must be a list`);
-    const results = objectAt(planRaw.results, `${label}.${key}.results`);
+    const resultsRaw = objectAt(planRaw.results, `${label}.${key}.results`);
+    const results: Record<string, PlanExecution["results"][string]> = {};
+    for (const [id, value] of Object.entries(resultsRaw)) {
+      const result = validateNodeResult(value, `${label}.${key}.results.${id}`);
+      if (result.id !== id) throw new Error(`${label}.${key}.results.${id} must carry the result id "${id}"`);
+      results[id] = result;
+    }
     plans[key] = {
       blockId,
       revision,
@@ -104,7 +110,7 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
       invalidations,
       ...(planRaw.awaitingPlan === true ? { awaitingPlan: true } : {}),
       plan: { version: 1, nodes: nodes as PlanExecution["plan"]["nodes"] },
-      results: results as PlanExecution["results"],
+      results,
     };
   }
   return plans;
@@ -113,7 +119,7 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
 function executionAt(value: unknown, label: string): Execution {
   const raw = objectAt(value, label);
   for (const field of Object.keys(raw)) {
-    if (!["workflowName", "runId", "target", "status", "stack", "checkpoints", "plans"].includes(field)) {
+    if (!["workflowName", "runId", "target", "status", "stack", "checkpoints", "checkpointOrder", "plans"].includes(field)) {
       throw new Error(`${label}.${field} is not an accepted execution field`);
     }
   }
@@ -124,14 +130,27 @@ function executionAt(value: unknown, label: string): Execution {
   const leafKind = leaf.kind;
   const structural = leafKind === "sequence" || (leafKind === "plan" && leaf.mode === "execute");
   if (structural) throw new Error(`${label}.stack must end at a leaf frame (task, node, or plan creation)`);
+  const checkpoints = checkpointsAt(raw.checkpoints ?? {}, `${label}.checkpoints`);
+  const plans = plansAt(raw.plans ?? {}, `${label}.plans`);
+  const orderRaw = raw.checkpointOrder === undefined ? Object.keys(checkpoints) : raw.checkpointOrder;
+  if (!Array.isArray(orderRaw) || orderRaw.some((key) => typeof key !== "string")) throw new Error(`${label}.checkpointOrder must be a list of checkpoint keys`);
+  if (new Set(orderRaw).size !== orderRaw.length) throw new Error(`${label}.checkpointOrder must not contain duplicates`);
+  const known = new Set(Object.keys(checkpoints));
+  for (const key of orderRaw) {
+    if (!known.has(key)) throw new Error(`${label}.checkpointOrder entry "${key}" has no checkpoint`);
+  }
+  for (const key of Object.keys(checkpoints)) {
+    if (!orderRaw.includes(key)) throw new Error(`${label}.checkpoints entry "${key}" is missing from checkpointOrder`);
+  }
   return {
     workflowName: requireString(raw.workflowName, `${label}.workflowName`),
     runId: requireString(raw.runId, `${label}.runId`),
-    target: typeof raw.target === "string" ? raw.target : "",
+    target: typeof raw.target === "string" && Buffer.byteLength(raw.target, "utf8") <= LIMITS.targetBytes ? raw.target : "",
     status: "active",
     stack,
-    checkpoints: checkpointsAt(raw.checkpoints ?? {}, `${label}.checkpoints`),
-    plans: plansAt(raw.plans ?? {}, `${label}.plans`),
+    checkpoints,
+    checkpointOrder: orderRaw,
+    plans,
   };
 }
 
@@ -147,18 +166,12 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
     const execution = executionAt(snapshot.execution, "snapshot.execution");
     if (execution.workflowName !== snapshot.workflow) throw new Error("snapshot.workflow does not match snapshot.execution.workflowName");
     if (typeof snapshot.delivered !== "boolean") throw new Error("snapshot.delivered must be a boolean");
-    let restoreModel: string | undefined;
-    if (snapshot.restoreModel !== undefined) {
-      restoreModel = requireString(snapshot.restoreModel, "snapshot.restoreModel");
-      if (!MODEL_SELECTOR_PATTERN.test(restoreModel)) throw new Error("snapshot.restoreModel must be a provider/model-id selector");
-    }
     return {
       v: 4,
       status: "active",
       workflow: execution.workflowName,
       execution,
       delivered: snapshot.delivered as boolean,
-      ...(restoreModel !== undefined ? { restoreModel } : {}),
     };
   } catch (error) {
     return { status: "invalid", error: error instanceof Error ? error.message : String(error) };
@@ -169,7 +182,6 @@ export function activeSnapshot(fields: {
   workflow: string;
   execution: Execution;
   delivered: boolean;
-  restoreModel?: string;
 }): ActiveSnapshotV4 {
   return {
     v: 4,
@@ -177,7 +189,6 @@ export function activeSnapshot(fields: {
     workflow: fields.workflow,
     execution: fields.execution,
     delivered: fields.delivered,
-    ...(fields.restoreModel !== undefined ? { restoreModel: fields.restoreModel } : {}),
   };
 }
 

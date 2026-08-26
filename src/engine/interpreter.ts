@@ -150,7 +150,7 @@ function checkCriteria(criteria: readonly string[], met: readonly string[]): str
   return undefined;
 }
 
-function validateOutcome(outcome: TaskOutcome): string | undefined {
+function validateOutcome(outcome: TaskOutcome, planCreate: boolean): string | undefined {
   const raw = outcome as { met?: unknown; issues?: unknown };
   if (outcome.status !== "completed" && raw.met !== undefined) return "met is only valid with status \"completed\"";
   if (outcome.status !== "needs-work" && raw.issues !== undefined) return "issues is only valid with status \"needs-work\"";
@@ -169,7 +169,7 @@ function validateOutcome(outcome: TaskOutcome): string | undefined {
     }
   }
   try {
-    validateCheckpoint(outcome.checkpoint, "checkpoint");
+    validateCheckpoint(outcome.checkpoint, "checkpoint", planCreate);
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
@@ -178,6 +178,12 @@ function validateOutcome(outcome: TaskOutcome): string | undefined {
 
 function commitCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): Execution["checkpoints"] {
   return { ...state.checkpoints, [key]: checkpoint };
+}
+
+function withCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): Execution {
+  const checkpoints = commitCheckpoint(state, key, checkpoint);
+  const checkpointOrder = state.checkpointOrder.includes(key) ? state.checkpointOrder : [...state.checkpointOrder, key];
+  return { ...state, checkpoints, checkpointOrder };
 }
 
 function planKeyOfNode(node: NodeFrame): string {
@@ -244,13 +250,18 @@ function completeNode(workflow: Workflow, state: Execution, leaf: NodeFrame, out
 
 export function start(workflow: Workflow, input: StartInput): EngineResult {
   if (workflow.root.children.length === 0) return fail("workflow has no steps");
+  if (Buffer.byteLength(input.target ?? "", "utf8") > LIMITS.targetBytes) {
+    return fail(`target exceeds ${LIMITS.targetBytes} bytes; narrow it and start again`);
+  }
+  const target = (input.target ?? "").trim();
   const base: Execution = {
     workflowName: workflow.name,
     runId: input.runId,
-    target: input.target ?? "",
+    target,
     status: "active",
     stack: [],
     checkpoints: {},
+    checkpointOrder: [],
     plans: {},
   };
   const entered: Execution = { ...base, stack: [{ kind: "sequence", blockId: workflow.root.id, key: workflow.root.id, index: 0 }] };
@@ -266,13 +277,13 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
     return { ok: true, state: { ...state, status: "aborted" }, effect: { kind: "aborted" } };
   }
   const outcome = event.outcome;
-  const invalid = validateOutcome(outcome);
-  if (invalid) return fail(invalid);
   const leaf = state.stack[state.stack.length - 1];
+  const invalid = validateOutcome(outcome, leaf?.kind === "plan" && leaf.mode === "create");
+  if (invalid) return fail(invalid);
   if (!leaf || !isLeafFrame(leaf)) return fail("execution has no current leaf task");
   switch (outcome.status) {
     case "blocked": {
-      return { ok: true, state: { ...state, checkpoints: commitCheckpoint(state, leaf.key, outcome.checkpoint) }, effect: { kind: "stay" } };
+      return { ok: true, state: withCheckpoint(state, leaf.key, outcome.checkpoint), effect: { kind: "stay" } };
     }
     case "needs-work":
       return applyNeedsWork(workflow, state, outcome);
@@ -284,8 +295,8 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
       if (!block || block.kind !== "task") return fail(`frame ${leaf.key} does not name a task`);
       const criteriaError = checkCriteria(block.done ?? [], outcome.met ?? []);
       if (criteriaError) return fail(criteriaError);
-      const checkpoints = commitCheckpoint(state, leaf.key, outcome.checkpoint);
-      const popped: Execution = { ...state, stack: state.stack.slice(0, -1), checkpoints };
+      const committed = withCheckpoint(state, leaf.key, outcome.checkpoint);
+      const popped: Execution = { ...committed, stack: state.stack.slice(0, -1) };
       return finishAdvance(workflow, popped, popped.stack);
     }
   }

@@ -22,7 +22,6 @@ import {
   MAX_WORKFLOW_BYTES,
   NAME_PATTERN,
   parseIdList,
-  parseModelSelector,
   parseRecovery,
   parseToolList,
   positiveIntAt,
@@ -182,7 +181,6 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     id,
     instructionPath: path,
     ...(entry.tools !== undefined ? { tools: parseToolList(entry.tools, `${label}.tools`)! } : {}),
-    ...(entry.model !== undefined ? { model: parseModelSelector(entry.model, `${label}.model`)! } : {}),
     ...(entry.done !== undefined ? { done: parseIdList(entry.done, `${label}.done`)! } : {}),
     ...(entry.repair !== undefined ? { recovery: parseRecovery(entry.repair, `${label}.repair`)! } : {}),
   } satisfies TaskBlock;
@@ -228,7 +226,6 @@ export function loadWorkflowManifest(directory: string): Workflow {
     root: { kind: "sequence", id: "root", children },
     operators,
     ...(tools ? { tools } : {}),
-    ...(data.model !== undefined ? { model: parseModelSelector(data.model, "model")! } : {}),
   };
 }
 

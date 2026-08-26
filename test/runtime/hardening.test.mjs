@@ -160,25 +160,6 @@ test("malformed met entries are rejected without state change", async () => {
   assert.ok(!fine.isError);
 });
 
-test("model restore failure warns without blocking", async () => {
-  const h = harness();
-  const wf = workflow([task("frame")], { model: "anthropic/claude-haiku-4-5" });
-  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
-  const context = h.ctx();
-  context.models.set("anthropic/claude-haiku-4-5", { id: "haiku" });
-  context.model = { provider: "gone", id: "old" };
-  context.models.set("gone/old", { id: "old" });
-  context.modelRegistry = { find: (provider, id) => context.models.get(`${provider}/${id}`) };
-  context.setModel = async () => true;
-  runtime.handleSessionStart(context);
-  await runtime.startWorkflow(context, wf, "");
-  await runtime.handleAgentSettled(context);
-  context.models.delete("gone/old");
-  await runtime.transition({ status: "completed", checkpoint: cp("done") }, undefined, context);
-  assert.ok(context.notices.some((notice) => /Cannot restore session model/.test(notice.message)));
-  assert.equal(runtime.handleBeforeAgentStart({ systemPrompt: "x" }), undefined, "the run still completes");
-});
-
 test("storage failure on abort keeps the run active", async () => {
   const h = harness();
   const wf = workflow([task("frame")]);

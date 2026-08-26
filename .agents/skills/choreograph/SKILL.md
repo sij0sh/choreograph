@@ -46,7 +46,6 @@ my-workflow/
 description: What it does and when to use it.
 piVisibility: true              # Optional; exposes the workflow to the model
 tools: [read, bash]             # Optional; workflow tool ceiling
-model: anthropic/claude-haiku-4-5   # Optional; workflow default model
 steps:
   - steps/01-frame.md           # String steps are legacy shorthand
   - run: steps/02-observe.md    # Task

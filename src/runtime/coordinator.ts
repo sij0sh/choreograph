@@ -11,7 +11,6 @@ import { latestSnapshot, withinMemoryBound, WorkflowStorageError, type SnapshotS
 import { activeSnapshot, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../persistence/migrate.ts";
 import { effectiveTools, CONTROL_TOOLS } from "./capabilities.ts";
-import { desiredModel } from "./models.ts";
 import { controlMessage, readBlockFrom, renderPrompt, rosterPrompt, summaryMessage } from "./prompts.ts";
 import { statusValue } from "./status.ts";
 import { DeliveryCoordinator } from "./delivery.ts";
@@ -39,9 +38,6 @@ export interface ToolResult {
 type UiContext = {
   ui: { setStatus(id: string, value: string | undefined): void; notify(message: string, level: "info" | "error" | "warning"): void };
   sessionManager?: { getBranch(): unknown[] };
-  model?: { provider?: string; id?: string };
-  modelRegistry?: { find(provider: string, modelId: string): unknown };
-  setModel?: (model: unknown) => Promise<boolean>;
 };
 
 type ActiveState = {
@@ -49,7 +45,6 @@ type ActiveState = {
   workflow: Workflow;
   execution: Execution;
   delivered: boolean;
-  restoreModel?: string;
 };
 
 type RunState = { status: "idle" } | ActiveState;
@@ -99,7 +94,7 @@ export class RuntimeCoordinator {
 
   private snapshotOf(state: ActiveState | undefined, delivered: boolean): unknown {
     if (!state) return terminalSnapshot("aborted", "", "");
-    return activeSnapshot({ workflow: state.workflow.name, execution: state.execution, delivered, ...(state.restoreModel !== undefined ? { restoreModel: state.restoreModel } : {}) });
+    return activeSnapshot({ workflow: state.workflow.name, execution: state.execution, delivered });
   }
 
   private readonly isWorkflowTool = (name: string): boolean => [START_TOOL_NAME, ...CONTROL_TOOLS].includes(name);
@@ -127,52 +122,6 @@ export class RuntimeCoordinator {
     return this.state;
   }
 
-  private async applyModelFor(state: ActiveState, ctx: UiContext): Promise<void> {
-    const selector = desiredModel(state.workflow, state.execution);
-    if (selector === undefined) return;
-    const registry = ctx.modelRegistry;
-    if (!registry || typeof registry.find !== "function") return;
-    const [provider, modelId] = selector.split("/");
-    const model = registry.find(provider, modelId);
-    if (!model) {
-      ctx.ui.notify(`Configured model ${selector} is unavailable; keeping the current model.`, "warning");
-      return;
-    }
-    if (state.restoreModel === undefined) {
-      const current = ctx.model;
-      if (current?.provider && current?.id) state.restoreModel = `${current.provider}/${current.id}`;
-    }
-    const setModel = ctx.setModel;
-    if (!setModel) return;
-    let applied = false;
-    try {
-      applied = await setModel(model);
-    } catch {
-      applied = false;
-    }
-    if (!applied) ctx.ui.notify(`Could not switch to model ${selector}; keeping the current model.`, "warning");
-  }
-
-  private async restoreSessionModel(state: ActiveState, ctx: UiContext): Promise<void> {
-    if (state.restoreModel === undefined) return;
-    const registry = ctx.modelRegistry;
-    const setModel = ctx.setModel;
-    if (!registry || typeof registry.find !== "function" || !setModel) return;
-    const [provider, modelId] = state.restoreModel.split("/");
-    const model = registry.find(provider, modelId);
-    if (!model) {
-      ctx.ui.notify(`Cannot restore session model ${state.restoreModel}; keeping the current model.`, "warning");
-      return;
-    }
-    let restored = false;
-    try {
-      restored = await setModel(model);
-    } catch {
-      restored = false;
-    }
-    if (!restored) ctx.ui.notify(`Could not restore session model ${state.restoreModel}; keeping the current model.`, "warning");
-  }
-
   private async deliverPending(ctx: UiContext): Promise<void> {
     if (this.state.status !== "active" || this.state.delivered) return;
     const pending = this.state;
@@ -182,7 +131,6 @@ export class RuntimeCoordinator {
       key: leaf ? `${leaf.key}#attempt-${"attempt" in leaf ? leaf.attempt : 1}` : "start",
       message: controlMessage(pending.execution),
       isLive: () => this.state === pending,
-      beforeSend: () => this.applyModelFor(pending, ctx),
     });
     if (delivered && this.state === pending) this.state = { ...pending, delivered: true };
   }
@@ -238,7 +186,7 @@ export class RuntimeCoordinator {
       return this.finishRun(current, ctx, "completed");
     }
     const next: ActiveState = { ...current, execution: result.state, delivered: result.effect.kind === "stay" };
-    const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: next.delivered, ...(next.restoreModel !== undefined ? { restoreModel: next.restoreModel } : {}) });
+    const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: next.delivered });
     if (!withinMemoryBound(pendingSnapshot)) {
       return {
         content: [{ type: "text", text: `The run's persisted state would exceed ${LIMITS.memoryBytes / 1024} KiB; the transition was rejected. Abort the run or narrow the checkpoint data.` }],
@@ -286,7 +234,6 @@ export class RuntimeCoordinator {
     this.state = { status: "idle" };
     this.setTools();
     this.showStatus(ctx);
-    await this.restoreSessionModel(current, ctx);
     if (status === "completed") {
       try {
         await this.pi.sendUserMessage(summaryMessage(current.workflow, current.execution), { deliverAs: "followUp" });
@@ -336,14 +283,12 @@ export class RuntimeCoordinator {
       workflow,
       execution: migrated.execution,
       delivered: snapshot.delivered,
-      ...(snapshot.restoreModel !== undefined ? { restoreModel: snapshot.restoreModel } : {}),
     };
     this.adoptActive(state, ctx);
     ctx.ui.notify(`Resumed ${workflow.title} run \`${state.execution.runId}\` at ${state.execution.stack.at(-1)?.key}.`, "info");
-    void this.applyModelFor(state, ctx);
   }
 
-  handleSessionStart(ctx: UiContext): { unknownTools: string[]; unknownModels: string[] } {
+  handleSessionStart(ctx: UiContext): { unknownTools: string[] } {
     this.state = { status: "idle" };
     this.baselineTools = null;
     this.delivery.reset();
@@ -362,21 +307,10 @@ export class RuntimeCoordinator {
         if (!available.has(tool)) unknownTools.push(`${workflow.name}: ${tool}`);
       }
     }
-    const registry = ctx.modelRegistry;
-    const unknownModels: string[] = [];
-    if (registry && typeof registry.find === "function") {
-      for (const workflow of this.workflows) {
-        const selectors = new Set([workflow.model, ...blocksWithModels(workflow)].filter((selector): selector is string => Boolean(selector)));
-        for (const selector of selectors) {
-          const [provider, modelId] = selector.split("/");
-          if (!registry.find(provider, modelId)) unknownModels.push(`${workflow.name}: ${selector}`);
-        }
-      }
-    }
     this.setTools();
     this.restoreRun(ctx);
     this.showStatus(ctx);
-    return { unknownTools, unknownModels };
+    return { unknownTools };
   }
 
   async handleAgentSettled(ctx: UiContext): Promise<void> {
@@ -400,8 +334,3 @@ function blocksWithTools(workflow: Workflow): readonly (readonly string[])[] {
     .map((block) => (block as { tools: readonly string[] }).tools ?? []);
 }
 
-function blocksWithModels(workflow: Workflow): readonly string[] {
-  return workflowBlocks(workflow)
-    .filter((block) => block.kind === "task" && block.model)
-    .map((block) => (block as { model?: string }).model ?? "");
-}

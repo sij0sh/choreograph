@@ -185,3 +185,56 @@ test("latestSnapshot ignores snapshots persisted under the pre-rename type", () 
   const parsed = latestSnapshot([{ type: "custom", customType: "pi-workflows", data: snap }]);
   assert.equal(parsed, null);
 });
+
+test("persisted plan results are validated entry by entry", () => {
+  const wf = workflow([task("frame"), { kind: "plan", id: "investigate", operators: [] }]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed")) }).state;
+  const withResults = structuredClone(state);
+  withResults.plans = {
+    "root/investigate": {
+      blockId: "investigate",
+      revision: 1,
+      replans: 0,
+      invalidations: 0,
+      plan: { version: 1, nodes: [{ id: "node-a", operator: "inspect", objective: "o", done: ["a-done"] }] },
+      results: { "node-a": 42 },
+    },
+  };
+  const garbage = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: withResults, delivered: true }))));
+  assert.equal(garbage.status, "invalid");
+  assert.match(garbage.error, /results\.node-a/);
+
+  const validResults = structuredClone(withResults);
+  validResults.plans["root/investigate"].results = { "node-a": { id: "node-a", summary: "done" } };
+  const valid = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: validResults, delivered: true }))));
+  assert.equal(valid.status, "active");
+
+  const mismatched = structuredClone(withResults);
+  mismatched.plans["root/investigate"].results = { "node-a": { id: "node-b", summary: "wrong key" } };
+  const mismatch = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: mismatched, delivered: true }))));
+  assert.equal(mismatch.status, "invalid");
+  assert.match(mismatch.error, /result id/);
+});
+
+test("checkpointOrder round-trips and legacy snapshots infer insertion order", () => {
+  const wf = workflow([task("zeta"), task("alpha"), task("omega")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("ZETA-SUMMARY")) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("ALPHA-SUMMARY")) }).state;
+  assert.deepEqual(state.checkpointOrder, ["root/zeta", "root/alpha"], "order records write order, not spelling");
+
+  const snapshot = JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: true })));
+  const withOrder = parseSnapshot(snapshot);
+  assert.deepEqual(withOrder.execution.checkpointOrder, ["root/zeta", "root/alpha"]);
+
+  delete snapshot.execution.checkpointOrder;
+  const legacy = parseSnapshot(snapshot);
+  assert.equal(legacy.status, "active");
+  assert.deepEqual(legacy.execution.checkpointOrder, ["root/zeta", "root/alpha"], "legacy v4 snapshots infer JSON insertion order");
+
+  snapshot.execution.checkpointOrder = ["root/alpha", "root/ghost"];
+  const dangling = parseSnapshot(snapshot);
+  assert.equal(dangling.status, "invalid");
+  assert.match(dangling.error, /checkpointOrder/);
+});
