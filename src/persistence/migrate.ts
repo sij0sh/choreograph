@@ -83,6 +83,7 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
       .flatMap(([planKey, plan]) => plan.plan.nodes.map((node) => ({ planKey, node })))
       .find(({ planKey, node }) => `${planKey}/${node.id}` === key);
     if (!block && !nodeEntry) return `checkpoint key ${key} does not belong to any block in the current workflow`;
+    if (checkpoint.skipped === true) continue;
     if (block?.kind === "task") {
       const problem = contractProblem(workflow, block.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
       if (problem) return problem;

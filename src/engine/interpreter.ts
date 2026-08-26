@@ -5,6 +5,7 @@ import { applyNeedsWork } from "./recovery.ts";
 import { contractError as contractErrorFor } from "../domain/contract.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import { planKeyOf } from "../domain/keys.ts";
+import { evaluateGuard, skipReason, type GuardClause } from "../domain/guard.ts";
 import type { PlanBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { canonicalJson, canonicalJsonBytes, type JsonValue } from "../domain/json.ts";
@@ -90,10 +91,30 @@ function pushBlock(workflow: Workflow, state: Execution, stack: Frame[], parentK
   }
 }
 
-type AdvanceResult = { ok: true; stack: readonly Frame[] } | { ok: false; error: string };
+type AdvanceResult = { ok: true; state: Execution } | { ok: false; error: string };
+
+function clipSummary(value: string): string {
+  const max = LIMITS.checkpointSummaryBytes - 64;
+  if (Buffer.byteLength(value, "utf8") <= max) return value;
+  let clipped = value;
+  while (Buffer.byteLength(clipped, "utf8") > max - 3) clipped = clipped.slice(0, Math.max(0, clipped.length - 16));
+  return `${clipped}...`;
+}
+
+function skipBlock(state: Execution, parentKey: string, guard: GuardClause, blockId: string, isPlan: boolean): Execution {
+  const key = childKey(parentKey, blockId);
+  const withCp = withCheckpoint(state, key, { summary: clipSummary(skipReason(guard)), skipped: true });
+  if (!isPlan) return withCp;
+  const plans = { ...withCp.plans };
+  for (const [planKey, execution] of Object.entries(plans)) {
+    if (execution.blockId === blockId) delete plans[planKey];
+  }
+  return { ...withCp, plans };
+}
 
 export function advance(workflow: Workflow, state: Execution): AdvanceResult {
   const stack = [...state.stack];
+  let working: Execution = state;
   let steps = 0;
   while (stack.length > 0) {
     if (++steps > LIMITS.advanceSteps) return { ok: false, error: "execution advance exceeded its step bound" };
@@ -110,13 +131,22 @@ export function advance(workflow: Workflow, state: Execution): AdvanceResult {
         }
         const advanced: SequenceFrame = { ...top, index: top.index + 1 };
         stack[topIndex] = advanced;
-        const pushed = pushBlock(workflow, state, stack, advanced.key, child.id);
+        if ((child.kind === "task" || child.kind === "plan") && child.guard) {
+          const view: Execution = { ...working, stack };
+          const guard = evaluateGuard(workflow, view, child.guard);
+          if (!guard.ok) return { ok: false, error: `guard for ${child.id} could not resolve: ${guard.error}` };
+          if (!guard.holds) {
+            working = skipBlock(working, advanced.key, child.guard, child.id, child.kind === "plan");
+            continue;
+          }
+        }
+        const pushed = pushBlock(workflow, { ...working, stack }, stack, advanced.key, child.id);
         if ("error" in pushed) return { ok: false, error: pushed.error };
-        if (pushed.leaf) return { ok: true, stack };
+        if (pushed.leaf) return { ok: true, state: { ...working, stack } };
         continue;
       }
       case "plan": {
-        if (top.mode === "create") return { ok: true, stack };
+        if (top.mode === "create") return { ok: true, state: { ...working, stack } };
         const execution = state.plans[top.key];
         if (!execution || execution.blockId !== top.blockId) return { ok: false, error: `plan frame ${top.key} has no execution` };
         const node = firstIncompleteNode(execution);
@@ -125,16 +155,16 @@ export function advance(workflow: Workflow, state: Execution): AdvanceResult {
           continue;
         }
         stack.push({ kind: "node", blockId: top.blockId, key: `${top.key}/${node.id}`, nodeId: node.id, attempt: 1 });
-        return { ok: true, stack };
+        return { ok: true, state: { ...working, stack } };
       }
       case "task":
       case "node":
-        return { ok: true, stack };
+        return { ok: true, state: { ...working, stack } };
       default:
         return { ok: false, error: `frame kind "${(top as Frame).kind}" is not supported yet` };
     }
   }
-  return { ok: true, stack };
+  return { ok: true, state: { ...working, stack } };
 }
 
 function checkCriteria(criteria: readonly string[], met: readonly string[]): string | undefined {
@@ -204,10 +234,10 @@ function outputContractFor(workflow: Workflow, state: Execution, leaf: Frame): s
 function finishAdvance(workflow: Workflow, state: Execution, stack: readonly Frame[]): EngineResult {
   const advanced = advance(workflow, { ...state, stack });
   if (!advanced.ok) return fail(advanced.error);
-  if (advanced.stack.length === 0) {
-    return { ok: true, state: { ...state, stack: [], status: "completed" }, effect: { kind: "complete" } };
+  if (advanced.state.stack.length === 0) {
+    return { ok: true, state: { ...advanced.state, stack: [], status: "completed" }, effect: { kind: "complete" } };
   }
-  return { ok: true, state: { ...state, stack: advanced.stack }, effect: { kind: "deliver" } };
+  return { ok: true, state: advanced.state, effect: { kind: "deliver" } };
 }
 
 function resultOperatorsFor(previous: PlanExecution | undefined): { readonly operators: Record<string, string>; readonly error?: string } {
@@ -342,8 +372,8 @@ export function start(workflow: Workflow, input: StartInput): EngineResult {
   const entered: Execution = { ...base, stack: [{ kind: "sequence", blockId: workflow.root.id, key: workflow.root.id, index: 0 }] };
   const advanced = advance(workflow, entered);
   if (!advanced.ok) return fail(advanced.error);
-  if (advanced.stack.length === 0) return fail("workflow has no runnable steps");
-  return { ok: true, state: { ...entered, stack: advanced.stack }, effect: { kind: "deliver" } };
+  if (advanced.state.stack.length === 0) return fail("workflow has no runnable steps");
+  return { ok: true, state: advanced.state, effect: { kind: "deliver" } };
 }
 
 export function transition(workflow: Workflow, state: Execution, event: WorkflowEvent): EngineResult {

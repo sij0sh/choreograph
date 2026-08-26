@@ -69,8 +69,8 @@ function rewindToChild(workflow: Workflow, stack: readonly Frame[], blockId: str
 function resume(workflow: Workflow, state: Execution, stack: readonly Frame[]): EngineResult | undefined {
   const advanced = advance(workflow, { ...state, stack });
   if (!advanced.ok) return undefined;
-  if (advanced.stack.length === 0) return fail("recovery rewound past every runnable block");
-  return deliver({ ...state, stack: advanced.stack });
+  if (advanced.state.stack.length === 0) return fail("recovery rewound past every runnable block");
+  return deliver(advanced.state);
 }
 
 function blockOrder(workflow: Workflow): ReadonlyMap<string, number> {
