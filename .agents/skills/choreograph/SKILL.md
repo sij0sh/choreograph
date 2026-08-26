@@ -1,11 +1,11 @@
 ---
 name: choreograph
-description: Set up and maintain choreograph definitions for the pi coding agent. Use when creating or editing a workflow directory, writing WORKFLOW.md frontmatter, authoring step, operator, loop, branch, or plan markdown files, or diagnosing workflow discovery and validation errors.
+description: Set up and maintain choreograph definitions for the pi coding agent. Use when creating or editing a workflow directory, writing WORKFLOW.md frontmatter, authoring step, operator, or plan markdown files, or diagnosing workflow discovery and validation errors.
 ---
 
 # choreograph
 
-choreograph is a pi coding-agent extension that runs hierarchical workflows from markdown definitions. A workflow resembles a skill, but its structure is explicit, ordered, and typed. The engine lives in this repository. Workflow definitions live outside it, under the agent data directory.
+choreograph is a pi coding-agent extension that runs ordered workflows from markdown definitions. A workflow resembles a skill, but its structure is explicit, ordered, and typed. The engine lives in this repository. Workflow definitions live outside it, under the agent data directory.
 
 Use this skill to create, edit, and validate workflow definitions. Do not use it to modify the engine itself; engine internals are documented in the repository README.md.
 
@@ -71,7 +71,7 @@ steps:
 - Use exactly one of `run` or `plan` per step entry. Loop, branch, predicate, and data-reference authoring were removed in v0.2; they fail as unknown keys.
 - `plan` blocks need operator files for every listed operator id.
 - `repair.strategy` may list any of `retry`, `invalidate`, `replan`, `block` in order.
-- The old `kind: planner/executor` and `on:` route keys are rejected with migration errors. Use `plan:` blocks and `repair:` policy.
+- The old `kind: planner/executor` and `on:` route keys are rejected as unknown keys. Use `plan:` blocks and `repair:` policy.
 
 ### Operators
 

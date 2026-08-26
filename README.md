@@ -1,8 +1,8 @@
 # choreograph
 
-A [pi](https://github.com/earendil-works/pi-coding-agent) coding-agent extension that runs hierarchical workflows from markdown definitions.
+A [pi](https://github.com/earendil-works/pi-coding-agent) coding-agent extension that runs ordered workflows from markdown definitions.
 
-A workflow resembles a skill with one difference: its structure is explicit, ordered, and typed. Workflows compose six block kinds, execute resumably one position at a time, and keep recovery policy-driven.
+A workflow resembles a skill with one difference: its structure is explicit, ordered, and typed. Workflows compose task and plan blocks, execute resumably one position at a time, and keep recovery policy-driven.
 
 ## Workflow definitions
 
@@ -13,13 +13,15 @@ Definitions are agent data. They live under `$PI_CODING_AGENT_DIR/workflows` (de
 ```
 my-workflow/
 ├── WORKFLOW.md          # Frontmatter + overview
-├── steps/
+├── steps/               # Recommended; any contained .md path works
 │   ├── 01-frame.md      # Markdown task instructions
 │   └── ...
-└── operators/           # Optional; trusted operator registry
+└── operators/           # Optional; trusted operator registry (enforced name)
     ├── inspect.md
     └── trace.md
 ```
+
+Path rules: `steps/` is a convention, not a parser rule; task files may live anywhere inside the workflow directory. `operators/` is enforced and non-recursive; the compiler scans only direct `operators/*.md` children and validates every discovered operator, including unused ones. Frontmatter in task files is stripped at prompt time and otherwise ignored.
 
 ### Frontmatter
 
@@ -65,7 +67,7 @@ steps:
 
 Every block needs a unique `id` across the workflow; task ids may derive from their file stem. Workflows are static sequences and plans: loop (`for_each`), iterate (`repeat`), branch (`choose`), predicate (`until`), and data-reference (`$task.field`, `$current`) authoring were removed in v0.2 and now fail as unknown keys.
 
-Task outputs reach later positions through the rendered prior checkpoints and `checkpoint.data`; no reference language exists.
+Task outputs reach later positions through rendered prior checkpoint summaries; no reference language exists. Arbitrary `checkpoint.data` is persisted but reserved for engine use such as plan payloads.
 
 ### Recovery
 
@@ -125,7 +127,7 @@ Hard limits: 2 node attempts, 2 replans, 2 invalidations per plan, 8 nodes, 4 Ki
 }
 ```
 
-or, WHEN the position has problems:
+WHEN the position has problems, it concludes with:
 
 ```json
 {
