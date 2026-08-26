@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ContextEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowDiagnostic } from "../authoring/parser.ts";
 import type { RuntimeCoordinator } from "../runtime/coordinator.ts";
 
@@ -17,4 +17,6 @@ export function registerLifecycleHandlers(pi: ExtensionAPI, runtime: RuntimeCoor
   });
 
   pi.on("before_agent_start", (event: { systemPrompt: string }) => runtime.handleBeforeAgentStart(event));
+
+  pi.on("context", (event: ContextEvent) => runtime.handleContext(event));
 }

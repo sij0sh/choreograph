@@ -76,13 +76,47 @@ test("starting a run swaps in run tools and persists an active snapshot", async 
   assert.equal(h.sent.length, 1, "the follow-up is sent");
 });
 
-test("reload uses all registered tools instead of the narrowed active set", () => {
-  const h = harness({ allTools: ["read", "bash", "edit", "write"] });
+test("session start keeps the narrowed active set and offers workflow_start", () => {
+  const h = harness({ baseline: ["read", "bash"], allTools: ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"] });
   const wf = simpleWorkflow({ piVisibility: true, tools: ["read", "bash", "edit", "write"] });
   const runtime = coordinator(h, [wf]);
   const warnings = runtime.handleSessionStart(h.ctx);
   assert.deepEqual(warnings.unknownTools, []);
-  assert.deepEqual([...h.activeTools], ["read", "bash", "edit", "write", "workflow_start"]);
+  assert.deepEqual([...h.activeTools], ["read", "bash", "workflow_start"]);
+});
+
+test("reload of an active run restores the persisted baseline tools", async () => {
+  const h = harness({ baseline: ["read", "bash", "edit", "write"] });
+  const wf = simpleWorkflow({ tools: ["read", "bash", "edit", "write"] });
+  const runtime = coordinator(h, [wf]);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  await runtime.handleAgentSettled(h.ctx);
+  assert.deepEqual([...h.activeTools], ["read", "bash", "edit", "write", "workflow_transition", "workflow_abort"]);
+
+  const narrowed = harness({ baseline: ["read", "workflow_transition", "workflow_abort"], allTools: ["read", "bash", "edit", "write"] });
+  narrowed.entries.push(...h.entries);
+  const restored = coordinator(narrowed, [wf]);
+  restored.handleSessionStart(narrowed.ctx);
+  assert.deepEqual(
+    [...narrowed.activeTools],
+    ["read", "bash", "edit", "write", "workflow_transition", "workflow_abort"],
+    "the persisted baseline drives the restored run tools",
+  );
+});
+
+test("resume of a legacy active snapshot without a baseline falls back to registered tools", () => {
+  const state = start(simpleWorkflow(), { runId: "legacy" }).state;
+  const legacy = activeSnapshot({ workflow: "demo", execution: state, delivered: true });
+  const h = harness({ baseline: ["read", "workflow_transition", "workflow_abort"], allTools: ["read", "bash", "edit", "write"] });
+  h.entries.push({ type: "custom", customType: "choreograph", data: legacy });
+  const runtime = coordinator(h, [simpleWorkflow()]);
+  runtime.handleSessionStart(h.ctx);
+  assert.deepEqual(
+    [...h.activeTools],
+    ["read", "bash", "edit", "write", "workflow_transition", "workflow_abort"],
+    "registered tools stand in when no baseline was persisted",
+  );
 });
 
 test("storage failure on start keeps the session idle", async () => {

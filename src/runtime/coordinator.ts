@@ -12,6 +12,7 @@ import { activeSnapshot, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/
 import { validateAgainstWorkflow } from "../persistence/migrate.ts";
 import { effectiveTools, CONTROL_TOOLS } from "./capabilities.ts";
 import { controlMessage, readBlockFrom, renderPrompt, rosterPrompt, summaryMessage } from "./prompts.ts";
+import { isolateWorkflowContext, type IsolatableMessage } from "./isolation.ts";
 import { statusValue } from "./status.ts";
 import { DeliveryCoordinator } from "./delivery.ts";
 
@@ -94,12 +95,13 @@ export class RuntimeCoordinator {
 
   private snapshotOf(state: ActiveState | undefined, delivered: boolean): unknown {
     if (!state) return terminalSnapshot("aborted", "", "");
-    return activeSnapshot({ workflow: state.workflow.name, execution: state.execution, delivered });
+    this.baselineTools ??= this.captureBaseline();
+    return activeSnapshot({ workflow: state.workflow.name, execution: state.execution, delivered, baselineTools: this.baselineTools });
   }
 
   private readonly isWorkflowTool = (name: string): boolean => [START_TOOL_NAME, ...CONTROL_TOOLS].includes(name);
   private readonly knownTools = (): string[] => this.pi.getAllTools?.().map((tool) => tool.name) ?? this.pi.getActiveTools();
-  private readonly captureBaseline = (): string[] => this.knownTools().filter((name) => !this.isWorkflowTool(name));
+  private readonly captureBaseline = (): string[] => this.pi.getActiveTools().filter((name) => !this.isWorkflowTool(name));
 
   private activeToolsFor(state: RunState): string[] {
     this.baselineTools ??= this.captureBaseline();
@@ -284,6 +286,9 @@ export class RuntimeCoordinator {
       execution: migrated.execution,
       delivered: snapshot.delivered,
     };
+    this.baselineTools = snapshot.baselineTools
+      ? [...snapshot.baselineTools]
+      : this.knownTools().filter((name) => !this.isWorkflowTool(name));
     this.adoptActive(state, ctx);
     ctx.ui.notify(`Resumed ${workflow.title} run \`${state.execution.runId}\` at ${state.execution.stack.at(-1)?.key}.`, "info");
   }
@@ -325,6 +330,12 @@ export class RuntimeCoordinator {
     }
     const roster = rosterPrompt(this.visibleWorkflows);
     return roster ? { systemPrompt: `${event.systemPrompt}\n\n${roster}` } : undefined;
+  }
+
+  handleContext<T extends IsolatableMessage>(event: { messages: readonly T[] }): { messages: T[] } | undefined {
+    if (this.state.status !== "active" || !this.state.delivered) return undefined;
+    const isolated = isolateWorkflowContext(event.messages, this.state.execution.runId);
+    return isolated ? { messages: isolated } : undefined;
   }
 }
 

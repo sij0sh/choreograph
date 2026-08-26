@@ -309,6 +309,18 @@ moving between positions and resumes active runs from the current session
 branch. Snapshot format changes can make older active runs non-resumable; Pi
 shows a warning and leaves the session idle in that case.
 
+### Context isolation
+
+Each position's kickoff is a one-line control message. During a run, the
+LLM context starts at the latest control message for the active run: earlier
+positions' tool output and conversation are dropped from the model's view.
+Session history and the transcript UI stay complete; only what the model
+sees is narrowed. Checkpoints carry the durable state between positions, so
+a later position re-reads what it needs instead of inheriting the transcript.
+If the control message is missing (for example after resuming into a session
+branch that predates it), choreograph keeps the full context instead of
+filtering.
+
 ### Tool access
 
 choreograph starts with the tools that Pi made available at session start. It

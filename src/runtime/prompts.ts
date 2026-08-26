@@ -190,7 +190,11 @@ export function rosterPrompt(visible: readonly Workflow[]): string {
 export function controlMessage(state: Execution): string {
   const position = state.status === "active" ? state.stack[state.stack.length - 1] : undefined;
   const where = position ? position.key : "completion";
-  return `Continue workflow \`${state.runId}\` at ${where}.`;
+  return `${controlPrefix(state.runId)} at ${where}.`;
+}
+
+export function controlPrefix(runId: string): string {
+  return `Continue workflow \`${runId}\``;
 }
 
 export function summaryMessage(workflow: Workflow, state: Execution): string {

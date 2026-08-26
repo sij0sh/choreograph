@@ -14,6 +14,7 @@ export type ActiveSnapshotV5 = {
   readonly workflow: string;
   readonly execution: Execution;
   readonly delivered: boolean;
+  readonly baselineTools?: readonly string[];
 };
 
 type TerminalSnapshot =
@@ -164,12 +165,22 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
     const execution = executionAt(snapshot.execution, "snapshot.execution");
     if (execution.workflowName !== snapshot.workflow) throw new Error("snapshot.workflow does not match snapshot.execution.workflowName");
     if (typeof snapshot.delivered !== "boolean") throw new Error("snapshot.delivered must be a boolean");
+    if (snapshot.baselineTools !== undefined) {
+      if (
+        !Array.isArray(snapshot.baselineTools) ||
+        snapshot.baselineTools.some((name) => typeof name !== "string" || name.length === 0)
+      ) {
+        throw new Error("snapshot.baselineTools must be a list of tool names");
+      }
+    }
+    const baselineTools = snapshot.baselineTools as string[] | undefined;
     return {
       v: 5,
       status: "active",
       workflow: execution.workflowName,
       execution,
       delivered: snapshot.delivered as boolean,
+      ...(baselineTools ? { baselineTools } : {}),
     };
   } catch (error) {
     return { status: "invalid", error: error instanceof Error ? error.message : String(error) };
@@ -180,6 +191,7 @@ export function activeSnapshot(fields: {
   workflow: string;
   execution: Execution;
   delivered: boolean;
+  baselineTools?: readonly string[];
 }): ActiveSnapshotV5 {
   return {
     v: 5,
@@ -187,6 +199,7 @@ export function activeSnapshot(fields: {
     workflow: fields.workflow,
     execution: fields.execution,
     delivered: fields.delivered,
+    ...(fields.baselineTools ? { baselineTools: [...new Set(fields.baselineTools)] } : {}),
   };
 }
 
