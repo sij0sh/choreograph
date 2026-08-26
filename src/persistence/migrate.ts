@@ -11,6 +11,18 @@ function reject(error: string): MigrationResult {
   return { ok: false, error };
 }
 
+function contractProblem(workflow: Workflow, contractId: string | undefined, data: unknown, label: string): string | undefined {
+  if (contractId === undefined) return undefined;
+  const contract = workflow.contracts?.get(contractId);
+  if (!contract) return `${label} names missing contract ${contractId}`;
+  const errors = contract.validate(data === undefined ? {} : data);
+  return errors.length > 0 ? `${label} violates contract ${contractId}: ${errors.join("; ")}` : undefined;
+}
+
+function hasContractBearingOperator(workflow: Workflow, operators: readonly string[]): boolean {
+  return operators.some((id) => workflow.operators.get(id)?.output !== undefined);
+}
+
 function childrenOf(block: Block | undefined): readonly Block[] | undefined {
   return block?.kind === "sequence" ? block.children : undefined;
 }
@@ -64,11 +76,22 @@ function validateLeaf(workflow: Workflow, state: Execution, leaf: Frame): string
 }
 
 function validateCheckpoints(workflow: Workflow, state: Execution): string | undefined {
-  for (const key of Object.keys(state.checkpoints)) {
+  for (const [key, checkpoint] of Object.entries(state.checkpoints)) {
     const last = lastSegment(key);
     const block = blockOf(workflow, last);
-    const isNode = Object.values(state.plans).some((plan) => plan.plan.nodes.some((node) => node.id === last));
-    if (!block && !isNode) return `checkpoint key ${key} does not belong to any block in the current workflow`;
+    const nodeEntry = Object.entries(state.plans)
+      .flatMap(([planKey, plan]) => plan.plan.nodes.map((node) => ({ planKey, node })))
+      .find(({ planKey, node }) => `${planKey}/${node.id}` === key);
+    if (!block && !nodeEntry) return `checkpoint key ${key} does not belong to any block in the current workflow`;
+    if (block?.kind === "task") {
+      const problem = contractProblem(workflow, block.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
+      if (problem) return problem;
+    }
+    if (nodeEntry) {
+      const operator = workflow.operators.get(nodeEntry.node.operator);
+      const problem = contractProblem(workflow, operator?.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
+      if (problem) return problem;
+    }
   }
   for (const [key, plan] of Object.entries(state.plans)) {
     const block = blockOf(workflow, plan.blockId);
@@ -80,8 +103,41 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
         return `plan node ${node.id} uses operator ${node.operator}, which is not trusted by ${plan.blockId}`;
       }
     }
-    const nodeIds = new Set(plan.plan.nodes.map((node) => node.id));
-    const retained = new Set(Object.keys(plan.results).filter((id) => !nodeIds.has(id)));
+    const nodeById = new Map(plan.plan.nodes.map((node) => [node.id, node]));
+    const retained = new Set<string>();
+    const requiresMetadata = hasContractBearingOperator(workflow, block.operators);
+    for (const [metadataId, metadataOperator] of Object.entries(plan.resultOperators ?? {})) {
+      if (!Object.hasOwn(plan.results, metadataId)) return `plan execution ${key}.resultOperators.${metadataId} has no matching result`;
+      const currentNode = nodeById.get(metadataId);
+      if (currentNode && currentNode.operator !== metadataOperator) {
+        return `plan result ${key}/${metadataId} has conflicting producer metadata`;
+      }
+    }
+    for (const [resultId, result] of Object.entries(plan.results)) {
+      const node = nodeById.get(resultId);
+      const metadataOperator = plan.resultOperators?.[resultId];
+      if (node && metadataOperator !== undefined && metadataOperator !== node.operator) {
+        return `plan result ${key}/${resultId} has conflicting producer metadata`;
+      }
+      const operatorId = node?.operator ?? metadataOperator;
+      if (!operatorId) {
+        if (requiresMetadata) return `retained result ${key}/${resultId} has no producer metadata`;
+        retained.add(resultId);
+        continue;
+      }
+      const operator = workflow.operators.get(operatorId);
+      if (!operator) {
+        if (requiresMetadata) return `retained result ${key}/${resultId} uses an unknown producer ${operatorId}`;
+        retained.add(resultId);
+        continue;
+      }
+      if (!block.operators.includes(operatorId)) {
+        return `retained result ${key}/${resultId} uses operator ${operatorId}, which is not trusted by ${plan.blockId}`;
+      }
+      const problem = contractProblem(workflow, operator.output, result.data === undefined ? {} : result.data, `node result ${key}/${resultId}`);
+      if (problem) return problem;
+      if (!node) retained.add(resultId);
+    }
     const validation = validateDynamicPlan(plan.plan, planInputFor(workflow, block.operators, retained));
     if ("errors" in validation) {
       return `invalid plan for ${key}: ${validation.errors.join("; ")}`;

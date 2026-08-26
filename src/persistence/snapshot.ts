@@ -77,7 +77,7 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
   for (const [key, entry] of Object.entries(raw)) {
     const planRaw = objectAt(entry, `${label}.${key}`);
     for (const field of Object.keys(planRaw)) {
-      if (!["blockId", "revision", "replans", "invalidations", "awaitingPlan", "plan", "results"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted plan field`);
+      if (!["blockId", "revision", "replans", "invalidations", "awaitingPlan", "plan", "results", "resultOperators"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted plan field`);
     }
     if (planRaw.awaitingPlan !== undefined && typeof planRaw.awaitingPlan !== "boolean") throw new Error(`${label}.${key}.awaitingPlan must be a boolean`);
     const blockId = requireString(planRaw.blockId, `${label}.${key}.blockId`);
@@ -102,6 +102,12 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
       const result = validateCheckpoint(value, `${label}.${key}.results.${id}`);
       results[id] = result;
     }
+    const resultOperatorsRaw = planRaw.resultOperators === undefined ? {} : objectAt(planRaw.resultOperators, `${label}.${key}.resultOperators`);
+    const resultOperators: Record<string, string> = {};
+    for (const [id, operator] of Object.entries(resultOperatorsRaw)) {
+      if (results[id] === undefined) throw new Error(`${label}.${key}.resultOperators.${id} has no matching result`);
+      resultOperators[id] = requireString(operator, `${label}.${key}.resultOperators.${id}`);
+    }
     plans[key] = {
       blockId,
       revision,
@@ -110,6 +116,7 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
       ...(planRaw.awaitingPlan === true ? { awaitingPlan: true } : {}),
       plan: { version: 1, nodes: nodes as PlanExecution["plan"]["nodes"] },
       results,
+      ...(Object.keys(resultOperators).length > 0 ? { resultOperators } : {}),
     };
   }
   return plans;
