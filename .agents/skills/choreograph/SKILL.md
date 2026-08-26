@@ -68,7 +68,7 @@ steps:
 ### Rules
 
 - Every block needs one unique id across the whole workflow. Tasks may derive ids from file stems.
-- Use exactly one of `run` or `plan` per step entry. Loop, branch, predicate, and data-reference authoring were removed in v0.2; they fail as unknown keys.
+- Use exactly one of `run` or `plan` per step entry. Loop, branch, predicate, and data-reference authoring were removed in v0.1.1; they fail as unknown keys.
 - `plan` blocks need operator files for every listed operator id.
 - `repair.strategy` may list any of `retry`, `invalidate`, `replan`, `block` in order.
 - The old `kind: planner/executor` and `on:` route keys are rejected as unknown keys. Use `plan:` blocks and `repair:` policy.

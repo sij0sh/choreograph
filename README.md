@@ -65,7 +65,7 @@ steps:
 | Task | `run`, `id?`, `tools?`, `done?`, `repair?` | Runs one markdown instruction file to completion. |
 | `plan` | `operators`, `repair?` | The model composes a bounded plan from trusted operators; the engine runs it one node per turn. |
 
-Every block needs a unique `id` across the workflow; task ids may derive from their file stem. Workflows are static sequences and plans: loop (`for_each`), iterate (`repeat`), branch (`choose`), predicate (`until`), and data-reference (`$task.field`, `$current`) authoring were removed in v0.2 and now fail as unknown keys.
+Every block needs a unique `id` across the workflow; task ids may derive from their file stem. Workflows are static sequences and plans: loop (`for_each`), iterate (`repeat`), branch (`choose`), predicate (`until`), and data-reference (`$task.field`, `$current`) authoring were removed in v0.1.1 and now fail as unknown keys.
 
 Task outputs reach later positions through rendered prior checkpoint summaries; no reference language exists. Arbitrary `checkpoint.data` is persisted but reserved for engine use such as plan payloads.
 
