@@ -3,6 +3,7 @@ import type { Checkpoint } from "../domain/checkpoint.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { DataReference } from "../domain/workflow.ts";
 import { LIMITS } from "../domain/limits.ts";
+import { lastSegment } from "../domain/keys.ts";
 
 const REFERENCE_PATTERN = /^\$([a-z][a-z0-9-]*)((?:\.[A-Za-z0-9_-]+)*)$/;
 
@@ -33,11 +34,6 @@ function descend(value: JsonValue | undefined, path: readonly string[]): JsonVal
     current = (current as { [key: string]: JsonValue | undefined })[segment];
   }
   return current;
-}
-
-function lastSegment(key: string): string {
-  const index = key.lastIndexOf("/");
-  return index < 0 ? key : key.slice(index + 1);
 }
 
 function currentIteration(state: Execution): JsonValue | undefined {

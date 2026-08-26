@@ -132,7 +132,7 @@ test("slash commands start workflows", async () => {
   const ctx = ext.ctx();
   ext.handlers.get("session_start")(undefined, ctx);
   await ext.commands.get("demo-run").handler("target-thing", ctx);
-  assert.ok(ext.entries.some((entry) => entry.data.status === "active" && entry.data.target === "target-thing"));
+  assert.ok(ext.entries.some((entry) => entry.data.status === "active" && entry.data.execution.target === "target-thing"));
 });
 
 test("hidden workflows keep slash commands but skip the start tool and roster", () => {

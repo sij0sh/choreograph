@@ -35,6 +35,16 @@ export function isJsonValue(value: unknown): value is JsonValue {
   return false;
 }
 
+export function objectAt(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  return value as Record<string, unknown>;
+}
+
+export function requireString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be a non-empty string`);
+  return value;
+}
+
 export function deepEqual(left: unknown, right: unknown): boolean {
   if (left === undefined || right === undefined) return left === right;
   if (!isJsonValue(left) || !isJsonValue(right)) return false;

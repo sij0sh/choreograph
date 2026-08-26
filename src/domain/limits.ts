@@ -21,4 +21,12 @@ export const LIMITS = {
   advanceSteps: 10_000,
 } as const;
 
+export const PLAN_CREATE_ATTEMPT_MAX = LIMITS.nodeAttempts + LIMITS.replans;
+
+export const NESTING_DEPTH_MAX = Math.floor((LIMITS.stackDepth - 2) / 2);
+
 export const ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+export const MODEL_SELECTOR_PATTERN = /^[^/\s]+\/[^/\s]+$/;
+export const NAME_PATTERN = ID_PATTERN;
+export const MAX_WORKFLOW_BYTES = LIMITS.workflowBytes;
+export const MAX_INSTRUCTION_BYTES = LIMITS.instructionFileBytes;

@@ -3,6 +3,7 @@ import type { Execution, Frame, PlanExecution, SequenceFrame } from "../domain/e
 import { DEFAULT_PLAN_RECOVERY, DEFAULT_TASK_RECOVERY, resolveRecovery, type RecoveryPolicy } from "../domain/policy.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
+import { lastSegment, planKeyOf } from "../domain/keys.ts";
 import { invalidateResults } from "../planning/graph.ts";
 import type { Effect, EngineResult, Issue } from "./interpreter.ts";
 import { advance } from "./interpreter.ts";
@@ -15,6 +16,11 @@ function deliver(state: Execution): EngineResult {
 
 function fail(error: string): EngineResult {
   return { ok: false, error };
+}
+
+function planKeyForBlock(blockId: string, state: Execution): string {
+  const entry = Object.entries(state.plans).find(([, execution]) => execution.blockId === blockId);
+  return entry ? entry[0] : "";
 }
 
 function attemptOf(frame: Frame): number {
@@ -31,11 +37,6 @@ function policyFor(workflow: Workflow, leaf: Frame): RecoveryPolicy | undefined 
   if (leaf.kind === "task" && block.kind === "task") return resolveRecovery(block.recovery, DEFAULT_TASK_RECOVERY);
   if ((leaf.kind === "node" || leaf.kind === "plan") && block.kind === "plan") return resolveRecovery(block.recovery, DEFAULT_PLAN_RECOVERY);
   return undefined;
-}
-
-function lastSegment(key: string): string {
-  const index = key.lastIndexOf("/");
-  return index < 0 ? key : key.slice(index + 1);
 }
 
 function rewindToChild(workflow: Workflow, stack: readonly Frame[], blockId: string): readonly Frame[] | undefined {
@@ -99,19 +100,14 @@ function tryInvalidate(workflow: Workflow, state: Execution, outcome: Outcome, p
   return undefined;
 }
 
-function planKeyOf(blockId: string, state: Execution): string {
-  const entry = Object.entries(state.plans).find(([, execution]) => execution.blockId === blockId);
-  return entry ? entry[0] : "";
-}
-
 function tryReplan(workflow: Workflow, state: Execution, leaf: Frame, policy: RecoveryPolicy): EngineResult | undefined {
   let planKey: string | undefined;
   if (leaf.kind === "node") {
-    planKey = leaf.key.slice(0, leaf.key.lastIndexOf("/"));
+    planKey = planKeyOf(leaf.key);
   } else if (leaf.kind === "plan") {
     planKey = leaf.key;
   } else if (policy.scope) {
-    planKey = planKeyOf(policy.scope, state) || undefined;
+    planKey = planKeyForBlock(policy.scope, state) || undefined;
   }
   if (!planKey) return undefined;
   const execution = state.plans[planKey];

@@ -103,7 +103,7 @@ function collect(block: Block, into: Map<string, Block>): void {
   }
 }
 
-export function blockIndex(workflow: Workflow): ReadonlyMap<string, Block> {
+function blockIndex(workflow: Workflow): ReadonlyMap<string, Block> {
   let index = indexes.get(workflow);
   if (!index) {
     const built = new Map<string, Block>();

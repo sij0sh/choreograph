@@ -4,7 +4,7 @@ import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { OperatorDescriptor, Workflow } from "../domain/workflow.ts";
 import type { DynamicPlan, PlanNode } from "./schema.ts";
 
-export interface PlanValidationInput {
+interface PlanValidationInput {
   readonly operators: ReadonlyMap<string, OperatorDescriptor>;
   readonly allowedOperators: readonly string[];
   readonly retainedResultIds: ReadonlySet<string>;

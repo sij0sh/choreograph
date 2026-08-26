@@ -14,18 +14,20 @@ import type {
   TaskBlock,
   Workflow,
 } from "../domain/workflow.ts";
-import { LIMITS } from "../domain/limits.ts";
+import { LIMITS, NESTING_DEPTH_MAX } from "../domain/limits.ts";
 import { DEFAULT_PLAN_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
 import { parseReference } from "./references.ts";
 import { parsePredicate } from "./predicates.ts";
 import {
+  FRONTMATTER_KEYS,
+  OPERATOR_KEYS,
+  STEP_KEYS,
   assertKeys,
   assertUnique,
   booleanAt,
   MAX_INSTRUCTION_BYTES,
   MAX_WORKFLOW_BYTES,
   NAME_PATTERN,
-  objectAt,
   parseIdList,
   parseModelSelector,
   parseRecovery,
@@ -34,6 +36,7 @@ import {
   stringAt,
   VARIABLE_PATTERN,
 } from "./schema.ts";
+import { objectAt } from "../domain/json.ts";
 
 export interface WorkflowDiagnostic {
   readonly path: string;
@@ -113,7 +116,7 @@ function loadOperators(directory: string): Map<string, OperatorDescriptor> {
     if (!NAME_PATTERN.test(id)) throw new Error(`${label} file stem must match ^[a-z][a-z0-9-]*$`);
     const path = containedPath(lexicalRoot, realRoot, `operators/${entry.name}`, label);
     const frontmatter = extractFrontmatter(path, label);
-    assertKeys(frontmatter, ["description", "tools"], `${label} frontmatter`);
+    assertKeys(frontmatter, OPERATOR_KEYS, `${label} frontmatter`);
     operators.set(id, {
       id,
       path,
@@ -151,7 +154,9 @@ function parseReferenceAt(raw: unknown, label: string): DataReference {
 
 function parseStepsList(raw: unknown, label: string, context: CompileContext): Block[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error(`${label} must be a non-empty list of steps`);
-  if (context.depth > LIMITS.stackDepth) throw new Error(`${label} nests deeper than ${LIMITS.stackDepth} levels`);
+  if (context.depth >= NESTING_DEPTH_MAX) {
+    throw new Error(`${label} nests deeper than ${NESTING_DEPTH_MAX} structural levels; deeper workflows cannot fit the ${LIMITS.stackDepth}-frame persisted stack`);
+  }
   context.depth += 1;
   const children = raw.map((entry, index) => parseStepEntry(entry, index, `${label}[${index}]`, context));
   context.depth -= 1;
@@ -172,8 +177,9 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     return { kind: "task", id, instructionPath: path } satisfies TaskBlock;
   }
   const entry = objectAt(raw, label);
+  const stepKeys = new Set<string>(STEP_KEYS);
   for (const key of Object.keys(entry)) {
-    if (key === "id" || key === "run" || key === "tools" || key === "model" || key === "done" || key === "repair" || key === "for_each" || key === "repeat" || key === "choose" || key === "plan") continue;
+    if (stepKeys.has(key)) continue;
     migrationError(key, label);
   }
   const structural = (["for_each", "repeat", "choose", "plan"] as const).filter((key) => entry[key] !== undefined);
@@ -266,7 +272,7 @@ function parsePlan(raw: unknown, id: string, label: string, context: CompileCont
 export function loadWorkflowManifest(directory: string): Workflow {
   const overviewPath = join(directory, "WORKFLOW.md");
   const data = extractFrontmatter(overviewPath, "WORKFLOW.md");
-  assertKeys(data, ["description", "steps", "piVisibility", "tools", "legalTools", "model"], "frontmatter");
+  assertKeys(data, FRONTMATTER_KEYS, "frontmatter");
   const name = basename(directory);
   if (!NAME_PATTERN.test(name)) throw new Error("workflow directory name must match ^[a-z][a-z0-9-]*$");
   const description = stringAt(data.description, "description");

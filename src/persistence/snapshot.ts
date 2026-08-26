@@ -1,10 +1,10 @@
 import type { Execution, Frame } from "../domain/execution.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
-import { LIMITS } from "../domain/limits.ts";
+import { LIMITS, MODEL_SELECTOR_PATTERN, PLAN_CREATE_ATTEMPT_MAX } from "../domain/limits.ts";
 import type { PlanExecution } from "../domain/execution.ts";
 import type { JsonValue } from "../domain/json.ts";
-import { isJsonValue, jsonDepth } from "../domain/json.ts";
+import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.ts";
 
 export const SNAPSHOT_TYPE = "choreograph";
 
@@ -12,14 +12,12 @@ export type ActiveSnapshotV4 = {
   readonly v: 4;
   readonly status: "active";
   readonly workflow: string;
-  readonly runId: string;
-  readonly target: string;
   readonly execution: Execution;
   readonly delivered: boolean;
   readonly restoreModel?: string;
 };
 
-export type TerminalSnapshot =
+type TerminalSnapshot =
   | { readonly v: 4; readonly status: "completed"; readonly workflow: string; readonly runId: string }
   | { readonly v: 4; readonly status: "aborted"; readonly workflow: string; readonly runId: string };
 
@@ -29,23 +27,6 @@ export type ParsedSnapshot =
   | { readonly status: "terminal" }
   | { readonly status: "invalid"; readonly error: string };
 
-function objectAt(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
-  return value as Record<string, unknown>;
-}
-
-function stringAt(value: unknown, label: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be a non-empty string`);
-  return value;
-}
-
-function jsonAt(value: unknown, label: string): JsonValue | undefined {
-  if (value === undefined) return undefined;
-  if (!isJsonValue(value)) throw new Error(`${label} must be a JSON value`);
-  if (jsonDepth(value) > LIMITS.jsonDepth) throw new Error(`${label} nesting must not exceed ${LIMITS.jsonDepth} levels`);
-  return value as JsonValue;
-}
-
 const FRAME_KINDS = ["sequence", "task", "foreach", "repeat", "choose", "plan", "node"] as const;
 type FrameKind = (typeof FRAME_KINDS)[number];
 
@@ -53,8 +34,8 @@ function frameAt(value: unknown, label: string): Frame {
   const raw = objectAt(value, label);
   if (!FRAME_KINDS.includes(raw.kind as FrameKind)) throw new Error(`${label}.kind must be one of: ${FRAME_KINDS.join(", ")}`);
   const kind = raw.kind as FrameKind;
-  const blockId = stringAt(raw.blockId, `${label}.blockId`);
-  const key = stringAt(raw.key, `${label}.key`);
+  const blockId = requireString(raw.blockId, `${label}.blockId`);
+  const key = requireString(raw.key, `${label}.key`);
   const indexAt = (field: string, max: number): number => {
     const n = raw[field];
     if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > max) throw new Error(`${label}.${field} must be an integer between 0 and ${max}`);
@@ -70,18 +51,19 @@ function frameAt(value: unknown, label: string): Frame {
       if (!Array.isArray(items)) throw new Error(`${label}.items must be a list`);
       if (items.length > LIMITS.forEachItems) throw new Error(`${label}.items exceeds ${LIMITS.forEachItems}`);
       if (items.some((item) => !isJsonValue(item))) throw new Error(`${label}.items must contain JSON values`);
-      return { kind, blockId, key, items: items as JsonValue[], index: indexAt("index", items.length), variable: stringAt(raw.variable, `${label}.variable`) };
+      return { kind, blockId, key, items: items as JsonValue[], index: indexAt("index", items.length), variable: requireString(raw.variable, `${label}.variable`) };
     }
     case "repeat":
       return { kind, blockId, key, iteration: indexAt("iteration", LIMITS.repeatMax) };
     case "choose":
-      return { kind, blockId, key, caseName: stringAt(raw.caseName, `${label}.caseName`) };
+      return { kind, blockId, key, caseName: requireString(raw.caseName, `${label}.caseName`) };
     case "plan": {
       if (raw.mode !== "create" && raw.mode !== "execute") throw new Error(`${label}.mode must be create or execute`);
-      return { kind, blockId, key, mode: raw.mode, attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
+      const attemptMax = raw.mode === "create" ? PLAN_CREATE_ATTEMPT_MAX : LIMITS.nodeAttempts + 1;
+      return { kind, blockId, key, mode: raw.mode, attempt: indexAt("attempt", attemptMax) || 1 };
     }
     case "node":
-      return { kind, blockId, key, nodeId: stringAt(raw.nodeId, `${label}.nodeId`), attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
+      return { kind, blockId, key, nodeId: requireString(raw.nodeId, `${label}.nodeId`), attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
   }
 }
 
@@ -109,7 +91,7 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
       if (!["blockId", "revision", "replans", "invalidations", "awaitingPlan", "plan", "results"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted plan field`);
     }
     if (planRaw.awaitingPlan !== undefined && typeof planRaw.awaitingPlan !== "boolean") throw new Error(`${label}.${key}.awaitingPlan must be a boolean`);
-    const blockId = stringAt(planRaw.blockId, `${label}.${key}.blockId`);
+    const blockId = requireString(planRaw.blockId, `${label}.${key}.blockId`);
     const revision = planRaw.revision;
     const replans = planRaw.replans;
     const invalidations = planRaw.invalidations ?? 0;
@@ -154,8 +136,8 @@ function executionAt(value: unknown, label: string): Execution {
   const structural = leafKind === "sequence" || leafKind === "foreach" || leafKind === "repeat" || leafKind === "choose" || (leafKind === "plan" && leaf.mode === "execute");
   if (structural) throw new Error(`${label}.stack must end at a leaf frame (task, node, or plan creation)`);
   return {
-    workflowName: stringAt(raw.workflowName, `${label}.workflowName`),
-    runId: stringAt(raw.runId, `${label}.runId`),
+    workflowName: requireString(raw.workflowName, `${label}.workflowName`),
+    runId: requireString(raw.runId, `${label}.runId`),
     target: typeof raw.target === "string" ? raw.target : "",
     status: "active",
     stack,
@@ -178,15 +160,13 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
     if (typeof snapshot.delivered !== "boolean") throw new Error("snapshot.delivered must be a boolean");
     let restoreModel: string | undefined;
     if (snapshot.restoreModel !== undefined) {
-      restoreModel = stringAt(snapshot.restoreModel, "snapshot.restoreModel");
-      if (!/^[^/\s]+\/[^/\s]+$/.test(restoreModel)) throw new Error("snapshot.restoreModel must be a provider/model-id selector");
+      restoreModel = requireString(snapshot.restoreModel, "snapshot.restoreModel");
+      if (!MODEL_SELECTOR_PATTERN.test(restoreModel)) throw new Error("snapshot.restoreModel must be a provider/model-id selector");
     }
     return {
       v: 4,
       status: "active",
       workflow: execution.workflowName,
-      runId: execution.runId,
-      target: execution.target,
       execution,
       delivered: snapshot.delivered as boolean,
       ...(restoreModel !== undefined ? { restoreModel } : {}),
@@ -206,8 +186,6 @@ export function activeSnapshot(fields: {
     v: 4,
     status: "active",
     workflow: fields.workflow,
-    runId: fields.execution.runId,
-    target: fields.execution.target,
     execution: fields.execution,
     delivered: fields.delivered,
     ...(fields.restoreModel !== undefined ? { restoreModel: fields.restoreModel } : {}),

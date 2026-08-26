@@ -247,6 +247,23 @@ steps:
   assert.equal(task.recovery.maxReplans, LIMITS.replans);
 });
 
+test("structural nesting is capped at the restorable frame budget", () => {
+  const ceiling = Math.floor((LIMITS.stackDepth - 2) / 2);
+  const nestedLoops = (depth) => {
+    const lines = ["description: x", "steps:", "  - id: seed", "    run: steps/frame.md"];
+    let pad = "  ";
+    for (let i = 1; i <= depth; i += 1) {
+      lines.push(`${pad}- id: loop${i}`, `${pad}  for_each:`, `${pad}    items: $seed`, `${pad}    as: item`, `${pad}    do:`);
+      pad += "      ";
+    }
+    lines.push(`${pad}- run: steps/frame.md`);
+    return lines.join("\n");
+  };
+  const legal = loadWorkflowManifest(workflowDir("nest-legal", nestedLoops(ceiling)));
+  assert.equal(legal.root.children.length, 2);
+  assert.throws(() => loadWorkflowManifest(workflowDir("nest-illegal", nestedLoops(ceiling + 1))), new RegExp(`nests deeper than ${ceiling}`));
+});
+
 test("containment and size rules still hold", () => {
   const escape = workflowDir("escape", `
 description: x

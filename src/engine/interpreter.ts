@@ -3,6 +3,7 @@ import { validateCheckpoint } from "../domain/checkpoint.ts";
 import type { Execution, Frame, NodeFrame, PlanExecution, SequenceFrame, TaskFrame } from "../domain/execution.ts";
 import { applyNeedsWork } from "./recovery.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
+import { planKeyOf } from "../domain/keys.ts";
 import type { ChooseBlock, ForEachBlock, PlanBlock, RepeatBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { resolveReference } from "../authoring/references.ts";
@@ -12,17 +13,17 @@ import { firstIncompleteNode } from "../planning/graph.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
 import { validateNodeResult, type NodeResult } from "../planning/schema.ts";
 
-export interface Issue {
+export type Issue = {
   readonly target: string;
   readonly reason: string;
-}
+};
 
 export type TaskOutcome =
   | { readonly status: "completed"; readonly met?: readonly string[]; readonly checkpoint: Checkpoint }
   | { readonly status: "needs-work"; readonly checkpoint: Checkpoint; readonly issues?: readonly Issue[] }
   | { readonly status: "blocked"; readonly checkpoint: Checkpoint };
 
-export type WorkflowEvent =
+type WorkflowEvent =
   | { readonly type: "outcome"; readonly outcome: TaskOutcome }
   | { readonly type: "abort" };
 
@@ -36,7 +37,7 @@ export type EngineResult =
   | { readonly ok: true; readonly state: Execution; readonly effect: Effect }
   | { readonly ok: false; readonly error: string };
 
-export interface StartInput {
+interface StartInput {
   readonly runId: string;
   readonly target?: string;
 }
@@ -250,12 +251,8 @@ function commitCheckpoint(state: Execution, key: string, checkpoint: Checkpoint)
   return { ...state.checkpoints, [key]: checkpoint };
 }
 
-function needsWork(workflow: Workflow, state: Execution, outcome: Extract<TaskOutcome, { status: "needs-work" }>): EngineResult {
-  return applyNeedsWork(workflow, state, outcome);
-}
-
 function planKeyOfNode(node: NodeFrame): string {
-  return node.key.slice(0, node.key.lastIndexOf("/"));
+  return planKeyOf(node.key);
 }
 
 function finishAdvance(workflow: Workflow, state: Execution, stack: readonly Frame[]): EngineResult {
@@ -349,7 +346,7 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
       return { ok: true, state: { ...state, checkpoints: commitCheckpoint(state, leaf.key, outcome.checkpoint) }, effect: { kind: "stay" } };
     }
     case "needs-work":
-      return needsWork(workflow, state, outcome);
+      return applyNeedsWork(workflow, state, outcome);
     case "completed": {
       if (leaf.kind === "plan") return completePlanCreation(workflow, state, leaf, outcome);
       if (leaf.kind === "node") return completeNode(workflow, state, leaf, outcome);
@@ -365,7 +362,7 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
   }
 }
 
-export interface PositionInfo {
+interface PositionInfo {
   readonly type: "task" | "plan-create" | "node";
   readonly key: string;
   readonly attempt: number;
@@ -396,7 +393,7 @@ export function currentPosition(workflow: Workflow, state: Execution): PositionI
   }
   if (leaf.kind === "node") {
     const block = blockOf(workflow, leaf.blockId);
-    const planKey = leaf.key.slice(0, leaf.key.lastIndexOf("/"));
+    const planKey = planKeyOf(leaf.key);
     const execution = state.plans[planKey];
     const node = execution?.plan.nodes.find((entry) => entry.id === leaf.nodeId);
     if (block?.kind === "plan" && execution && node) {

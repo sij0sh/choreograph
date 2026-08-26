@@ -1,28 +1,19 @@
-import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
+import { ID_PATTERN, LIMITS, MODEL_SELECTOR_PATTERN } from "../domain/limits.ts";
+import { objectAt, requireString } from "../domain/json.ts";
 import { DEFAULT_PLAN_RECOVERY, DEFAULT_TASK_RECOVERY, type RecoveryAction, type RecoveryPolicy } from "../domain/policy.ts";
-
-export const MAX_WORKFLOW_BYTES = LIMITS.workflowBytes;
-export const MAX_INSTRUCTION_BYTES = LIMITS.instructionFileBytes;
-export const NAME_PATTERN = ID_PATTERN;
-export const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
-export const MODEL_SELECTOR_PATTERN = /^[^/\s]+\/[^/\s]+$/;
-export const VARIABLE_PATTERN = /^[a-z][a-z0-9_-]*$/;
 
 export const FRONTMATTER_KEYS = ["description", "steps", "piVisibility", "tools", "legalTools", "model"] as const;
 export const STEP_KEYS = ["id", "run", "tools", "model", "done", "repair", "for_each", "repeat", "choose", "plan"] as const;
-export const BODY_KEYS = ["items", "as", "do", "max", "until", "value", "cases", "fallback", "operators", "repair"] as const;
-export const RECOVERY_KEYS = ["max_attempts", "max_replans", "strategy", "scope"] as const;
 export const OPERATOR_KEYS = ["description", "tools"] as const;
-export const RECOVERY_ACTIONS: readonly RecoveryAction[] = ["retry", "invalidate", "replan", "block"];
+const RECOVERY_KEYS = ["max_attempts", "max_replans", "strategy", "scope"] as const;
+const RECOVERY_ACTIONS: readonly RecoveryAction[] = ["retry", "invalidate", "replan", "block"];
+const VARIABLE_PATTERN = /^[a-z][a-z0-9_-]*$/;
 
-export function objectAt(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
-  return value as Record<string, unknown>;
-}
+export { MAX_WORKFLOW_BYTES, MAX_INSTRUCTION_BYTES, NAME_PATTERN } from "../domain/limits.ts";
+export { VARIABLE_PATTERN };
 
 export function stringAt(value: unknown, label: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be a non-empty string`);
-  return value.trim();
+  return requireString(value, label).trim();
 }
 
 export function booleanAt(value: unknown, label: string): boolean {
@@ -39,12 +30,16 @@ export function assertKeys(value: Record<string, unknown>, allowed: readonly str
   for (const key of Object.keys(value)) if (!known.has(key)) throw new Error(`unknown ${label} key: ${key}`);
 }
 
+function matchesToolName(tool: string): boolean {
+  return /^[a-z][a-z0-9_]*$/.test(tool);
+}
+
 export function parseToolList(raw: unknown, label: string): string[] | undefined {
   if (raw === undefined) return undefined;
   if (!Array.isArray(raw)) throw new Error(`${label} must be a list`);
   const tools = raw.map((value, index) => {
     const tool = stringAt(value, `${label}[${index}]`);
-    if (!TOOL_NAME_PATTERN.test(tool)) throw new Error(`${label}[${index}] must match ^[a-z][a-z0-9_]*$`);
+    if (!matchesToolName(tool)) throw new Error(`${label}[${index}] must match ^[a-z][a-z0-9_]*$`);
     return tool;
   });
   assertUnique(tools, label);

@@ -328,7 +328,7 @@ export class RuntimeCoordinator {
     }
     const migrated = validateAgainstWorkflow(workflow, snapshot.execution);
     if (!migrated.ok) {
-      ctx.ui.notify(`Cannot resume ${workflow.title} run \`${snapshot.runId}\`: ${migrated.error}.`, "warning");
+      ctx.ui.notify(`Cannot resume ${workflow.title} run \`${snapshot.execution.runId}\`: ${migrated.error}.`, "warning");
       return;
     }
     const state: ActiveState = {
@@ -339,7 +339,7 @@ export class RuntimeCoordinator {
       ...(snapshot.restoreModel !== undefined ? { restoreModel: snapshot.restoreModel } : {}),
     };
     this.adoptActive(state, ctx);
-    ctx.ui.notify(`Resumed ${workflow.title} run \`${snapshot.runId}\` at ${state.execution.stack.at(-1)?.key}.`, "info");
+    ctx.ui.notify(`Resumed ${workflow.title} run \`${state.execution.runId}\` at ${state.execution.stack.at(-1)?.key}.`, "info");
     void this.applyModelFor(state, ctx);
   }
 

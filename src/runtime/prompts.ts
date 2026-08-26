@@ -4,9 +4,10 @@ import type { Execution, ForEachFrame, RepeatFrame } from "../domain/execution.t
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
+import { lastSegment } from "../domain/keys.ts";
 import type { NodeResult } from "../planning/schema.ts";
 
-export type ReadBlock = (path: string, label: string) => string;
+type ReadBlock = (path: string, label: string) => string;
 
 export function readBlockFrom(fs: { readFileSync(path: string, encoding: "utf8"): string }): ReadBlock {
   return (path: string, label: string): string => {
@@ -19,7 +20,7 @@ export function readBlockFrom(fs: { readFileSync(path: string, encoding: "utf8")
   };
 }
 
-export function stripFrontmatter(text: string): string {
+function stripFrontmatter(text: string): string {
   const match = text.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
   return match ? text.slice(match[0].length) : text;
 }
@@ -58,7 +59,7 @@ function loopContext(workflow: Workflow, state: Execution): string {
 function priorCheckpoints(workflow: Workflow, state: Execution, beforeKey: string): string {
   const entries = Object.entries(state.checkpoints).filter(([key]) => key < beforeKey && !key.startsWith(beforeKey));
   if (entries.length === 0) return "";
-  const lines = entries.slice(-8).map(([key, checkpoint]: [string, Checkpoint]) => `- \`${key.slice(key.lastIndexOf("/") + 1)}\`: ${checkpoint.summary}`);
+  const lines = entries.slice(-8).map(([key, checkpoint]: [string, Checkpoint]) => `- \`${lastSegment(key)}\`: ${checkpoint.summary}`);
   return lines.length ? ["## Prior checkpoints", ...lines].join("\n") : "";
 }
 

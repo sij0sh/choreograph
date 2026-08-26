@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import { activeSnapshot, parseSnapshot, terminalSnapshot } from "../../src/persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
 import { latestSnapshot } from "../../src/persistence/store.ts";
-import { completed, cp, sequence, task, workflow } from "../engine/helpers.mjs";
+import { completed, cp, needsWork, sequence, task, workflow } from "../engine/helpers.mjs";
 import { start, transition } from "../../src/engine/interpreter.ts";
+import { LIMITS } from "../../src/domain/limits.ts";
 
 function forEachWorkflow() {
   const body = sequence("body", [task("inspect")]);
@@ -67,6 +68,102 @@ test("every frame type round-trips", () => {
   assert.deepEqual(state.stack.map((f) => f.kind), ["sequence", "foreach", "sequence", "repeat", "sequence", "task"]);
   const parsed = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: true }))));
   assert.deepEqual(parsed.execution, state);
+  const migrated = validateAgainstWorkflow(wf, parsed.execution);
+  assert.ok(migrated.ok, migrated.ok ? "" : migrated.error);
+});
+
+const PLAN_OPERATORS = new Map([
+  ["inspect", { id: "inspect", path: "operators/inspect.md", description: "Inspect code." }],
+  ["trace", { id: "trace", path: "operators/trace.md", description: "Trace flow." }],
+]);
+
+function planRecoveryWorkflow() {
+  return workflow(
+    [
+      task("frame"),
+      {
+        kind: "plan",
+        id: "investigate",
+        operators: ["inspect", "trace"],
+        recovery: { maxAttempts: 3, maxReplans: 2, strategy: ["retry", "replan"] },
+      },
+    ],
+    { operators: PLAN_OPERATORS },
+  );
+}
+
+function createAttemptState() {
+  const wf = planRecoveryWorkflow();
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed")) }).state;
+  state = transition(wf, state, {
+    type: "outcome",
+    outcome: completed(cp("planned", {
+      plan: {
+        version: 1,
+        nodes: [
+          { id: "probe", operator: "inspect", objective: "Probe.", done: ["probe-done"] },
+          { id: "map", operator: "trace", objective: "Map.", done: ["map-done"] },
+        ],
+      },
+    })),
+  }).state;
+  return { wf, state };
+}
+
+test("plan-create attempt four round-trips and stays resumable", () => {
+  const { wf, state: created } = createAttemptState();
+  let state = created;
+  for (let i = 0; i < 5; i += 1) {
+    const stepped = transition(wf, state, { type: "outcome", outcome: needsWork(cp(`nw ${i + 1}`)) });
+    assert.ok(stepped.ok, stepped.ok ? "" : stepped.error);
+    state = stepped.state;
+  }
+  const leaf = state.stack.at(-1);
+  assert.equal(leaf.kind, "plan");
+  assert.equal(leaf.mode, "create");
+  assert.equal(leaf.attempt, 4);
+  const snapshot = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });
+  const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
+  assert.equal(parsed.status, "active");
+  assert.equal(parsed.execution.stack.at(-1).attempt, 4);
+  const migrated = validateAgainstWorkflow(wf, parsed.execution);
+  assert.ok(migrated.ok, migrated.ok ? "" : migrated.error);
+
+  const beyond = structuredClone(state);
+  beyond.stack[beyond.stack.length - 1] = { ...beyond.stack.at(-1), attempt: 5 };
+  const rejected = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: beyond, delivered: false }))));
+  assert.equal(rejected.status, "invalid");
+  assert.match(rejected.error, /between 0 and 4/);
+});
+
+test("task, node, and execute-plan attempts keep the single-dimension bound", () => {
+  const { wf, state } = createAttemptState();
+  const roundTrip = (execution) => parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution, delivered: false }))));
+  const taskFour = structuredClone(start(wf, { runId: "r1" }).state);
+  taskFour.stack[taskFour.stack.length - 1] = { ...taskFour.stack.at(-1), attempt: 4 };
+  assert.equal(roundTrip(taskFour).status, "invalid");
+  const nodeFour = structuredClone(state);
+  nodeFour.stack[nodeFour.stack.length - 1] = { ...nodeFour.stack.at(-1), attempt: 4 };
+  assert.equal(roundTrip(nodeFour).status, "invalid");
+  const executeFour = structuredClone(state);
+  const planIndex = executeFour.stack.findIndex((frame) => frame.kind === "plan");
+  executeFour.stack[planIndex] = { ...executeFour.stack[planIndex], attempt: 4 };
+  assert.equal(roundTrip(executeFour).status, "invalid");
+});
+
+test("authoring-legal deep nesting stays restorable at the frame budget", () => {
+  const ceiling = Math.floor((LIMITS.stackDepth - 2) / 2);
+  let innermost = task("leaf");
+  for (let i = ceiling; i >= 1; i -= 1) {
+    innermost = { kind: "foreach", id: `loop${i}`, items: { root: "seed", path: [] }, as: "item", body: sequence(`loop${i}-body`, [innermost]) };
+  }
+  const wf = workflow([task("seed"), innermost]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("found", ["x"])) }).state;
+  assert.equal(state.stack.length, LIMITS.stackDepth, "the deepest legal workflow exactly fills the persisted stack");
+  const parsed = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: false }))));
+  assert.equal(parsed.status, "active");
   const migrated = validateAgainstWorkflow(wf, parsed.execution);
   assert.ok(migrated.ok, migrated.ok ? "" : migrated.error);
 });

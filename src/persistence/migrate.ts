@@ -1,10 +1,11 @@
 import type { Execution, Frame, PlanExecution } from "../domain/execution.ts";
 import { LIMITS } from "../domain/limits.ts";
+import { lastSegment, planKeyOf } from "../domain/keys.ts";
 import type { Block, SequenceBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
 
-export type MigrationResult = { ok: true; execution: Execution } | { ok: false; error: string };
+type MigrationResult = { ok: true; execution: Execution } | { ok: false; error: string };
 
 function reject(error: string): MigrationResult {
   return { ok: false, error };
@@ -89,7 +90,7 @@ function validateLeaf(workflow: Workflow, state: Execution, leaf: Frame): string
     case "plan": {
       if (block.kind !== "plan") return `frame ${leaf.key} does not name a plan block`;
       if (leaf.kind === "plan") return undefined;
-      const execution = state.plans[leaf.key.slice(0, leaf.key.lastIndexOf("/"))] ?? state.plans[leaf.key];
+      const execution = state.plans[planKeyOf(leaf.key)] ?? state.plans[leaf.key];
       if (!execution) return `node frame ${leaf.key} has no plan execution`;
       if (!execution.plan.nodes.some((node) => node.id === leaf.nodeId)) return `node ${leaf.nodeId} is not in the active plan`;
       return undefined;
@@ -101,7 +102,7 @@ function validateLeaf(workflow: Workflow, state: Execution, leaf: Frame): string
 
 function validateCheckpoints(workflow: Workflow, state: Execution): string | undefined {
   for (const key of Object.keys(state.checkpoints)) {
-    const last = key.slice(key.lastIndexOf("/") + 1);
+    const last = lastSegment(key);
     const block = blockOf(workflow, last);
     const isNode = Object.values(state.plans).some((plan) => plan.plan.nodes.some((node) => node.id === last));
     if (!block && !isNode) return `checkpoint key ${key} does not belong to any block in the current workflow`;

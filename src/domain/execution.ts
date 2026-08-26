@@ -32,14 +32,14 @@ export interface RepeatFrame {
   readonly iteration: number;
 }
 
-export interface ChooseFrame {
+type ChooseFrame = {
   readonly kind: "choose";
   readonly blockId: string;
   readonly key: string;
   readonly caseName: string;
-}
+};
 
-export interface PlanFrame {
+type PlanFrame = {
   readonly kind: "plan";
   readonly blockId: string;
   readonly key: string;
@@ -67,7 +67,7 @@ export interface PlanExecution {
   readonly results: Readonly<Record<string, NodeResult>>;
 }
 
-export type ExecutionStatus = "active" | "completed" | "aborted";
+type ExecutionStatus = "active" | "completed" | "aborted";
 
 export interface Execution {
   readonly workflowName: string;

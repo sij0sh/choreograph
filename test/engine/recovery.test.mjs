@@ -167,6 +167,25 @@ test("plan creation retries and then blocks", () => {
   assert.ok(blocked.state.checkpoints["root/investigate"]);
 });
 
+test("plan-create attempts accumulate across retries and replans, then block", () => {
+  const wf = planWorkflow([], { plan: { recovery: { maxAttempts: 3, maxReplans: 2, strategy: ["retry", "replan"] } } });
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed")) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: planOf([node("probe"), node("map", "trace")]) }).state;
+  const trace = [];
+  let last;
+  for (let i = 0; i < 6; i += 1) {
+    last = transition(wf, state, { type: "outcome", outcome: needsWork(cp(`attempt ${i + 1}`)) });
+    assert.ok(last.ok, last.ok ? "" : last.error);
+    state = last.state;
+    const leaf = state.stack.at(-1);
+    trace.push(leaf.kind === "plan" ? `create@${leaf.attempt}` : `${leaf.kind}@${leaf.attempt}`);
+  }
+  assert.deepEqual(trace, ["node@2", "node@3", "create@2", "create@3", "create@4", "create@4"]);
+  assert.equal(last.effect.kind, "stay", "the combined budget ends in a blocked stay");
+  assert.equal(Object.values(state.plans)[0].replans, 2);
+});
+
 test("needs-work without matching targets falls through to block", () => {
   const wf = planWorkflow([
     task("verify", { recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate", "replan", "block"], scope: "investigate" } }),

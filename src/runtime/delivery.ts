@@ -1,4 +1,4 @@
-export interface DeliveryTarget {
+type DeliveryTarget = {
   readonly runId: string;
   readonly key: string;
   readonly message: string;
@@ -6,7 +6,7 @@ export interface DeliveryTarget {
   readonly beforeSend?: () => Promise<void>;
 }
 
-export interface DeliveryDeps {
+interface DeliveryDeps {
   readonly send: (message: string) => Promise<void>;
   readonly commitDelivered: () => void;
   readonly notify: (message: string, level: "info" | "error" | "warning") => void;
