@@ -5,7 +5,6 @@ import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { lastSegment } from "../domain/keys.ts";
-import type { NodeResult } from "../planning/schema.ts";
 
 type ReadBlock = (path: string, label: string) => string;
 
@@ -70,7 +69,7 @@ const PLAN_SCHEMA_SECTION = [
   `- Unknown keys and plans above ${LIMITS.planBytes / 1024} KiB are rejected.`,
 ].join("\n");
 
-function retainedResults(execution: { plan: { nodes: readonly { id: string; operator: string }[] }; results: Readonly<Record<string, NodeResult>> }): string {
+function retainedResults(execution: { plan: { nodes: readonly { id: string; operator: string }[] }; results: Readonly<Record<string, Checkpoint>> }): string {
   const lines = execution.plan.nodes
     .filter((node) => execution.results[node.id])
     .map((node) => `- \`${node.id}\` [${node.operator}]: ${execution.results[node.id].summary}`);
@@ -134,8 +133,8 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
   const execution = position.execution!;
   const dependencies = (node.dependsOn ?? [])
     .map((dependency) => execution.results[dependency])
-    .filter((result): result is NodeResult => Boolean(result))
-    .map((result) => `- \`${result.id}\`: ${result.summary}`);
+    .filter((result): result is Checkpoint => Boolean(result))
+    .map((result, index) => `- \`${(node.dependsOn ?? [])[index]}\`: ${result.summary}`);
   const unknowns = execution.plan.nodes
     .map((entry) => execution.results[entry.id]?.unknowns ?? [])
     .flat()

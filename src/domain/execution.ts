@@ -1,6 +1,6 @@
 import type { JsonValue } from "./json.ts";
 import type { Checkpoint } from "./checkpoint.ts";
-import type { DynamicPlan, NodeResult } from "../planning/schema.ts";
+import type { DynamicPlan } from "../planning/schema.ts";
 
 export interface SequenceFrame {
   readonly kind: "sequence";
@@ -41,7 +41,7 @@ export interface PlanExecution {
   readonly invalidations: number;
   readonly awaitingPlan?: boolean;
   readonly plan: DynamicPlan;
-  readonly results: Readonly<Record<string, NodeResult>>;
+  readonly results: Readonly<Record<string, import("../domain/checkpoint.ts").Checkpoint>>;
 }
 
 type ExecutionStatus = "active" | "completed" | "aborted";

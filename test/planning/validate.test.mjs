@@ -60,10 +60,10 @@ test("firstIncompleteNode finds the first node without a result", () => {
     revision: 1,
     replans: 0,
     plan: { version: 1, nodes: [node("a"), node("b"), node("c")] },
-    results: { a: { id: "a", summary: "done" }, c: { id: "c", summary: "done" } },
+    results: { a: { summary: "done" }, c: { summary: "done" } },
   };
   assert.equal(firstIncompleteNode(execution).id, "b");
-  const finished = { ...execution, results: { a: { id: "a", summary: "" }, b: { id: "b", summary: "" }, c: { id: "c", summary: "" } } };
+  const finished = { ...execution, results: { a: { summary: "" }, b: { summary: "" }, c: { summary: "" } } };
   assert.equal(firstIncompleteNode(finished), undefined);
 });
 
@@ -76,7 +76,7 @@ test("invalidateResults removes transitive dependents in declaration order", () 
       version: 1,
       nodes: [node("a"), node("b", "trace", { dependsOn: ["a"] }), node("c", "trace", { dependsOn: ["b"] }), node("d")],
     },
-    results: { a: { id: "a", summary: "1" }, b: { id: "b", summary: "2" }, c: { id: "c", summary: "3" }, d: { id: "d", summary: "4" } },
+    results: { a: { summary: "1" }, b: { summary: "2" }, c: { summary: "3" }, d: { summary: "4" } },
   };
   const { execution: next, removed } = invalidateResults(execution, ["a"]);
   assert.deepEqual(removed, ["a", "b", "c"], "dependents invalidate transitively");

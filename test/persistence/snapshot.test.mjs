@@ -23,7 +23,7 @@ test("an active snapshot round-trips through JSON and resumes", () => {
   const snapshot = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });
   const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
   assert.equal(parsed.status, "active");
-  assert.equal(parsed.v, 4);
+  assert.equal(parsed.v, 5);
   assert.deepEqual(parsed.execution, state);
 
   const migrated = validateAgainstWorkflow(wf, parsed.execution);
@@ -133,14 +133,14 @@ test("terminal snapshots parse as terminal", () => {
   assert.equal(legacy.status, "terminal");
 });
 
-test("pre-version-4 active snapshots report as invalid", () => {
+test("pre-version-5 active snapshots report as invalid", () => {
   const stale = parseSnapshot({ v: 3, status: "active", workflow: "demo", runId: "r1", position: { kind: "step", stepId: "frame" }, target: "", delivered: false, memory: { steps: {} } });
   assert.equal(stale.status, "invalid");
-  assert.match(stale.error, /version must be 4/);
+  assert.match(stale.error, /version must be 5/);
 });
 
 test("invalid snapshots never partially resume", () => {
-  const invalid = parseSnapshot({ v: 4, status: "active", workflow: "demo", execution: { status: "active", stack: [{ kind: "task" }] }, delivered: false });
+  const invalid = parseSnapshot({ v: 5, status: "active", workflow: "demo", execution: { status: "active", stack: [{ kind: "task" }] }, delivered: false });
   assert.equal(invalid.status, "invalid");
   assert.match(invalid.error, /blockId/);
   const notAnObject = parseSnapshot("nope");
@@ -172,7 +172,7 @@ test("latestSnapshot finds the newest custom entry on the branch", () => {
   const entry = (data) => ({ type: "custom", customType: "choreograph", data });
   const { state } = midRunState();
   const snap = activeSnapshot({ workflow: "demo", execution: state, delivered: true });
-  const branch = [entry({ v: 4, status: "aborted", workflow: "demo", runId: "old" }), entry(snap), { type: "user", text: "hi" }];
+  const branch = [entry({ v: 5, status: "aborted", workflow: "demo", runId: "old" }), entry(snap), { type: "user", text: "hi" }];
   const parsed = latestSnapshot(branch);
   assert.equal(parsed.status, "active");
   assert.equal(parsed.execution.runId, "run-1");
@@ -206,15 +206,9 @@ test("persisted plan results are validated entry by entry", () => {
   assert.match(garbage.error, /results\.node-a/);
 
   const validResults = structuredClone(withResults);
-  validResults.plans["root/investigate"].results = { "node-a": { id: "node-a", summary: "done" } };
+  validResults.plans["root/investigate"].results = { "node-a": { summary: "done" } };
   const valid = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: validResults, delivered: true }))));
   assert.equal(valid.status, "active");
-
-  const mismatched = structuredClone(withResults);
-  mismatched.plans["root/investigate"].results = { "node-a": { id: "node-b", summary: "wrong key" } };
-  const mismatch = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: mismatched, delivered: true }))));
-  assert.equal(mismatch.status, "invalid");
-  assert.match(mismatch.error, /result id/);
 });
 
 test("checkpointOrder round-trips and legacy snapshots infer insertion order", () => {

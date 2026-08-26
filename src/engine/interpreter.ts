@@ -6,10 +6,9 @@ import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import { planKeyOf } from "../domain/keys.ts";
 import type { PlanBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
-import { canonicalJson, type JsonValue } from "../domain/json.ts";
+import { canonicalJson, canonicalJsonBytes, type JsonValue } from "../domain/json.ts";
 import { firstIncompleteNode } from "../planning/graph.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
-import { validateNodeResult, type NodeResult } from "../planning/schema.ts";
 
 export type Issue = {
   readonly target: string;
@@ -228,19 +227,10 @@ function completeNode(workflow: Workflow, state: Execution, leaf: NodeFrame, out
   const criteriaError = checkCriteria(node.done, outcome.met ?? []);
   if (criteriaError) return fail(criteriaError);
   const { checkpoint } = outcome;
-  let result: NodeResult;
+  let result: Checkpoint;
   try {
-    result = validateNodeResult(
-      {
-        id: node.id,
-        summary: checkpoint.summary,
-        ...(checkpoint.evidence ? { evidence: checkpoint.evidence } : {}),
-        ...(checkpoint.decisions ? { decisions: checkpoint.decisions } : {}),
-        ...(checkpoint.unknowns ? { unknowns: checkpoint.unknowns } : {}),
-        ...(checkpoint.data !== undefined ? { data: checkpoint.data } : {}),
-      },
-      `node result ${node.id}`,
-    );
+    result = validateCheckpoint(checkpoint, `node result ${node.id}`);
+    if (canonicalJsonBytes(result as unknown as JsonValue) > LIMITS.nodeResultBytes) throw new Error(`node result ${node.id} exceeds ${LIMITS.nodeResultBytes} bytes`);
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
   }

@@ -119,3 +119,16 @@ test("the roster prompt lists only visible workflows", () => {
   assert.ok(!roster.includes("secret"));
   assert.equal(rosterPrompt([]), "");
 });
+
+test("prior checkpoint context follows execution order, not key spelling", () => {
+  const files = { "WORKFLOW.md": "# Overview", "steps/zeta.md": "# Z", "steps/alpha.md": "# A" };
+  const reader = (path) => {
+    if (!(path in files)) throw new Error(`missing ${path}`);
+    return files[path];
+  };
+  const wf = workflow([task("zeta"), task("alpha")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("ZETA-SUMMARY")) }).state;
+  const prompt = renderPrompt(wf, state, reader);
+  assert.ok(prompt.includes("ZETA-SUMMARY"), "a checkpoint written before the current position renders regardless of spelling");
+});

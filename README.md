@@ -143,7 +143,7 @@ Active tools are the intersection of the captured Pi baseline, the workflow ceil
 
 ### Snapshots and resume
 
-Every transition appends a durable snapshot before the in-memory state moves, and the delivery marker commits only after the follow-up is accepted. Active snapshots are version 4 and carry the full frame stack, checkpoints, and plan executions; restore revalidates them semantically against the current workflow. Snapshots from earlier engine versions drop with one actionable warning. Terminal snapshots stay minimal.
+Every transition appends a durable snapshot before the in-memory state moves, and the delivery marker commits only after the follow-up is accepted. Active snapshots are version 5 and carry the full frame stack, checkpoints, and plan executions; restore revalidates them semantically against the current workflow. Snapshots from earlier engine versions drop with one actionable warning. Terminal snapshots stay minimal.
 
 ## Architecture
 

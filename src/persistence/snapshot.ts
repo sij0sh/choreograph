@@ -5,12 +5,11 @@ import { LIMITS, PLAN_CREATE_ATTEMPT_MAX } from "../domain/limits.ts";
 import type { PlanExecution } from "../domain/execution.ts";
 import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.ts";
-import { validateNodeResult } from "../planning/schema.ts";
 
 export const SNAPSHOT_TYPE = "choreograph";
 
-export type ActiveSnapshotV4 = {
-  readonly v: 4;
+export type ActiveSnapshotV5 = {
+  readonly v: 5;
   readonly status: "active";
   readonly workflow: string;
   readonly execution: Execution;
@@ -18,11 +17,11 @@ export type ActiveSnapshotV4 = {
 };
 
 type TerminalSnapshot =
-  | { readonly v: 4; readonly status: "completed"; readonly workflow: string; readonly runId: string }
-  | { readonly v: 4; readonly status: "aborted"; readonly workflow: string; readonly runId: string };
+  | { readonly v: 5; readonly status: "completed"; readonly workflow: string; readonly runId: string }
+  | { readonly v: 5; readonly status: "aborted"; readonly workflow: string; readonly runId: string };
 
 export type ParsedSnapshot =
-  | ActiveSnapshotV4
+  | ActiveSnapshotV5
   | TerminalSnapshot
   | { readonly status: "terminal" }
   | { readonly status: "invalid"; readonly error: string };
@@ -99,8 +98,7 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
     const resultsRaw = objectAt(planRaw.results, `${label}.${key}.results`);
     const results: Record<string, PlanExecution["results"][string]> = {};
     for (const [id, value] of Object.entries(resultsRaw)) {
-      const result = validateNodeResult(value, `${label}.${key}.results.${id}`);
-      if (result.id !== id) throw new Error(`${label}.${key}.results.${id} must carry the result id "${id}"`);
+      const result = validateCheckpoint(value, `${label}.${key}.results.${id}`);
       results[id] = result;
     }
     plans[key] = {
@@ -159,15 +157,15 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
   const snapshot = data as Record<string, unknown>;
   if (snapshot.status === "completed" || snapshot.status === "aborted") return { status: "terminal" };
   if (snapshot.status !== "active") return null;
-  if (snapshot.v !== 4) {
-    return { status: "invalid", error: "snapshot version must be 4; snapshots from earlier engine versions are not resumable" };
+  if (snapshot.v !== 5) {
+    return { status: "invalid", error: "snapshot version must be 5; snapshots from earlier engine versions are not resumable" };
   }
   try {
     const execution = executionAt(snapshot.execution, "snapshot.execution");
     if (execution.workflowName !== snapshot.workflow) throw new Error("snapshot.workflow does not match snapshot.execution.workflowName");
     if (typeof snapshot.delivered !== "boolean") throw new Error("snapshot.delivered must be a boolean");
     return {
-      v: 4,
+      v: 5,
       status: "active",
       workflow: execution.workflowName,
       execution,
@@ -182,9 +180,9 @@ export function activeSnapshot(fields: {
   workflow: string;
   execution: Execution;
   delivered: boolean;
-}): ActiveSnapshotV4 {
+}): ActiveSnapshotV5 {
   return {
-    v: 4,
+    v: 5,
     status: "active",
     workflow: fields.workflow,
     execution: fields.execution,
@@ -193,5 +191,5 @@ export function activeSnapshot(fields: {
 }
 
 export function terminalSnapshot(status: "completed" | "aborted", workflow: string, runId: string): TerminalSnapshot {
-  return { v: 4, status, workflow, runId };
+  return { v: 5, status, workflow, runId };
 }

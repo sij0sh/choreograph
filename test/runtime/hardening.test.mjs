@@ -5,6 +5,7 @@ import { activeSnapshot } from "../../src/persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
 import { completed, cp, task, workflow } from "../engine/helpers.mjs";
 import { start, transition } from "../../src/engine/interpreter.ts";
+import { LIMITS } from "../../src/domain/limits.ts";
 
 function harness(options = {}) {
   const sent = [];
@@ -175,6 +176,21 @@ test("storage failure on abort keeps the run active", async () => {
   assert.match(result.details.status, /storage-failed/);
   const prompt = runtime.handleBeforeAgentStart({ systemPrompt: "" });
   assert.ok(prompt, "the run stays active and rendered");
+});
+
+test("oversized targets are refused before any snapshot is written", async () => {
+  const h = harness();
+  const wf = workflow([task("frame")]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const ctx = h.ctx();
+  runtime.handleSessionStart(ctx);
+  const big = "x".repeat(LIMITS.targetBytes + 1);
+  await assert.rejects(() => runtime.startWorkflow(ctx, wf, big), /target exceeds 4096 bytes/);
+  assert.equal(h.entries.length, 0, "no snapshot was appended for the refused start");
+  assert.equal(runtime.state.status, "idle");
+  await runtime.startWorkflow(ctx, wf, "x".repeat(LIMITS.targetBytes));
+  assert.ok(h.entries.length >= 1, "the exact-limit target starts normally");
+  assert.equal(runtime.state.status, "active");
 });
 
 test("transitions that exceed the memory bound are rejected without state change", async () => {
