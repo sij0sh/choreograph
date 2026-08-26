@@ -1,4 +1,11 @@
 import type { RecoveryPolicy } from "./policy.ts";
+import type { ContractDescriptor } from "./contract.ts";
+export type { ContractDescriptor } from "./contract.ts";
+
+export interface InputBinding {
+  readonly from: string;
+  readonly select?: string;
+}
 
 export interface TaskBlock {
   readonly kind: "task";
@@ -7,6 +14,8 @@ export interface TaskBlock {
   readonly tools?: readonly string[];
   readonly done?: readonly string[];
   readonly recovery?: RecoveryPolicy;
+  readonly inputs?: Readonly<Record<string, InputBinding>>;
+  readonly output?: string;
 }
 
 export interface SequenceBlock {
@@ -20,6 +29,7 @@ export interface PlanBlock {
   readonly id: string;
   readonly operators: readonly string[];
   readonly recovery?: RecoveryPolicy;
+  readonly inputs?: Readonly<Record<string, InputBinding>>;
 }
 
 export type Block = TaskBlock | SequenceBlock | PlanBlock;
@@ -29,6 +39,7 @@ export interface OperatorDescriptor {
   readonly path: string;
   readonly description: string;
   readonly tools?: readonly string[];
+  readonly output?: string;
 }
 
 export interface Workflow {
@@ -40,6 +51,8 @@ export interface Workflow {
   readonly tools?: readonly string[];
   readonly root: SequenceBlock;
   readonly operators: ReadonlyMap<string, OperatorDescriptor>;
+  readonly contracts: ReadonlyMap<string, ContractDescriptor>;
+  readonly inputEdges: ReadonlyMap<string, readonly string[]>;
 }
 
 const indexes = new WeakMap<Workflow, ReadonlyMap<string, Block>>();
@@ -70,4 +83,27 @@ export function blockOf(workflow: Workflow, id: string): Block | undefined {
 
 export function workflowBlocks(workflow: Workflow): readonly Block[] {
   return [...blockIndex(workflow).values()];
+}
+
+export function bindingConsumers(workflow: Workflow, producers: ReadonlySet<string>): ReadonlySet<string> {
+  const consumersOf = new Map<string, string[]>();
+  for (const [consumer, producerIds] of workflow.inputEdges ?? []) {
+    for (const producer of producerIds) {
+      const list = consumersOf.get(producer);
+      if (list) list.push(consumer);
+      else consumersOf.set(producer, [consumer]);
+    }
+  }
+  const affected = new Set<string>();
+  const queue = [...producers];
+  while (queue.length > 0) {
+    const producer = queue.shift()!;
+    for (const consumer of consumersOf.get(producer) ?? []) {
+      if (!affected.has(consumer)) {
+        affected.add(consumer);
+        queue.push(consumer);
+      }
+    }
+  }
+  return affected;
 }

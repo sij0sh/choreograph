@@ -15,6 +15,10 @@ export const LIMITS = {
   checkpointItemBytes: 512,
   planNodeObjectiveBytes: 512,
   planNodeListItems: 8,
+  contractBytes: 65_536,
+  contractsCount: 16,
+  bindingInputs: 8,
+  positionInputsBytes: 24_576,
   stackDepth: 24,
   advanceSteps: 10_000,
 } as const;

@@ -42,6 +42,7 @@ export interface PlanExecution {
   readonly awaitingPlan?: boolean;
   readonly plan: DynamicPlan;
   readonly results: Readonly<Record<string, import("../domain/checkpoint.ts").Checkpoint>>;
+  readonly resultOperators?: Readonly<Record<string, string>>;
 }
 
 type ExecutionStatus = "active" | "completed" | "aborted";
