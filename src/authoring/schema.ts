@@ -1,10 +1,11 @@
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
-import { objectAt, requireString } from "../domain/json.ts";
+import { isValidJsonPointer, objectAt, requireString } from "../domain/json.ts";
 import { DEFAULT_PLAN_RECOVERY, DEFAULT_TASK_RECOVERY, type RecoveryAction, type RecoveryPolicy } from "../domain/policy.ts";
+import type { InputBinding } from "../domain/workflow.ts";
 
-export const FRONTMATTER_KEYS = ["description", "steps", "piVisibility", "legalTools"] as const;
-export const STEP_KEYS = ["id", "run", "tools", "done", "repair", "plan"] as const;
-export const OPERATOR_KEYS = ["description", "tools"] as const;
+export const FRONTMATTER_KEYS = ["description", "steps", "piVisibility", "legalTools", "contracts"] as const;
+export const STEP_KEYS = ["id", "run", "tools", "done", "repair", "plan", "inputs", "output"] as const;
+export const OPERATOR_KEYS = ["description", "tools", "output"] as const;
 const RECOVERY_KEYS = ["max_attempts", "max_replans", "strategy", "scope"] as const;
 const RECOVERY_ACTIONS: readonly RecoveryAction[] = ["retry", "invalidate", "replan", "block"];
 const VARIABLE_PATTERN = /^[a-z][a-z0-9_-]*$/;
@@ -56,6 +57,33 @@ export function parseIdList(raw: unknown, label: string): string[] | undefined {
   });
   assertUnique(ids, label);
   return ids;
+}
+
+export function parseInputBindings(raw: unknown, label: string): Record<string, InputBinding> | undefined {
+  if (raw === undefined) return undefined;
+  const body = objectAt(raw, label);
+  const keys = Object.keys(body);
+  if (keys.length === 0) throw new Error(`${label} must not be empty`);
+  if (keys.length > LIMITS.bindingInputs) throw new Error(`${label} must have at most ${LIMITS.bindingInputs} entries`);
+  const bindings: Record<string, InputBinding> = {};
+  for (const name of keys) {
+    if (!ID_PATTERN.test(name)) throw new Error(`${label}.${name} must match ^[a-z][a-z0-9-]*$`);
+    const entry = objectAt(body[name], `${label}.${name}`);
+    const keysOf = Object.keys(entry);
+    for (const key of keysOf) {
+      if (key !== "from" && key !== "select") throw new Error(`${label}.${name}.${key} is not an accepted binding field`);
+    }
+    const from = stringAt(entry.from, `${label}.${name}.from`);
+    if (!ID_PATTERN.test(from)) throw new Error(`${label}.${name}.from must match ^[a-z][a-z0-9-]*$`);
+    let select: string | undefined;
+    if (entry.select !== undefined) {
+      if (typeof entry.select !== "string") throw new Error(`${label}.${name}.select must be a JSON Pointer such as /nodes/0/id`);
+      select = entry.select;
+      if (!isValidJsonPointer(select)) throw new Error(`${label}.${name}.select must be a JSON Pointer such as /nodes/0/id`);
+    }
+    bindings[name] = select === undefined ? { from } : { from, select };
+  }
+  return bindings;
 }
 
 export function parseRecovery(raw: unknown, label: string, defaults: RecoveryPolicy = DEFAULT_TASK_RECOVERY): RecoveryPolicy | undefined {

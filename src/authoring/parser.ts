@@ -3,12 +3,15 @@ import { basename, extname, isAbsolute, join, relative, resolve, sep } from "nod
 import { parseDocument } from "yaml";
 import type {
   Block,
+  ContractDescriptor,
+  InputBinding,
   OperatorDescriptor,
   PlanBlock,
   SequenceBlock,
   TaskBlock,
   Workflow,
 } from "../domain/workflow.ts";
+import { compileContract } from "../domain/contract.ts";
 import { LIMITS } from "../domain/limits.ts";
 import { DEFAULT_PLAN_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
 import {
@@ -22,13 +25,14 @@ import {
   MAX_WORKFLOW_BYTES,
   NAME_PATTERN,
   parseIdList,
+  parseInputBindings,
   parseRecovery,
   parseToolList,
   positiveIntAt,
   stringAt,
   VARIABLE_PATTERN,
 } from "./schema.ts";
-import { objectAt } from "../domain/json.ts";
+import { objectAt, type JsonValue } from "../domain/json.ts";
 
 export interface WorkflowDiagnostic {
   readonly path: string;
@@ -41,7 +45,7 @@ function escapesRoot(relativePath: string): boolean {
   return relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath);
 }
 
-function containedPath(lexicalRoot: string, realRoot: string, configured: string, label: string): string {
+function containedPath(lexicalRoot: string, realRoot: string, configured: string, label: string, maxBytes: number = MAX_INSTRUCTION_BYTES): string {
   if (isAbsolute(configured)) throw new Error(`${label} must be relative to the workflow directory`);
   const target = resolve(lexicalRoot, configured);
   const lexical = relative(lexicalRoot, target);
@@ -51,7 +55,7 @@ function containedPath(lexicalRoot: string, realRoot: string, configured: string
     if (escapesRoot(rel)) throw new Error(`${label} escapes the workflow directory`);
     const stats = statSync(target);
     if (!stats.isFile()) throw new Error(`${label} is not a file`);
-    if (stats.size > MAX_INSTRUCTION_BYTES) throw new Error(`${label} exceeds ${MAX_INSTRUCTION_BYTES} bytes`);
+    if (stats.size > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
   } catch (error) {
     if (error instanceof Error && error.message.startsWith(label)) throw error;
     throw new Error(`${label} is not a readable file`);
@@ -89,7 +93,82 @@ function extractFrontmatter(path: string, label: string): ObjectValue {
   return objectAt(document.toJS({ maxAliasCount: 0 }), `${label} frontmatter`);
 }
 
-function loadOperators(directory: string): Map<string, OperatorDescriptor> {
+function readContract(
+  contracts: Map<string, ContractDescriptor>,
+  id: string,
+  configured: string,
+  label: string,
+  lexicalRoot: string,
+  realRoot: string,
+): void {
+  if (!NAME_PATTERN.test(id)) throw new Error(`${label} id must match ^[a-z][a-z0-9-]*$`);
+  const path = containedPath(lexicalRoot, realRoot, configured, label, LIMITS.contractBytes);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const existing = contracts.get(id);
+  if (existing && existing.path !== path) throw new Error(`contract id "${id}" is declared more than once`);
+  if (!existing) {
+    contracts.set(id, { id, path, schema: parsed as JsonValue, validate: compileContract(parsed, label) });
+  }
+}
+
+function loadContracts(directory: string, configured: unknown): Map<string, ContractDescriptor> {
+  const contracts = new Map<string, ContractDescriptor>();
+  const lexicalRoot = resolve(directory);
+  const realRoot = realpathSync(directory);
+  const configuredEntries = configured === undefined ? [] : Object.entries(objectAt(configured, "contracts"));
+  if (configuredEntries.length > LIMITS.contractsCount) {
+    throw new Error(`contracts must contain at most ${LIMITS.contractsCount} entries`);
+  }
+  for (const [id, rawPath] of configuredEntries) {
+    if (typeof rawPath !== "string" || !rawPath.trim()) throw new Error(`contracts.${id} must be a non-empty path`);
+    const normalized = rawPath.trim().replaceAll("\\", "/");
+    if (!/^contracts\/[a-z][a-z0-9]*(?:-[a-z0-9]+)*\.schema\.json$/.test(normalized)) {
+      throw new Error(`contracts.${id} must reference a contracts/*.schema.json file inside the workflow directory`);
+    }
+    readContract(contracts, id, normalized, `contracts.${id}`, lexicalRoot, realRoot);
+  }
+
+  const contractsDirectory = join(directory, "contracts");
+  if (!existsSync(contractsDirectory)) return contracts;
+  try {
+    if (!statSync(contractsDirectory).isDirectory()) throw new Error("contracts/ is not a directory");
+  } catch (error) {
+    throw new Error(`contracts/ is not readable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let entries;
+  try {
+    entries = readdirSync(contractsDirectory, { withFileTypes: true });
+  } catch (error) {
+    throw new Error(`contracts/ is not readable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const files = entries
+    .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".schema.json"))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (files.length > LIMITS.contractsCount) {
+    throw new Error(`contracts/ must contain at most ${LIMITS.contractsCount} schema files`);
+  }
+  const configuredPaths = new Set([...contracts.values()].map((contract) => contract.path));
+  for (const entry of files) {
+    const id = basename(entry.name, ".schema.json");
+    const label = `contracts/${entry.name}`;
+    if (!NAME_PATTERN.test(id)) throw new Error(`${label} file stem must match ^[a-z][a-z0-9-]*$`);
+    const path = containedPath(lexicalRoot, realRoot, `contracts/${entry.name}`, label, LIMITS.contractBytes);
+    if (configured !== undefined) {
+      if (!configuredPaths.has(path)) throw new Error(`${label} is not listed in frontmatter contracts`);
+      continue;
+    }
+    readContract(contracts, id, `contracts/${entry.name}`, label, lexicalRoot, realRoot);
+  }
+  if (contracts.size > LIMITS.contractsCount) throw new Error(`workflow must contain at most ${LIMITS.contractsCount} contracts`);
+  return contracts;
+}
+
+function loadOperators(directory: string, contracts: ReadonlyMap<string, ContractDescriptor>): Map<string, OperatorDescriptor> {
   const operators = new Map<string, OperatorDescriptor>();
   const operatorsDirectory = join(directory, "operators");
   if (!existsSync(operatorsDirectory)) return operators;
@@ -109,11 +188,16 @@ function loadOperators(directory: string): Map<string, OperatorDescriptor> {
     const path = containedPath(lexicalRoot, realRoot, `operators/${entry.name}`, label);
     const frontmatter = extractFrontmatter(path, label);
     assertKeys(frontmatter, OPERATOR_KEYS, `${label} frontmatter`);
+    const output = frontmatter.output === undefined ? undefined : stringAt(frontmatter.output, `${label} output`);
+    if (output !== undefined && !contracts.has(output)) {
+      throw new Error(`${label} output names contract "${output}", which has no contracts/ file`);
+    }
     operators.set(id, {
       id,
       path,
       description: stringAt(frontmatter.description, `${label} description`),
       ...(frontmatter.tools !== undefined ? { tools: parseToolList(frontmatter.tools, `${label} tools`)! } : {}),
+      ...(output !== undefined ? { output } : {}),
     });
   }
   return operators;
@@ -123,13 +207,27 @@ interface CompileContext {
   readonly lexicalRoot: string;
   readonly realRoot: string;
   readonly operators: ReadonlyMap<string, OperatorDescriptor>;
+  readonly contracts: ReadonlyMap<string, ContractDescriptor>;
   readonly ids: Set<string>;
+  readonly inputEdges: Map<string, string[]>;
 }
 
 function registerId(context: CompileContext, id: string, label: string): void {
   if (!NAME_PATTERN.test(id)) throw new Error(`${label} id must match ^[a-z][a-z0-9-]*$`);
   if (context.ids.has(id)) throw new Error(`${label} id "${id}" is already used in this workflow`);
   context.ids.add(id);
+}
+
+function recordInputEdges(context: CompileContext, consumerId: string, inputs: Record<string, InputBinding> | undefined, label: string): void {
+  if (!inputs) return;
+  const producers = context.inputEdges.get(consumerId) ?? [];
+  for (const [name, binding] of Object.entries(inputs)) {
+    if (binding.from === "root" || binding.from === consumerId || !context.ids.has(binding.from)) {
+      throw new Error(`${label}.${name}.from names "${binding.from}", which is not an earlier step`);
+    }
+    if (!producers.includes(binding.from)) producers.push(binding.from);
+  }
+  context.inputEdges.set(consumerId, producers);
 }
 
 function parseStepsList(raw: unknown, label: string, context: CompileContext): Block[] {
@@ -159,15 +257,24 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
   if (structural.length === 1) {
     const id = stringAt(entry.id, `${label}.id`);
     registerId(context, id, label);
-    for (const key of ["run", "tools", "model", "done"] as const) {
+    for (const key of ["run", "tools", "model", "done", "output"] as const) {
       if (entry[key] !== undefined) throw new Error(`${label}.${key} only applies to "run:" tasks`);
     }
     if (entry.repair !== undefined) throw new Error(`${label}.repair only applies to "run:" tasks and "plan:" blocks`);
-    return parsePlan(entry.plan, id, label, context);
+    const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
+    recordInputEdges(context, id, inputs, label);
+    const block = parsePlan(entry.plan, id, label, context);
+    return inputs ? { ...block, inputs } : block;
   }
   const path = normalizeInstruction(stringAt(entry.run, `${label}.run (or a legacy step string)`), index, label, context);
   const id = entry.id === undefined ? deriveStepLabel(entry.run as string, index) : stringAt(entry.id, `${label}.id`);
   registerId(context, id, label);
+  const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
+  recordInputEdges(context, id, inputs, label);
+  const output = entry.output === undefined ? undefined : stringAt(entry.output, `${label}.output`);
+  if (output !== undefined && !context.contracts.has(output)) {
+    throw new Error(`${label}.output names contract "${output}", which has no contracts/ file`);
+  }
   return {
     kind: "task",
     id,
@@ -175,6 +282,8 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     ...(entry.tools !== undefined ? { tools: parseToolList(entry.tools, `${label}.tools`)! } : {}),
     ...(entry.done !== undefined ? { done: parseIdList(entry.done, `${label}.done`)! } : {}),
     ...(entry.repair !== undefined ? { recovery: parseRecovery(entry.repair, `${label}.repair`)! } : {}),
+    ...(inputs ? { inputs } : {}),
+    ...(output !== undefined ? { output } : {}),
   } satisfies TaskBlock;
 }
 
@@ -204,8 +313,9 @@ export function loadWorkflowManifest(directory: string): Workflow {
   const description = stringAt(data.description, "description");
   const piVisibility = data.piVisibility === undefined ? false : booleanAt(data.piVisibility, "piVisibility");
   const tools = parseToolList(data.legalTools, "legalTools");
-  const operators = loadOperators(directory);
-  const context: CompileContext = { lexicalRoot: resolve(directory), realRoot: realpathSync(directory), operators, ids: new Set(["root"]) };
+  const contracts = loadContracts(directory, data.contracts);
+  const operators = loadOperators(directory, contracts);
+  const context: CompileContext = { lexicalRoot: resolve(directory), realRoot: realpathSync(directory), operators, contracts, ids: new Set(["root"]), inputEdges: new Map() };
   if (!Array.isArray(data.steps) || data.steps.length === 0) throw new Error("steps must be a non-empty list");
   const children = (data.steps as unknown[]).map((entry, index) => parseStepEntry(entry, index, `steps[${index}]`, context));
   return {
@@ -216,6 +326,8 @@ export function loadWorkflowManifest(directory: string): Workflow {
     piVisibility,
     root: { kind: "sequence", id: "root", children },
     operators,
+    contracts,
+    inputEdges: context.inputEdges,
     ...(tools ? { tools } : {}),
   };
 }
