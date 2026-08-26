@@ -1,49 +1,150 @@
 # choreograph
 
-A [pi](https://github.com/earendil-works/pi-coding-agent) coding-agent extension that runs ordered workflows from markdown definitions.
+A [Pi](https://github.com/earendil-works/pi-coding-agent) extension that runs
+ordered, resumable workflows from Markdown files.
 
-A workflow resembles a skill with one difference: its structure is explicit, ordered, and typed. Workflows compose task and plan blocks, execute resumably one position at a time, and keep recovery policy-driven.
+## Why choreograph?
 
-## Workflow definitions
+Pi skills provide reusable instructions, but they do not enforce an execution
+order. choreograph adds an explicit workflow structure for tasks that need
+repeatable stages, completion criteria, bounded tool access, and recovery from
+incomplete work.
 
-Definitions are agent data. They live under `$PI_CODING_AGENT_DIR/workflows` (default `~/.pi/agent/workflows`). This repository hosts the engine only, so it stays location-independent.
+A workflow can combine two block types:
 
-### Structure
+- **Tasks** run a specific Markdown instruction file.
+- **Plans** let the model build a small dependency-ordered plan from trusted
+  operator files.
 
+choreograph runs one position at a time. Each position records a checkpoint
+before the workflow advances. If work is incomplete, a recovery policy can
+retry it, invalidate affected results, replan, or stop for user input.
+
+## Install
+
+From the repository root, install the dependencies and create an extension
+symlink:
+
+```bash
+npm install
+mkdir -p ~/.pi/agent/extensions
+ln -sfn "$PWD" ~/.pi/agent/extensions/choreograph
 ```
+
+The symlink points to the checkout, so future pulls do not require another
+installation. Start a new Pi process after installing or updating the
+extension.
+
+## Try it without installing
+
+Run this command from the repository root:
+
+```bash
+npm install
+pi -e ./src/index.ts
+```
+
+This loads choreograph for that Pi process only.
+
+## Quick start
+
+Workflows live under `$PI_CODING_AGENT_DIR/workflows`. The default location is
+`~/.pi/agent/workflows`.
+
+Create a workflow with two task files:
+
+```text
+~/.pi/agent/workflows/review-change/
+├── WORKFLOW.md
+└── steps/
+    ├── 01-inspect.md
+    └── 02-report.md
+```
+
+Add this frontmatter and overview to `WORKFLOW.md`:
+
+```markdown
+---
+description: Inspect a code change and report actionable findings.
+piVisibility: true
+legalTools: [read, grep, bash]
+steps:
+  - run: steps/01-inspect.md
+    id: inspect
+    done: [change-understood, tests-checked]
+  - run: steps/02-report.md
+    id: report
+    done: [findings-delivered]
+---
+
+Review the requested change for correctness, regressions, and missing tests.
+Prefer specific findings with file and line references.
+```
+
+Write the instructions for each stage in the two step files. Then start a new
+Pi process and run:
+
+```text
+/review-change path/to/change
+```
+
+The text after the command is optional. choreograph passes it to every
+position as the workflow target.
+
+Every valid workflow gets a slash command named after its directory. When
+`piVisibility` is `true`, the model can also discover and start it through the
+`workflow_start` tool. Only one workflow can be active at a time.
+
+## Workflow structure
+
+A workflow directory has this shape:
+
+```text
 my-workflow/
-├── WORKFLOW.md          # Frontmatter + overview
-├── steps/               # Recommended; any contained .md path works
-│   ├── 01-frame.md      # Markdown task instructions
-│   └── ...
-└── operators/           # Optional; trusted operator registry (enforced name)
+├── WORKFLOW.md          # Required frontmatter and workflow overview
+├── steps/               # Recommended convention
+│   ├── 01-frame.md      # Task instructions
+│   └── 02-deliver.md
+└── operators/           # Optional trusted operator registry
     ├── inspect.md
     └── trace.md
 ```
 
-Path rules: `steps/` is a convention, not a parser rule; task files may live anywhere inside the workflow directory. `operators/` is enforced and non-recursive; the compiler scans only direct `operators/*.md` children and validates every discovered operator, including unused ones. Frontmatter in task files is stripped at prompt time and otherwise ignored.
+The workflow directory name becomes its id and slash command. It must match
+`^[a-z][a-z0-9-]*$`.
 
-### Frontmatter
+Task files may use any contained `.md` path. The `steps/` directory is only a
+convention. Paths cannot be absolute or escape the workflow directory through
+`..` or a symlink.
 
-The workflow name equals its directory name and must match `^[a-z][a-z0-9-]*$`. Unknown keys are rejected.
+The `operators/` name is enforced. choreograph reads only direct
+`operators/*.md` children. It validates every discovered operator, even when a
+workflow does not use it.
+
+Frontmatter in task files is optional. When valid object frontmatter is
+present, choreograph removes it from the instructions shown to the model.
+
+## Workflow frontmatter
+
+`WORKFLOW.md` must start with YAML frontmatter. Unknown fields are rejected.
+The Markdown body becomes the overview shown at every workflow position.
 
 ```yaml
 ---
-description: What it does and when to use it.
-piVisibility: true              # Optional; exposes the workflow to the model
-legalTools: [read, bash]         # Optional; workflow tool ceiling
+description: What this workflow does and when to use it.
+piVisibility: true
+legalTools: [read, grep, bash]
 steps:
-  - steps/01-frame.md           # String steps are legacy shorthand for run:
-  - run: steps/02-observe.md    # A task
-    id: observe
-    done: [evidence-recorded]
-  - id: investigate             # A dynamic plan
+  - run: steps/01-frame.md
+    id: frame
+    done: [scope-clear]
+  - id: investigate
     plan:
       operators: [inspect, trace]
       repair:
         max_attempts: 2
         max_replans: 2
-  - run: steps/06-deliver.md
+  - run: steps/03-deliver.md
     id: deliver
     repair:
       strategy: [invalidate, block]
@@ -52,121 +153,227 @@ steps:
 ```
 
 | Field | Required | Effect |
-|---|---|---|
-| `description` | Yes | Appears in the roster. |
-| `steps` | Yes | Non-empty list of blocks. String entries are legacy shorthand for task `run:` entries. |
-| `piVisibility` | No | Exposes the workflow through the roster and the `workflow_start` enum. Defaults to `false`. |
-| `legalTools` | No | Workflow tool ceiling. |
+|---|---:|---|
+| `description` | Yes | Describes the workflow in Pi and to the model. |
+| `steps` | Yes | Defines a non-empty ordered list of task and plan blocks. |
+| `piVisibility` | No | Adds the workflow to the model-facing roster and `workflow_start` tool. Defaults to `false`. |
+| `legalTools` | No | Limits the Pi tools available throughout the workflow. |
 
-### Block kinds
+A string step such as `steps/01-frame.md` is supported as legacy shorthand for
+`run: steps/01-frame.md`. New workflows should use the explicit form.
 
-| Kind | Keys | Effect |
-|---|---|---|
-| Task | `run`, `id?`, `tools?`, `done?`, `repair?` | Runs one markdown instruction file to completion. |
-| `plan` | `operators`, `repair?` | The model composes a bounded plan from trusted operators; the engine runs it one node per turn. |
+### Task blocks
 
-Every block needs a unique `id` across the workflow; task ids may derive from their file stem. Workflows are static sequences and plans: loop (`for_each`), iterate (`repeat`), branch (`choose`), predicate (`until`), and data-reference (`$task.field`, `$current`) authoring were removed in v0.1.1 and now fail as unknown keys.
-
-Task outputs reach later positions through rendered prior checkpoint summaries; no reference language exists. Arbitrary `checkpoint.data` is persisted but reserved for engine use such as plan payloads.
-
-### Recovery
-
-Tasks report `needs-work` with `issues: [{ target, reason }]`. Recovery policy decides what happens; authors never wire graph edges:
+A task runs one Markdown instruction file to completion.
 
 ```yaml
-repair:
-  max_attempts: 2     # runs of the position per occurrence
-  max_replans: 2      # invalidate + replan budget
-  strategy: [retry, invalidate, replan, block]
-  scope: investigate  # the plan block that invalidate and replan target
+- run: steps/01-inspect.md
+  id: inspect
+  tools: [read, grep]
+  done: [implementation-checked, tests-checked]
+  repair:
+    max_attempts: 2
+    strategy: [retry, block]
 ```
 
-- **retry** re-runs the current position while attempts remain.
-- **invalidate** removes the targeted plan results or task checkpoints plus transitive dependents, then resumes at the earliest invalidated node. WHEN the target names a node of the plan the current position belongs to, that plan owns the issue even when its result is absent. Otherwise the search spans plans in scope.
-- **replan** returns to plan creation, retaining valid completed results.
-- **block** records the checkpoint and waits for the user.
+| Field | Required | Effect |
+|---|---:|---|
+| `run` | Yes | Names a contained Markdown instruction file. |
+| `id` | No | Sets the block id. Otherwise the file stem is used, with a leading numeric prefix removed. |
+| `tools` | No | Further limits the tools available for this task. |
+| `done` | No | Lists criterion ids that a successful transition must report. |
+| `repair` | No | Overrides the task recovery policy. |
 
-Defaults: tasks use `retry, block`; plan blocks use the full ladder.
+Every block id must be unique within the workflow and match
+`^[a-z][a-z0-9-]*$`.
+
+### Plan blocks
+
+A plan block asks the model to create a bounded plan from trusted operators.
+The engine then runs each node in dependency order, one node per turn.
+
+```yaml
+- id: investigate
+  plan:
+    operators: [inspect, trace]
+    repair:
+      max_attempts: 2
+      max_replans: 2
+```
+
+Plan creation returns the plan in `checkpoint.data.plan`:
+
+```json
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "inspect-api",
+      "operator": "inspect",
+      "objective": "Inspect the changed API behavior.",
+      "done": ["behavior-documented"]
+    },
+    {
+      "id": "trace-callers",
+      "operator": "trace",
+      "objective": "Trace affected callers.",
+      "dependsOn": ["inspect-api"],
+      "evidence": ["direct call sites"],
+      "done": ["callers-checked"]
+    }
+  ]
+}
+```
+
+A plan must contain 2 to 8 nodes. Node ids must be unique. Each node must use
+an operator allowed by the block. Dependencies may name only earlier nodes or
+retained results from a previous plan revision.
 
 ### Operators
 
-Operators are trusted instruction files under `operators/`. The file stem is the operator id. Plan creation sees only ids and descriptions; node execution sees only that node's operator body.
+Operators are trusted instruction files under `operators/`. The file stem is
+the operator id. Plan creation sees only each operator's id and description.
+Node execution also receives that operator's Markdown body.
 
-```yaml
+```markdown
 ---
-description: Trace control and data flow through the relevant path.
-tools: [read, bash]    # Optional; operator tool ceiling
+description: Trace control and data flow through the relevant code.
+tools: [read, grep]
 ---
-# Trace
-...operator instructions...
+
+Follow the relevant call path. Record direct evidence for each conclusion.
 ```
 
-### Dynamic plans
+Operator frontmatter accepts only `description` and optional `tools`. The
+operator tool list further limits the tools available while its nodes run.
 
-A plan creation pass carries `checkpoint.data.plan`:
+## Recovery
+
+A position reports incomplete work with `status: needs-work` and one or more
+issues:
 
 ```json
-{ "version": 1, "nodes": [ { "id", "operator", "objective", "dependsOn"?, "evidence"?, "done" } ] }
+{
+  "status": "needs-work",
+  "checkpoint": { "summary": "The affected callers are not yet confirmed." },
+  "issues": [
+    { "target": "trace-callers", "reason": "No direct call-site evidence." }
+  ]
+}
 ```
 
-Validation happens before anything commits: 2-8 nodes, unique ids, only the block's trusted operators, dependencies on earlier nodes or retained results, and size bounds. Nodes never carry their own tools; the operator ceiling governs.
+The applicable `repair` policy selects the next available action:
 
-Hard limits: 2 node attempts, 2 replans, 2 invalidations per plan, 8 nodes, 4 KiB summaries, 16 KiB checkpoints, 8 KiB results, 32 KiB plans, 512 KiB total memory.
+```yaml
+repair:
+  max_attempts: 2
+  max_replans: 2
+  strategy: [retry, invalidate, replan, block]
+  scope: investigate
+```
+
+- **`retry`** runs the current position again while attempts remain.
+- **`invalidate`** removes targeted results and their transitive dependents,
+  then resumes at the earliest invalidated position.
+- **`replan`** returns to plan creation while retaining valid completed
+  results.
+- **`block`** records the checkpoint and waits for user input.
+
+Tasks default to `[retry, block]`. Plan blocks default to
+`[retry, invalidate, replan, block]`. Both default to two runs per position.
+Authors may set `max_attempts` from 1 to 3. Plans permit at most two replans and
+two invalidations.
 
 ## Runtime behavior
 
-1. `workflow_start <name>` (tool or slash command) starts a run at the first position.
-2. Each position's kickoff is a one-line control message delivered when the agent settles, so at most one continuation is queued and none survive completion. Full instructions render in `before_agent_start`, so history never accumulates workflow content.
-3. Every position concludes with `workflow_transition`:
+Each position must finish with one `workflow_transition` call:
 
 ```json
 {
   "status": "completed",
   "met": ["scope-clear"],
-  "checkpoint": { "summary": "Scope established." }
+  "checkpoint": {
+    "summary": "The scope and affected components are confirmed.",
+    "evidence": ["src/example.ts:10"]
+  }
 }
 ```
 
-WHEN the position has problems, it concludes with:
+A completion must include every criterion from the task or plan node's `done`
+list. Checkpoint summaries from earlier positions are shown to later
+positions. Arbitrary `checkpoint.data` is persisted, but it is reserved for
+engine features such as dynamic plans.
 
-```json
-{
-  "status": "needs-work",
-  "checkpoint": { "summary": "Evidence is incomplete." },
-  "issues": [{ "target": "inspect-auth", "reason": "No direct test evidence." }]
-}
-```
+`workflow_abort` stops the active run. choreograph saves a snapshot before
+moving between positions and resumes active runs from the current session
+branch. Snapshot format changes can make older active runs non-resumable; Pi
+shows a warning and leaves the session idle in that case.
 
-`workflow_abort` stops the run. WHEN a second transition arrives before its instructions, the engine rejects it with `delivery-pending`; one transition is accepted per agent turn.
+### Tool access
 
-### Tool authority
+choreograph starts with the tools that Pi made available at session start. It
+then intersects that baseline with each configured ceiling:
 
-Active tools are the intersection of the captured Pi baseline, the workflow ceiling, the current task's ceiling, and the current operator's ceiling, plus `workflow_transition` and `workflow_abort`.
+1. The workflow's `legalTools` list.
+2. The current task's `tools` list.
+3. The current operator's `tools` list.
 
-### Snapshots and resume
+`workflow_transition` and `workflow_abort` remain available during a run. An
+unknown tool name has no effect and produces a warning at session start.
 
-Every transition appends a durable snapshot before the in-memory state moves, and the delivery marker commits only after the follow-up is accepted. Active snapshots are version 5 and carry the full frame stack, checkpoints, and plan executions; restore revalidates them semantically against the current workflow. Snapshots from earlier engine versions drop with one actionable warning. Terminal snapshots stay minimal.
+## Limits
 
-## Architecture
+choreograph enforces these main bounds:
 
-```text
-src/
-  authoring/   YAML schema, compiler
-  domain/      Block AST, execution frames, checkpoints, policy, limits
-  engine/      Pure stack interpreter and policy-driven recovery
-  planning/    Dynamic plan schema, validation, graph helpers
-  persistence/ v5 snapshot codec, semantic restore, session store
-  runtime/     Capabilities, prompts, status, delivery, coordinator
-  pi/          Tool, command, and lifecycle registration
-```
+| Data | Limit |
+|---|---:|
+| Workflow or instruction file | 128,000 bytes |
+| Dynamic plan | 32 KiB |
+| Plan nodes | 8 |
+| Checkpoint summary | 4 KiB |
+| Complete checkpoint | 16 KiB |
+| Plan node result | 8 KiB |
+| Total workflow memory | 512 KiB |
 
-The interpreter knows nothing about Pi, the filesystem, models, or the UI. Invariants live in `test/engine/invariants.test.mjs`.
+Workflows are ordered sequences plus dynamic plans. They do not support loops,
+branches, predicates, or expressions that reference earlier task data. Later
+positions receive prior checkpoint summaries instead.
 
-## Tests
+## Development
 
-```sh
-npm install
+Run the complete validation suite:
+
+```bash
 npm test
 ```
 
-`tsc --strict` type-checks `src/`, then `node --test` runs the suites: pure engine tests (no mocks), authoring compiler tests, persistence round-trips, runtime contract tests, and end-to-end extension tests.
+The command runs TypeScript in strict mode, then executes the engine,
+authoring, persistence, runtime, and integration tests.
+
+The project groups source by responsibility:
+
+```text
+src/
+  authoring/   Workflow parsing and validation
+  domain/      Workflow and execution types, checkpoints, policy, limits
+  engine/      Pure interpreter and recovery logic
+  planning/    Dynamic plan schema and validation
+  persistence/ Snapshot codec and session store
+  runtime/     Tool access, prompts, delivery, and coordination
+  pi/          Pi tool, command, and lifecycle registration
+```
+
+## Uninstall
+
+Remove the extension symlink:
+
+```bash
+unlink ~/.pi/agent/extensions/choreograph
+```
+
+This leaves the repository, workflows, and saved session data untouched. Start
+a new Pi process afterward.
+
+## License
+
+[MIT](LICENSE) (c) 2026 choreograph contributors
