@@ -25,7 +25,7 @@ Write `WORKFLOW.md` with this shape; unknown keys are rejected.
 ```yaml
 ---
 description: What it does and when to use it.
-piVisibility: true              # Optional; exposes the workflow to the model; defaults to false
+piVisibility: false              # Optional; exposes the workflow to the model; defaults to false
 legalTools: [read, bash]        # Optional; workflow tool ceiling
 steps:
   - run: steps/02-observe.md    # A task

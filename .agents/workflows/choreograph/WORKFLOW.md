@@ -1,6 +1,6 @@
 ---
 description: Create a new choreograph workflow definition end to end.
-piVisibility: true
+piVisibility: false
 legalTools:
   - read
   - bash
