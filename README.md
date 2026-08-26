@@ -8,7 +8,8 @@ ordered, resumable workflows from Markdown files.
 Pi skills provide reusable instructions, but they do not enforce an execution
 order. choreograph adds an explicit workflow structure for tasks that need
 repeatable stages, completion criteria, bounded tool access, and recovery from
-incomplete work.
+incomplete work. Each position also starts from a clean context window:
+checkpoints, not transcript history, carry state between positions.
 
 A workflow can combine two block types:
 
@@ -330,6 +331,9 @@ then intersects that baseline with each configured ceiling:
 2. The current task's `tools` list.
 3. The current operator's `tools` list.
 
+Active-run snapshots persist that baseline. Reloading a session restores the
+run's full tool set instead of the narrowed active one.
+
 `workflow_transition` and `workflow_abort` remain available during a run. An
 unknown tool name has no effect and produces a warning at session start.
 
@@ -371,7 +375,7 @@ src/
   engine/      Pure interpreter and recovery logic
   planning/    Dynamic plan schema and validation
   persistence/ Snapshot codec and session store
-  runtime/     Tool access, prompts, delivery, and coordination
+  runtime/     Tool access, prompts, delivery, context isolation, coordination
   pi/          Pi tool, command, and lifecycle registration
 ```
 
