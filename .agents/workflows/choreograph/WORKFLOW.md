@@ -13,6 +13,7 @@ steps:
       - target-named
       - steps-planned
       - contracts-declared
+      - guards-justified
   - run: steps/02-author.md
     id: author
     done:

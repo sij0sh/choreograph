@@ -53,6 +53,32 @@ Rules:
 - `inputs.from` MUST name a block declared earlier in `steps` order.
 - `output` MUST name a discovered contract id. It is invalid on `plan:` steps; plans emit an engine-generated aggregate.
 
+## Guards
+
+A task or plan step MAY carry one `when:` guard. The engine evaluates it
+before the step runs; a guard that does not hold skips the step with a
+synthetic `skipped` checkpoint.
+
+```yaml
+- run: steps/03-deep-trace.md
+  id: deep-trace
+  when:
+    from: triage          # earlier step id
+    select: /data/severity # optional JSON Pointer into the artifact
+    op: in                 # equals | not-equals | in | not-in | exists | not-exists | gt | gte | lt | lte
+    value: [high, critical]
+```
+
+Rules:
+- `from` MUST name a block declared earlier in `steps` order.
+- Value ops require `value`; `exists` and `not-exists` forbid it.
+- `equals`/`not-equals` take a scalar; `in`/`not-in` take a non-empty scalar
+  list; `gt`/`gte`/`lt`/`lte` take a finite number.
+- A missing artifact or unresolvable pointer makes every value op false
+  (including negations). Use `exists`/`not-exists` to key off presence.
+- A guard registers a dependency edge, so invalidating the producer
+  re-evaluates the guard on the next pass.
+
 ## Contracts
 
 Contracts are JSON Schema files under `contracts/`. The file stem becomes the
