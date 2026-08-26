@@ -158,6 +158,13 @@ steps:
     repair:
       strategy: [invalidate, block]
       scope: investigate
+  - run: steps/04-file-issues.md
+    id: file-issues
+    when:
+      from: deliver
+      select: /data/severity
+      op: in
+      value: [high, critical]
 ---
 ```
 
@@ -195,6 +202,7 @@ A task runs one Markdown instruction file to completion.
 | `repair` | No | Overrides the task recovery policy. |
 | `inputs` | No | Binds earlier artifacts to this position; see [Artifacts and contracts](#artifacts-and-contracts). |
 | `output` | No | Names the contract that `checkpoint.data` must satisfy. |
+| `when` | No | Guards this task on an earlier artifact; see [Guards](#guards). |
 
 Every block id must be unique within the workflow and match
 `^[a-z][a-z0-9-]*$`.
@@ -217,7 +225,7 @@ The engine then runs each node in dependency order, one node per turn.
       select: /data/scope
 ```
 
-Plan blocks accept `inputs` (bound before plan creation) and `repair`. They
+Plan blocks accept `inputs` (bound before plan creation), `repair`, and `when` guards. They
 do not accept `output`; a completed plan emits an engine-generated aggregate
 artifact (see below) rather than a contract-validated checkpoint.
 
@@ -341,6 +349,48 @@ drops the largest entries first and names what was cut plus the surviving
 top-level keys, so a `select` pointer can recover the missing data.
 Contract-bearing node dependency data shares the same budget.
 
+## Guards
+
+A task or plan block may carry one `when` guard. The engine evaluates it
+whenever the block becomes current: at start, after each transition, and
+after recovery rewinds. A guard that does not hold skips the block with a
+synthetic `skipped` checkpoint instead of running it.
+
+```yaml
+- run: steps/04-file-issues.md
+  id: file-issues
+  when:
+    from: deliver
+    select: /data/severity
+    op: in
+    value: [high, critical]
+```
+
+| Field | Required | Effect |
+|---|---:|---|
+| `from` | Yes | Names a block declared earlier in `steps` order. |
+| `select` | No | RFC 6901 JSON Pointer into the producer's artifact. The whole artifact when omitted. |
+| `op` | Yes | One of `equals`, `not-equals`, `in`, `not-in`, `exists`, `not-exists`, `gt`, `gte`, `lt`, `lte`. |
+| `value` | Depends | Required by the eight value ops; forbidden for `exists` and `not-exists`. |
+
+Evaluation rules:
+
+- Task producers expose their latest checkpoint; plan producers expose the
+  engine-generated aggregate.
+- A missing producer artifact or an unresolvable pointer makes every value op
+  false, including negations. Use `exists` or `not-exists` to key off
+  presence.
+- `equals` and `not-equals` compare canonical JSON. `in` and `not-in` test
+  membership. The comparison ops require finite numbers on both sides.
+
+Skipping rules:
+
+- A skipped block records `{ summary, skipped: true }` and never prompts.
+- A skipped plan block also drops its plan execution, so consumers never see a
+  stale aggregate.
+- Guards register a dependency edge like `inputs`, so invalidating a producer
+  rewinds guard consumers and the guard re-evaluates on the next pass.
+
 ## Recovery
 
 A position reports incomplete work with `status: needs-work` and one or more
@@ -452,9 +502,7 @@ choreograph enforces these main bounds:
 | Plan node result | 8 KiB |
 | Total workflow memory | 512 KiB |
 
-Workflows are ordered sequences plus dynamic plans. They do not support loops,
-branches, predicates, or expressions that reference earlier task data. Later
-positions receive prior checkpoint summaries instead.
+Workflows are ordered sequences plus dynamic plans and guards. They do not support loops or free-form expressions over earlier task data; use a `when` guard for conditional steps instead.
 
 ## Development
 
