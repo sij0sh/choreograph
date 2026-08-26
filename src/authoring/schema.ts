@@ -1,10 +1,11 @@
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import { isValidJsonPointer, objectAt, requireString } from "../domain/json.ts";
 import { DEFAULT_PLAN_RECOVERY, DEFAULT_TASK_RECOVERY, type RecoveryAction, type RecoveryPolicy } from "../domain/policy.ts";
+import { GUARD_OPS, VALUE_OPS, type GuardClause, type GuardOp } from "../domain/guard.ts";
 import type { InputBinding } from "../domain/workflow.ts";
 
 export const FRONTMATTER_KEYS = ["description", "steps", "piVisibility", "legalTools", "contracts"] as const;
-export const STEP_KEYS = ["id", "run", "tools", "done", "repair", "plan", "inputs", "output"] as const;
+export const STEP_KEYS = ["id", "run", "tools", "done", "repair", "plan", "inputs", "output", "when"] as const;
 export const OPERATOR_KEYS = ["description", "tools", "output"] as const;
 const RECOVERY_KEYS = ["max_attempts", "max_replans", "strategy", "scope"] as const;
 const RECOVERY_ACTIONS: readonly RecoveryAction[] = ["retry", "invalidate", "replan", "block"];
@@ -116,4 +117,59 @@ export function positiveIntAt(value: unknown, label: string, max: number): numbe
     throw new Error(`${label} must be an integer between 1 and ${max}`);
   }
   return value;
+}
+
+const GUARD_KEYS = ["from", "select", "op", "value"] as const;
+
+function isScalar(value: unknown): boolean {
+  return value === null || ["string", "number", "boolean"].includes(typeof value);
+}
+
+export function parseGuard(raw: unknown, label: string): GuardClause | undefined {
+  if (raw === undefined) return undefined;
+  const body = objectAt(raw, label);
+  assertKeys(body, GUARD_KEYS, label);
+  const from = stringAt(body.from, `${label}.from`);
+  if (!ID_PATTERN.test(from)) throw new Error(`${label}.from must match ^[a-z][a-z0-9-]*$`);
+  let select: string | undefined;
+  if (body.select !== undefined) {
+    if (typeof body.select !== "string") throw new Error(`${label}.select must be a JSON Pointer such as /data/severity`);
+    select = body.select;
+    if (!isValidJsonPointer(select)) throw new Error(`${label}.select must be a JSON Pointer such as /data/severity`);
+  }
+  const op = stringAt(body.op, `${label}.op`);
+  if (!(GUARD_OPS as readonly string[]).includes(op)) throw new Error(`${label}.op must be one of: ${GUARD_OPS.join(", ")}`);
+  const needsValue = (VALUE_OPS as readonly string[]).includes(op);
+  if (!needsValue && body.value !== undefined) throw new Error(`${label}.value is only accepted with a comparison op`);
+  let value: import("../domain/json.ts").JsonValue | undefined;
+  if (needsValue) {
+    if (body.value === undefined) throw new Error(`${label}.op "${op}" requires a value`);
+    const numeric = op === "gt" || op === "gte" || op === "lt" || op === "lte";
+    if (numeric) {
+      if (typeof body.value !== "number" || !Number.isFinite(body.value)) throw new Error(`${label}.value must be a finite number for op "${op}"`);
+      value = body.value;
+    } else if (op === "in" || op === "not-in") {
+      if (!Array.isArray(body.value) || body.value.length === 0) throw new Error(`${label}.value must be a non-empty list for op "${op}"`);
+      if (body.value.length > LIMITS.checkpointListItems) throw new Error(`${label}.value must have at most ${LIMITS.checkpointListItems} items`);
+      for (const [index, entry] of body.value.entries()) {
+        if (!isScalar(entry)) throw new Error(`${label}.value[${index}] must be a scalar`);
+        if (typeof entry === "string" && Buffer.byteLength(entry, "utf8") > LIMITS.checkpointItemBytes) {
+          throw new Error(`${label}.value[${index}] exceeds ${LIMITS.checkpointItemBytes} bytes`);
+        }
+      }
+      value = body.value as unknown as import("../domain/json.ts").JsonValue;
+    } else {
+      if (!isScalar(body.value)) throw new Error(`${label}.value must be a scalar for op "${op}"`);
+      if (typeof body.value === "string" && Buffer.byteLength(body.value, "utf8") > LIMITS.checkpointItemBytes) {
+        throw new Error(`${label}.value exceeds ${LIMITS.checkpointItemBytes} bytes`);
+      }
+      value = body.value as import("../domain/json.ts").JsonValue;
+    }
+  }
+  return {
+    from,
+    ...(select !== undefined ? { select } : {}),
+    op: op as GuardOp,
+    ...(value !== undefined ? { value } : {}),
+  };
 }

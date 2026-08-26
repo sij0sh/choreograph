@@ -24,6 +24,7 @@ import {
   MAX_INSTRUCTION_BYTES,
   MAX_WORKFLOW_BYTES,
   NAME_PATTERN,
+  parseGuard,
   parseIdList,
   parseInputBindings,
   parseRecovery,
@@ -230,6 +231,16 @@ function recordInputEdges(context: CompileContext, consumerId: string, inputs: R
   context.inputEdges.set(consumerId, producers);
 }
 
+function recordGuardEdge(context: CompileContext, consumerId: string, guard: import("../domain/guard.ts").GuardClause | undefined, label: string): void {
+  if (!guard) return;
+  if (guard.from === "root" || guard.from === consumerId || !context.ids.has(guard.from)) {
+    throw new Error(`${label}.when.from names "${guard.from}", which is not an earlier step`);
+  }
+  const producers = context.inputEdges.get(consumerId) ?? [];
+  if (!producers.includes(guard.from)) producers.push(guard.from);
+  context.inputEdges.set(consumerId, producers);
+}
+
 function parseStepsList(raw: unknown, label: string, context: CompileContext): Block[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error(`${label} must be a non-empty list of steps`);
   return raw.map((entry, index) => parseStepEntry(entry, index, `${label}[${index}]`, context));
@@ -263,14 +274,18 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     if (entry.repair !== undefined) throw new Error(`${label}.repair only applies to "run:" tasks and "plan:" blocks`);
     const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
     recordInputEdges(context, id, inputs, label);
+    const guard = parseGuard(entry.when, `${label}.when`);
+    recordGuardEdge(context, id, guard, `${label}.when`);
     const block = parsePlan(entry.plan, id, label, context);
-    return inputs ? { ...block, inputs } : block;
+    return { ...(guard ? { guard } : {}), ...block, ...(inputs ? { inputs } : {}) };
   }
   const path = normalizeInstruction(stringAt(entry.run, `${label}.run (or a legacy step string)`), index, label, context);
   const id = entry.id === undefined ? deriveStepLabel(entry.run as string, index) : stringAt(entry.id, `${label}.id`);
   registerId(context, id, label);
   const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
   recordInputEdges(context, id, inputs, label);
+  const guard = parseGuard(entry.when, `${label}.when`);
+  recordGuardEdge(context, id, guard, `${label}.when`);
   const output = entry.output === undefined ? undefined : stringAt(entry.output, `${label}.output`);
   if (output !== undefined && !context.contracts.has(output)) {
     throw new Error(`${label}.output names contract "${output}", which has no contracts/ file`);
@@ -283,6 +298,7 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     ...(entry.done !== undefined ? { done: parseIdList(entry.done, `${label}.done`)! } : {}),
     ...(entry.repair !== undefined ? { recovery: parseRecovery(entry.repair, `${label}.repair`)! } : {}),
     ...(inputs ? { inputs } : {}),
+    ...(guard ? { guard } : {}),
     ...(output !== undefined ? { output } : {}),
   } satisfies TaskBlock;
 }
