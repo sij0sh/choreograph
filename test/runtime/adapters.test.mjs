@@ -64,7 +64,7 @@ function reader(files) {
 test("the task prompt carries instructions, context, criteria, and controls", () => {
   const wf = workflow([task("frame", { done: ["scope-clear"] })]);
   const state = start(wf, { runId: "run-1", target: "runtime" }).state;
-  const prompt = renderPrompt(wf, state, reader({ "WORKFLOW.md": "# Overview\nDo the thing.", "steps/frame.md": "---\nfrontmatter\n---\n# Frame\nFrame it." }));
+  const prompt = renderPrompt(wf, state, reader({ "WORKFLOW.md": "# Overview\nDo the thing.", "steps/frame.md": "---\nignored: frontmatter\n---\n# Frame\nFrame it." }));
   assert.match(prompt, /run-1/);
   assert.match(prompt, /Target: runtime/);
   assert.match(prompt, /# Frame/);
@@ -131,4 +131,27 @@ test("prior checkpoint context follows execution order, not key spelling", () =>
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("ZETA-SUMMARY")) }).state;
   const prompt = renderPrompt(wf, state, reader);
   assert.ok(prompt.includes("ZETA-SUMMARY"), "a checkpoint written before the current position renders regardless of spelling");
+});
+
+test("rule-led bodies render verbatim while real frontmatter still strips", () => {
+  const files = { "WORKFLOW.md": "# Overview", "steps/frame.md": "---\n## Real work\ninstructions here\n---\nAfter the rule" };
+  const reader = (path) => {
+    if (!(path in files)) throw new Error(`missing ${path}`);
+    return files[path];
+  };
+  const wf = workflow([task("frame")]);
+  const state = start(wf, { runId: "r1" }).state;
+  const prompt = renderPrompt(wf, state, reader);
+  assert.ok(prompt.includes("## Real work"), "a horizontal-rule-led body renders in full");
+  assert.ok(prompt.includes("instructions here"));
+  assert.ok(prompt.includes("After the rule"));
+
+  const frontmatterFile = { ...files, "steps/frame.md": "---\ndescription: fm\n---\n# Body" };
+  const fmReader = (path) => {
+    if (!(path in frontmatterFile)) throw new Error(`missing ${path}`);
+    return frontmatterFile[path];
+  };
+  const stripped = renderPrompt(wf, state, fmReader);
+  assert.ok(!stripped.includes("description: fm"), "a real frontmatter mapping still strips");
+  assert.ok(stripped.includes("# Body"));
 });

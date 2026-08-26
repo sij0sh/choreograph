@@ -2,7 +2,7 @@ import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import { objectAt, requireString } from "../domain/json.ts";
 import { DEFAULT_PLAN_RECOVERY, DEFAULT_TASK_RECOVERY, type RecoveryAction, type RecoveryPolicy } from "../domain/policy.ts";
 
-export const FRONTMATTER_KEYS = ["description", "steps", "piVisibility", "tools", "legalTools"] as const;
+export const FRONTMATTER_KEYS = ["description", "steps", "piVisibility", "legalTools"] as const;
 export const STEP_KEYS = ["id", "run", "tools", "done", "repair", "plan"] as const;
 export const OPERATOR_KEYS = ["description", "tools"] as const;
 const RECOVERY_KEYS = ["max_attempts", "max_replans", "strategy", "scope"] as const;

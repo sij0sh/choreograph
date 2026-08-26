@@ -132,13 +132,6 @@ function registerId(context: CompileContext, id: string, label: string): void {
   context.ids.add(id);
 }
 
-function migrationError(key: string, label: string): never {
-  if (key === "kind") throw new Error(`${label}: "kind: planner/executor" was replaced by a "plan:" block; see the workflow schema`);
-  if (key === "on") throw new Error(`${label}: "on:" routes were replaced by "repair:" recovery policy; see the workflow schema`);
-  if (key === "path") throw new Error(`${label}: "path:" was renamed to "run:"`);
-  throw new Error(`unknown ${label} key: ${key}`);
-}
-
 function parseStepsList(raw: unknown, label: string, context: CompileContext): Block[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error(`${label} must be a non-empty list of steps`);
   return raw.map((entry, index) => parseStepEntry(entry, index, `${label}[${index}]`, context));
@@ -158,10 +151,9 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     return { kind: "task", id, instructionPath: path } satisfies TaskBlock;
   }
   const entry = objectAt(raw, label);
-  const stepKeys = new Set<string>(STEP_KEYS);
   for (const key of Object.keys(entry)) {
-    if (stepKeys.has(key)) continue;
-    migrationError(key, label);
+    if (new Set<string>(STEP_KEYS).has(key)) continue;
+    throw new Error(`unknown ${label} key: ${key}`);
   }
   const structural = (["plan"] as const).filter((key) => entry[key] !== undefined);
   if (structural.length === 1) {
@@ -211,8 +203,7 @@ export function loadWorkflowManifest(directory: string): Workflow {
   if (!NAME_PATTERN.test(name)) throw new Error("workflow directory name must match ^[a-z][a-z0-9-]*$");
   const description = stringAt(data.description, "description");
   const piVisibility = data.piVisibility === undefined ? false : booleanAt(data.piVisibility, "piVisibility");
-  if (data.tools !== undefined && data.legalTools !== undefined) throw new Error("tools and legalTools are aliases; configure only one");
-  const tools = parseToolList(data.tools ?? data.legalTools, data.tools !== undefined ? "tools" : "legalTools");
+  const tools = parseToolList(data.legalTools, "legalTools");
   const operators = loadOperators(directory);
   const context: CompileContext = { lexicalRoot: resolve(directory), realRoot: realpathSync(directory), operators, ids: new Set(["root"]) };
   if (!Array.isArray(data.steps) || data.steps.length === 0) throw new Error("steps must be a non-empty list");
@@ -227,6 +218,16 @@ export function loadWorkflowManifest(directory: string): Workflow {
     operators,
     ...(tools ? { tools } : {}),
   };
+}
+
+function resolvesToDirectory(root: string, entry: { name: string; isDirectory(): boolean; isSymbolicLink(): boolean }): boolean {
+  if (entry.isDirectory()) return true;
+  if (!entry.isSymbolicLink()) return false;
+  try {
+    return statSync(join(root, entry.name)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 export function discoverWorkflows(workflowsRoot: string): {
@@ -246,7 +247,7 @@ export function discoverWorkflows(workflowsRoot: string): {
     return { workflows, diagnostics };
   }
   const directories = directoryEntries
-    .filter((entry) => entry.isDirectory())
+    .filter((entry) => resolvesToDirectory(workflowsRoot, entry))
     .sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of directories) {
     const directory = join(workflowsRoot, entry.name);

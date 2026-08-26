@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { discoverWorkflows, loadWorkflowManifest } from "../../src/authoring/parser.ts";
@@ -95,7 +95,7 @@ steps:
 });
 
 
-test("obsolete authoring keys return migration errors", () => {
+test("obsolete authoring keys return unknown-key errors", () => {
   const kinds = workflowDir("kinds", `
 description: Old shapes.
 steps:
@@ -103,7 +103,7 @@ steps:
     id: plan
     kind: planner
 `);
-  assert.throws(() => loadWorkflowManifest(kinds), /replaced by a "plan:" block/);
+  assert.throws(() => loadWorkflowManifest(kinds), /unknown steps\[0\] key: kind/);
   const routes = workflowDir("routes", `
 description: Old shapes.
 steps:
@@ -112,15 +112,23 @@ steps:
     on:
       pass: deliver
 `);
-  assert.throws(() => loadWorkflowManifest(routes), /replaced by "repair:" recovery policy/);
+  assert.throws(() => loadWorkflowManifest(routes), /unknown steps\[0\] key: on/);
   const pathKey = workflowDir("pathkey", `
 description: Old shapes.
 steps:
   - path: steps/frame.md
     id: frame
 `);
-  assert.throws(() => loadWorkflowManifest(pathKey), /renamed to "run:"/);
+  assert.throws(() => loadWorkflowManifest(pathKey), /unknown steps\[0\] key: path/);
+  const alias = workflowDir("alias", `
+description: Old shapes.
+tools: [read]
+steps:
+  - run: steps/frame.md
+`);
+  assert.throws(() => loadWorkflowManifest(alias), /unknown frontmatter key: tools/);
 });
+
 
 test("steps reject bad shapes", () => {
   const loopKey = workflowDir("loopkey", `
@@ -227,4 +235,18 @@ test("discovery treats an absent root as an empty installation", () => {
   const { workflows, diagnostics } = discoverWorkflows(join(tmpdir(), `absent-${Date.now()}`));
   assert.deepEqual(workflows, []);
   assert.deepEqual(diagnostics, []);
+});
+
+test("discovery accepts symlinked workflow directories and skips invalid links", () => {
+  const root = mkdtempSync(join(tmpdir(), "pwf-link-"));
+  roots.push(root);
+  mkdirSync(join(root, "real-flow", "steps"), { recursive: true });
+  writeFileSync(join(root, "real-flow", "WORKFLOW.md"), `---\ndescription: linked\nsteps:\n  - steps/a.md\n---\n`);
+  writeFileSync(join(root, "real-flow", "steps", "a.md"), "# A");
+  symlinkSync(join(root, "real-flow"), join(root, "link-flow"));
+  symlinkSync(join(root, "real-flow", "WORKFLOW.md"), join(root, "file-link"));
+  symlinkSync(join(root, "nowhere"), join(root, "broken-link"));
+  const { workflows, diagnostics } = discoverWorkflows(root);
+  assert.deepEqual(workflows.map((wf) => wf.name).sort(), ["link-flow", "real-flow"], "the symlinked directory loads like a real one");
+  assert.equal(diagnostics.length, 0, "non-directory and broken links stay silently skipped");
 });

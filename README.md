@@ -29,7 +29,7 @@ The workflow name equals its directory name and must match `^[a-z][a-z0-9-]*$`. 
 ---
 description: What it does and when to use it.
 piVisibility: true              # Optional; exposes the workflow to the model
-tools: [read, bash]             # Optional; workflow tool ceiling
+legalTools: [read, bash]         # Optional; workflow tool ceiling
 steps:
   - steps/01-frame.md           # String steps are legacy shorthand for run:
   - run: steps/02-observe.md    # A task
@@ -54,7 +54,7 @@ steps:
 | `description` | Yes | Appears in the roster. |
 | `steps` | Yes | Non-empty list of blocks. String entries are legacy shorthand for task `run:` entries. |
 | `piVisibility` | No | Exposes the workflow through the roster and the `workflow_start` enum. Defaults to `false`. |
-| `tools` | No | Workflow tool ceiling. `legalTools` stays accepted as a legacy alias. |
+| `legalTools` | No | Workflow tool ceiling. |
 
 ### Block kinds
 
@@ -153,7 +153,7 @@ src/
   domain/      Block AST, execution frames, checkpoints, policy, limits
   engine/      Pure stack interpreter and policy-driven recovery
   planning/    Dynamic plan schema, validation, graph helpers
-  persistence/ v4 snapshot codec, semantic restore, session store
+  persistence/ v5 snapshot codec, semantic restore, session store
   runtime/     Capabilities, prompts, status, delivery, coordinator
   pi/          Tool, command, and lifecycle registration
 ```

@@ -1,3 +1,4 @@
+import { parseDocument } from "yaml";
 import { currentPosition } from "../engine/interpreter.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import type { Execution } from "../domain/execution.ts";
@@ -20,8 +21,18 @@ export function readBlockFrom(fs: { readFileSync(path: string, encoding: "utf8")
 }
 
 function stripFrontmatter(text: string): string {
-  const match = text.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
-  return match ? text.slice(match[0].length) : text;
+  const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
+  if (!match) return text;
+  if (!/^[ \t]*[A-Za-z_-][A-Za-z0-9_-]*[ \t]*:/.test(match[1])) return text;
+  try {
+    const document = parseDocument(match[1], { prettyErrors: false, strict: true, uniqueKeys: true });
+    if (document.errors.length > 0) return text;
+    const value = document.toJS({ maxAliasCount: 0 });
+    if (!value || typeof value !== "object" || Array.isArray(value)) return text;
+    return text.slice(match[0].length);
+  } catch {
+    return text;
+  }
 }
 
 function readBody(read: ReadBlock, path: string, label: string): string {
