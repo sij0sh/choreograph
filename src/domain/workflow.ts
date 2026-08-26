@@ -1,6 +1,8 @@
 import type { RecoveryPolicy } from "./policy.ts";
 import type { ContractDescriptor } from "./contract.ts";
+import type { GuardClause } from "./guard.ts";
 export type { ContractDescriptor } from "./contract.ts";
+export type { GuardClause } from "./guard.ts";
 
 export interface InputBinding {
   readonly from: string;
@@ -16,6 +18,7 @@ export interface TaskBlock {
   readonly recovery?: RecoveryPolicy;
   readonly inputs?: Readonly<Record<string, InputBinding>>;
   readonly output?: string;
+  readonly guard?: GuardClause;
 }
 
 export interface SequenceBlock {
@@ -30,6 +33,7 @@ export interface PlanBlock {
   readonly operators: readonly string[];
   readonly recovery?: RecoveryPolicy;
   readonly inputs?: Readonly<Record<string, InputBinding>>;
+  readonly guard?: GuardClause;
 }
 
 export type Block = TaskBlock | SequenceBlock | PlanBlock;

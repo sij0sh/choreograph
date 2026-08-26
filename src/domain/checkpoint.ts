@@ -7,6 +7,7 @@ export interface Checkpoint {
   readonly decisions?: readonly string[];
   readonly unknowns?: readonly string[];
   readonly data?: JsonValue;
+  readonly skipped?: boolean;
 }
 
 function boundedStringList(value: unknown, label: string): string[] | undefined {
@@ -30,11 +31,12 @@ function dataAt(value: unknown, label: string): JsonValue | undefined {
 export function validateCheckpoint(value: unknown, label: string, exemptsPlan = false): Checkpoint {
   const raw = objectAt(value, label);
   for (const key of Object.keys(raw)) {
-    if (!["summary", "evidence", "decisions", "unknowns", "data"].includes(key)) throw new Error(`${label}.${key} is not an accepted checkpoint field`);
+    if (! ["summary", "evidence", "decisions", "unknowns", "data", "skipped"].includes(key)) throw new Error(`${label}.${key} is not an accepted checkpoint field`);
   }
+  if (raw.skipped !== undefined && raw.skipped !== true) throw new Error(`${label}.skipped must be true when present`);
   const summary = requireString(raw.summary, `${label}.summary`);
   if (Buffer.byteLength(summary, "utf8") > LIMITS.checkpointSummaryBytes) throw new Error(`${label}.summary exceeds ${LIMITS.checkpointSummaryBytes} bytes`);
-  const checkpoint: { summary: string; evidence?: string[]; decisions?: string[]; unknowns?: string[]; data?: JsonValue } = { summary };
+  const checkpoint: { summary: string; evidence?: string[]; decisions?: string[]; unknowns?: string[]; data?: JsonValue; skipped?: boolean } = { summary };
   const evidence = boundedStringList(raw.evidence, `${label}.evidence`);
   const decisions = boundedStringList(raw.decisions, `${label}.decisions`);
   const unknowns = boundedStringList(raw.unknowns, `${label}.unknowns`);
@@ -43,6 +45,7 @@ export function validateCheckpoint(value: unknown, label: string, exemptsPlan = 
   if (decisions) checkpoint.decisions = decisions;
   if (unknowns) checkpoint.unknowns = unknowns;
   if (data !== undefined) checkpoint.data = data;
+  if (raw.skipped === true) checkpoint.skipped = true;
   const measured = exemptsPlan && data !== undefined && (data as { plan?: unknown })?.plan !== undefined
     ? (Object.keys(data as object).length === 1
       ? { summary: checkpoint.summary } as typeof checkpoint
