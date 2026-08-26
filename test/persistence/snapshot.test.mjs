@@ -232,3 +232,20 @@ test("checkpointOrder round-trips and legacy snapshots infer insertion order", (
   assert.equal(dangling.status, "invalid");
   assert.match(dangling.error, /checkpointOrder/);
 });
+
+test("skipped checkpoints round-trip and stay resumable", () => {
+  const wf = workflow([
+    task("frame"),
+    task("deep", { guard: { from: "frame", op: "exists", select: "/data/missing" } }),
+    task("deliver"),
+  ]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed", { note: "no findings" })) }).state;
+  assert.equal(state.stack.at(-1).blockId, "deliver");
+  const skipped = state.checkpoints["root/deep"];
+  assert.equal(skipped.skipped, true);
+
+  const roundTrip = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: false }))));
+  assert.equal(roundTrip.status, "active");
+  assert.equal(roundTrip.execution.checkpoints["root/deep"].skipped, true);
+});
