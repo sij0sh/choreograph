@@ -52,11 +52,11 @@ steps:
   assert.equal(wf.root.children[0].instructionPath.endsWith("steps/01-frame.md"), true);
 });
 
-test("structural blocks compile with shared fields and unique ids", () => {
+test("plan blocks compile with shared fields and unique ids", () => {
   const dir = workflowDir("structured", `
 description: Structural run.
 piVisibility: true
-tools: [read, bash]
+legalTools: [read, bash]
 model: anthropic/claude-haiku-4-5
 steps:
   - id: frame
@@ -64,31 +64,6 @@ steps:
     done: [scope-clear]
   - id: discover
     run: steps/discover.md
-  - id: review
-    for_each:
-      items: $discover.files
-      as: file
-      do:
-        - run: steps/frame.md
-          id: inspect
-  - id: refine
-    repeat:
-      max: 3
-      until:
-        equals: [$verify.passed, true]
-      do:
-        - run: steps/frame.md
-          id: improve
-  - id: route
-    choose:
-      value: $discover.mode
-      cases:
-        fast:
-          - run: steps/frame.md
-            id: quick
-      fallback:
-        - run: steps/frame.md
-          id: thorough
   - id: investigate
     plan:
       operators: [inspect-op, trace-op]
@@ -111,21 +86,6 @@ steps:
   assert.equal(wf.piVisibility, true);
   assert.deepEqual([...wf.tools], ["read", "bash"]);
   const byId = new Map(wf.root.children.map((child) => [child.id, child]));
-  const review = byId.get("review");
-  assert.equal(review.kind, "foreach");
-  assert.deepEqual(review.items, { root: "discover", path: ["files"] });
-  assert.equal(review.as, "file");
-  assert.equal(review.body.id, "review-body");
-  assert.equal(review.body.children[0].id, "inspect");
-  const refine = byId.get("refine");
-  assert.equal(refine.kind, "repeat");
-  assert.equal(refine.max, 3);
-  assert.deepEqual(refine.until, { op: "equals", left: { ref: { root: "verify", path: ["passed"] } }, right: { literal: true } });
-  const route = byId.get("route");
-  assert.equal(route.kind, "choose");
-  assert.deepEqual(Object.keys(route.cases), ["fast"]);
-  assert.equal(route.cases.fast.children[0].id, "quick");
-  assert.equal(route.fallback.children[0].id, "thorough");
   const investigate = byId.get("investigate");
   assert.equal(investigate.kind, "plan");
   assert.deepEqual(investigate.operators, ["inspect-op", "trace-op"]);
@@ -134,6 +94,7 @@ steps:
   assert.equal(deliver.kind, "task");
   assert.deepEqual(deliver.recovery, { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate", "block"], scope: "investigate" });
 });
+
 
 test("obsolete authoring keys return migration errors", () => {
   const kinds = workflowDir("kinds", `
@@ -163,19 +124,26 @@ steps:
 });
 
 test("steps reject bad shapes", () => {
-  const both = workflowDir("both", `
+  const loopKey = workflowDir("loopkey", `
 description: x
 steps:
   - id: weird
     for_each:
-      items: $a.list
+      items: whatever
       as: item
       do:
         - run: steps/frame.md
-    plan:
-      operators: [op]
 `);
-  assert.throws(() => loadWorkflowManifest(both), /combines for_each and plan/);
+  assert.throws(() => loadWorkflowManifest(loopKey), /unknown steps\[0\] key: for_each/);
+  const taskKeyOnPlan = workflowDir("taskkey", `
+description: x
+steps:
+  - id: investigate
+    plan:
+      operators: [inspect-op]
+    tools: [read]
+`, { operators: { "inspect-op": "---\ndescription: Inspect.\n---\nbody" } });
+  assert.throws(() => loadWorkflowManifest(taskKeyOnPlan), /only applies to/);
   const dup = workflowDir("dup", `
 description: x
 steps:
@@ -185,16 +153,6 @@ steps:
     id: frame
 `);
   assert.throws(() => loadWorkflowManifest(dup), /already used/);
-  const emptyDo = workflowDir("emptydo", `
-description: x
-steps:
-  - id: loop
-    for_each:
-      items: $a.list
-      as: item
-      do: []
-`);
-  assert.throws(() => loadWorkflowManifest(emptyDo), /non-empty list/);
   const unknownOperator = workflowDir("unknownop", `
 description: x
 steps:
@@ -203,18 +161,6 @@ steps:
       operators: [ghost]
 `);
   assert.throws(() => loadWorkflowManifest(unknownOperator), /no operator file/);
-  const taskKeyOnBlock = workflowDir("taskkey", `
-description: x
-steps:
-  - id: loop
-    for_each:
-      items: $a.list
-      as: item
-      do:
-        - run: steps/frame.md
-    tools: [read]
-`);
-  assert.throws(() => loadWorkflowManifest(taskKeyOnBlock), /only applies to/);
 });
 
 test("repair bounds stay within the persisted run bounds", () => {
@@ -245,23 +191,6 @@ steps:
   const task = edge.root.children[0];
   assert.equal(task.recovery.maxAttempts, LIMITS.nodeAttempts + 1);
   assert.equal(task.recovery.maxReplans, LIMITS.replans);
-});
-
-test("structural nesting is capped at the restorable frame budget", () => {
-  const ceiling = Math.floor((LIMITS.stackDepth - 2) / 2);
-  const nestedLoops = (depth) => {
-    const lines = ["description: x", "steps:", "  - id: seed", "    run: steps/frame.md"];
-    let pad = "  ";
-    for (let i = 1; i <= depth; i += 1) {
-      lines.push(`${pad}- id: loop${i}`, `${pad}  for_each:`, `${pad}    items: $seed`, `${pad}    as: item`, `${pad}    do:`);
-      pad += "      ";
-    }
-    lines.push(`${pad}- run: steps/frame.md`);
-    return lines.join("\n");
-  };
-  const legal = loadWorkflowManifest(workflowDir("nest-legal", nestedLoops(ceiling)));
-  assert.equal(legal.root.children.length, 2);
-  assert.throws(() => loadWorkflowManifest(workflowDir("nest-illegal", nestedLoops(ceiling + 1))), new RegExp(`nests deeper than ${ceiling}`));
 });
 
 test("containment and size rules still hold", () => {

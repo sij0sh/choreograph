@@ -52,27 +52,6 @@ steps:
   - run: steps/02-observe.md    # Task
     id: observe
     done: [evidence-recorded]
-  - id: review                  # Loop over a snapshot list
-    for_each:
-      items: $observe.data.files
-      as: file
-      do:
-        - run: steps/inspect.md
-  - id: refine                  # Iterate to a condition
-    repeat:
-      max: 3
-      until:
-        equals: [$verify.passed, true]
-      do:
-        - run: steps/improve.md
-  - id: route                   # Branch on data
-    choose:
-      value: $observe.data.mode
-      cases:
-        fast:
-          - run: steps/quick.md
-      fallback:
-        - run: steps/thorough.md
   - id: investigate             # Model-planned, engine-run
     plan:
       operators: [inspect, trace]
@@ -90,9 +69,7 @@ steps:
 ### Rules
 
 - Every block needs one unique id across the whole workflow. Tasks may derive ids from file stems.
-- Use exactly one of `run`, `for_each`, `repeat`, `choose`, or `plan` per step entry.
-- `for_each` snapshots `items` once on entry. Reference the active item with `$current.<as>`.
-- `choose` runs the matching case; WHEN no case matches and `fallback` is absent, the engine skips the block.
+- Use exactly one of `run` or `plan` per step entry. Loop, branch, predicate, and data-reference authoring were removed in v0.2; they fail as unknown keys.
 - `plan` blocks need operator files for every listed operator id.
 - `repair.strategy` may list any of `retry`, `invalidate`, `replan`, `block` in order.
 - The old `kind: planner/executor` and `on:` route keys are rejected with migration errors. Use `plan:` blocks and `repair:` policy.
@@ -125,5 +102,5 @@ Fix every reported diagnostic before restarting the session.
 ## Diagnosing discovery
 
 - A workflow missing from the roster usually has invalid frontmatter; check the session-start warning for the parse error.
-- References must resolve at runtime: `$task.field` reads the latest checkpoint of that task id.
+- Later positions read earlier outputs through the rendered prior checkpoints; no reference language exists.
 - `delivery-pending` transition rejections mean the position's instructions have not arrived yet; finish the current reply first.

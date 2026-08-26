@@ -3,21 +3,14 @@ import { basename, extname, isAbsolute, join, relative, resolve, sep } from "nod
 import { parseDocument } from "yaml";
 import type {
   Block,
-  ChooseBlock,
-  DataReference,
-  ForEachBlock,
   OperatorDescriptor,
   PlanBlock,
-  Predicate,
-  RepeatBlock,
   SequenceBlock,
   TaskBlock,
   Workflow,
 } from "../domain/workflow.ts";
-import { LIMITS, NESTING_DEPTH_MAX } from "../domain/limits.ts";
+import { LIMITS } from "../domain/limits.ts";
 import { DEFAULT_PLAN_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
-import { parseReference } from "./references.ts";
-import { parsePredicate } from "./predicates.ts";
 import {
   FRONTMATTER_KEYS,
   OPERATOR_KEYS,
@@ -132,7 +125,6 @@ interface CompileContext {
   readonly realRoot: string;
   readonly operators: ReadonlyMap<string, OperatorDescriptor>;
   readonly ids: Set<string>;
-  depth: number;
 }
 
 function registerId(context: CompileContext, id: string, label: string): void {
@@ -148,19 +140,9 @@ function migrationError(key: string, label: string): never {
   throw new Error(`unknown ${label} key: ${key}`);
 }
 
-function parseReferenceAt(raw: unknown, label: string): DataReference {
-  return parseReference(stringAt(raw, label), label);
-}
-
 function parseStepsList(raw: unknown, label: string, context: CompileContext): Block[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error(`${label} must be a non-empty list of steps`);
-  if (context.depth >= NESTING_DEPTH_MAX) {
-    throw new Error(`${label} nests deeper than ${NESTING_DEPTH_MAX} structural levels; deeper workflows cannot fit the ${LIMITS.stackDepth}-frame persisted stack`);
-  }
-  context.depth += 1;
-  const children = raw.map((entry, index) => parseStepEntry(entry, index, `${label}[${index}]`, context));
-  context.depth -= 1;
-  return children;
+  return raw.map((entry, index) => parseStepEntry(entry, index, `${label}[${index}]`, context));
 }
 
 function bodySequence(context: CompileContext, parentId: string, suffix: string, children: readonly Block[]): SequenceBlock {
@@ -182,8 +164,7 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     if (stepKeys.has(key)) continue;
     migrationError(key, label);
   }
-  const structural = (["for_each", "repeat", "choose", "plan"] as const).filter((key) => entry[key] !== undefined);
-  if (structural.length > 1) throw new Error(`${label} combines ${structural.join(" and ")}; use one block kind per step`);
+  const structural = (["plan"] as const).filter((key) => entry[key] !== undefined);
   if (structural.length === 1) {
     const id = stringAt(entry.id, `${label}.id`);
     registerId(context, id, label);
@@ -191,13 +172,7 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
       if (entry[key] !== undefined) throw new Error(`${label}.${key} only applies to "run:" tasks`);
     }
     if (entry.repair !== undefined) throw new Error(`${label}.repair only applies to "run:" tasks and "plan:" blocks`);
-    return structural[0] === "for_each"
-      ? parseForEach(entry.for_each, id, label, context)
-      : structural[0] === "repeat"
-        ? parseRepeat(entry.repeat, id, label, context)
-        : structural[0] === "choose"
-          ? parseChoose(entry.choose, id, label, context)
-          : parsePlan(entry.plan, id, label, context);
+    return parsePlan(entry.plan, id, label, context);
   }
   const path = normalizeInstruction(stringAt(entry.run, `${label}.run (or a legacy step string)`), index, label, context);
   const id = entry.id === undefined ? deriveStepLabel(entry.run as string, index) : stringAt(entry.id, `${label}.id`);
@@ -217,45 +192,6 @@ function normalizeInstruction(configured: string, index: number, label: string, 
   const entry = configured.replaceAll("\\", "/");
   if (!entry.endsWith(".md")) throw new Error(`${label} must reference a Markdown (.md) file`);
   return containedPath(context.lexicalRoot, context.realRoot, entry, label);
-}
-
-function parseForEach(raw: unknown, id: string, label: string, context: CompileContext): ForEachBlock {
-  const body = objectAt(raw, `${label}.for_each`);
-  assertKeys(body, ["items", "as", "do"], `${label}.for_each`);
-  const items = parseReferenceAt(body.items, `${label}.for_each.items`);
-  const as = stringAt(body.as, `${label}.for_each.as`);
-  if (!VARIABLE_PATTERN.test(as)) throw new Error(`${label}.for_each.as must match ^[a-z][a-z0-9_-]*$`);
-  const children = parseStepsList(body.do, `${label}.for_each`, context);
-  return { kind: "foreach", id, items, as, body: bodySequence(context, id, "body", children) };
-}
-
-function parseRepeat(raw: unknown, id: string, label: string, context: CompileContext): RepeatBlock {
-  const body = objectAt(raw, `${label}.repeat`);
-  assertKeys(body, ["max", "until", "do"], `${label}.repeat`);
-  const max = positiveIntAt(body.max, `${label}.repeat.max`, LIMITS.repeatMax);
-  let until: Predicate | undefined;
-  if (body.until !== undefined) until = parsePredicate(body.until, `${label}.repeat.until`);
-  const children = parseStepsList(body.do, `${label}.repeat`, context);
-  return { kind: "repeat", id, max, ...(until ? { until } : {}), body: bodySequence(context, id, "body", children) };
-}
-
-function parseChoose(raw: unknown, id: string, label: string, context: CompileContext): ChooseBlock {
-  const body = objectAt(raw, `${label}.choose`);
-  assertKeys(body, ["value", "cases", "fallback"], `${label}.choose`);
-  const value = parseReferenceAt(body.value, `${label}.choose.value`);
-  const casesRaw = objectAt(body.cases, `${label}.choose.cases`);
-  const caseNames = Object.keys(casesRaw);
-  if (caseNames.length === 0) throw new Error(`${label}.choose.cases must define at least one case`);
-  assertUnique(caseNames, `${label}.choose.cases`);
-  const cases: Record<string, SequenceBlock> = {};
-  for (const name of caseNames) {
-    cases[name] = bodySequence(context, id, `${name}-body`, parseStepsList(casesRaw[name], `${label}.choose.cases.${name}`, context));
-  }
-  let fallback: SequenceBlock | undefined;
-  if (body.fallback !== undefined) {
-    fallback = bodySequence(context, id, "fallback-body", parseStepsList(body.fallback, `${label}.choose.fallback`, context));
-  }
-  return { kind: "choose", id, value, cases, ...(fallback ? { fallback } : {}) };
 }
 
 function parsePlan(raw: unknown, id: string, label: string, context: CompileContext): PlanBlock {
@@ -280,7 +216,7 @@ export function loadWorkflowManifest(directory: string): Workflow {
   if (data.tools !== undefined && data.legalTools !== undefined) throw new Error("tools and legalTools are aliases; configure only one");
   const tools = parseToolList(data.tools ?? data.legalTools, data.tools !== undefined ? "tools" : "legalTools");
   const operators = loadOperators(directory);
-  const context: CompileContext = { lexicalRoot: resolve(directory), realRoot: realpathSync(directory), operators, ids: new Set(["root"]), depth: 0 };
+  const context: CompileContext = { lexicalRoot: resolve(directory), realRoot: realpathSync(directory), operators, ids: new Set(["root"]) };
   if (!Array.isArray(data.steps) || data.steps.length === 0) throw new Error("steps must be a non-empty list");
   const children = (data.steps as unknown[]).map((entry, index) => parseStepEntry(entry, index, `steps[${index}]`, context));
   return {

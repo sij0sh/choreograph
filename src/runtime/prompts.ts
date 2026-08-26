@@ -1,6 +1,6 @@
 import { currentPosition } from "../engine/interpreter.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
-import type { Execution, ForEachFrame, RepeatFrame } from "../domain/execution.ts";
+import type { Execution } from "../domain/execution.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
@@ -38,23 +38,6 @@ const TRANSITION_CONTRACT = [
   "- `issues`: problems found, each `{ target, reason }`. Only valid with `status: \"needs-work\"`; recovery policy decides what happens next.",
   "Invalid transitions return errors without changing the run.",
 ].join("\n");
-
-function loopContext(workflow: Workflow, state: Execution): string {
-  const lines: string[] = [];
-  for (const frame of state.stack) {
-    if (frame.kind === "foreach") {
-      const of: ForEachFrame = frame;
-      const current = of.items[of.index];
-      lines.push(`Iteration ${of.index + 1}/${of.items.length}`, `${of.variable} = ${JSON.stringify(current ?? null)}`);
-    } else if (frame.kind === "repeat") {
-      const of: RepeatFrame = frame;
-      const block = blockOf(workflow, of.blockId);
-      const total = block?.kind === "repeat" ? `/${block.max}` : "";
-      lines.push(`Attempt ${of.iteration + 1}${total}`);
-    }
-  }
-  return lines.length ? ["## Loop context", ...lines].join("\n") : "";
-}
 
 function priorCheckpoints(workflow: Workflow, state: Execution, beforeKey: string): string {
   const entries = Object.entries(state.checkpoints).filter(([key]) => key < beforeKey && !key.startsWith(beforeKey));
@@ -112,7 +95,6 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
       "",
       ...controls,
       "",
-      loopContext(workflow, state),
       "",
       "## Workflow overview",
       "",

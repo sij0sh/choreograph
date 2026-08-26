@@ -102,28 +102,13 @@ test("node completion is gated by node criteria", () => {
 });
 
 test("a completed plan block is skipped on re-entry", () => {
-  const body = sequence("body", [{ kind: "plan", id: "investigate", operators: ["inspect"] }]);
-  const wf = workflow([task("discover"), { kind: "foreach", id: "loop", items: { root: "discover", path: ["files"] }, as: "file", body }], { operators: OPERATORS });
+  const wf = workflow([task("discover"), { kind: "plan", id: "investigate", operators: ["inspect"] }], { operators: OPERATORS });
   let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: { status: "completed", checkpoint: { summary: "found", data: { files: ["a"] } } } }).state;
+  state = transition(wf, state, { type: "outcome", outcome: { status: "completed", checkpoint: { summary: "found" } } }).state;
   state = transition(wf, state, { type: "outcome", outcome: planCompletion([node("probe"), node("seal")]) }).state;
   state = transition(wf, state, { type: "outcome", outcome: { status: "completed", met: ["probe-done"], checkpoint: { summary: "p" } } }).state;
   state = transition(wf, state, { type: "outcome", outcome: { status: "completed", met: ["seal-done"], checkpoint: { summary: "s" } } }).state;
-  assert.equal(state.status, "completed", "the loop body finishes and the run completes");
-});
-
-test("plan nodes are keyed per loop iteration", () => {
-  const body = sequence("body", [{ kind: "plan", id: "investigate", operators: ["inspect"] }]);
-  const wf = workflow([task("discover"), { kind: "foreach", id: "loop", items: { root: "discover", path: ["files"] }, as: "file", body }], { operators: OPERATORS });
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: { status: "completed", checkpoint: { summary: "found", data: { files: ["a", "b"] } } } }).state;
-  state = transition(wf, state, { type: "outcome", outcome: planCompletion([node("probe"), node("seal")]) }).state;
-  assert.ok(state.plans["root/loop[0]/body/investigate"], "the first iteration gets its own plan key");
-  assert.equal(state.stack.at(-1).key, "root/loop[0]/body/investigate/probe");
-  state = transition(wf, state, { type: "outcome", outcome: { status: "completed", met: ["probe-done"], checkpoint: { summary: "p" } } }).state;
-  state = transition(wf, state, { type: "outcome", outcome: { status: "completed", met: ["seal-done"], checkpoint: { summary: "s" } } }).state;
-  state = transition(wf, state, { type: "outcome", outcome: planCompletion([node("probe2"), node("seal2")]) }).state;
-  assert.ok(state.plans["root/loop[1]/body/investigate"], "the second iteration plans afresh");
+  assert.equal(state.status, "completed", "the plan finishes and the run completes");
 });
 
 test("plan executions persist and restore through snapshots", async () => {

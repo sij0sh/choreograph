@@ -41,20 +41,6 @@ test("invariant: structural blocks hold no effects of their own", () => {
   assert.deepEqual(started.state, before, "structural advancement never mutates prior state");
 });
 
-test("invariant: loops snapshot their input collection on entry", () => {
-  const wf = workflow([
-    task("discover"),
-    { kind: "foreach", id: "review", items: { root: "discover", path: ["files"] }, as: "file", body: sequence("body", [task("inspect")]) },
-  ]);
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("found", { files: ["a", "b"] })) }).state;
-  const frame = state.stack.find((f) => f.kind === "foreach");
-  const snapshot = JSON.parse(JSON.stringify(frame));
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("one")) }).state;
-  const after = state.stack.find((f) => f.kind === "foreach");
-  assert.deepEqual([after.items, after.index], [snapshot.items, snapshot.index + 1], "iteration continues from the snapshotted collection");
-});
-
 test("invariant: retry and replan budgets are finite", () => {
   const wf = workflow([task("only", { recovery: { maxAttempts: 1, maxReplans: 0, strategy: ["retry", "block"] } })]);
   let state = start(wf, { runId: "r1" }).state;

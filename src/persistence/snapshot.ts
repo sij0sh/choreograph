@@ -27,7 +27,7 @@ export type ParsedSnapshot =
   | { readonly status: "terminal" }
   | { readonly status: "invalid"; readonly error: string };
 
-const FRAME_KINDS = ["sequence", "task", "foreach", "repeat", "choose", "plan", "node"] as const;
+const FRAME_KINDS = ["sequence", "task", "plan", "node"] as const;
 type FrameKind = (typeof FRAME_KINDS)[number];
 
 function frameAt(value: unknown, label: string): Frame {
@@ -46,17 +46,6 @@ function frameAt(value: unknown, label: string): Frame {
       return { kind, blockId, key, index: indexAt("index", 100_000) };
     case "task":
       return { kind, blockId, key, attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
-    case "foreach": {
-      const items = raw.items;
-      if (!Array.isArray(items)) throw new Error(`${label}.items must be a list`);
-      if (items.length > LIMITS.forEachItems) throw new Error(`${label}.items exceeds ${LIMITS.forEachItems}`);
-      if (items.some((item) => !isJsonValue(item))) throw new Error(`${label}.items must contain JSON values`);
-      return { kind, blockId, key, items: items as JsonValue[], index: indexAt("index", items.length), variable: requireString(raw.variable, `${label}.variable`) };
-    }
-    case "repeat":
-      return { kind, blockId, key, iteration: indexAt("iteration", LIMITS.repeatMax) };
-    case "choose":
-      return { kind, blockId, key, caseName: requireString(raw.caseName, `${label}.caseName`) };
     case "plan": {
       if (raw.mode !== "create" && raw.mode !== "execute") throw new Error(`${label}.mode must be create or execute`);
       const attemptMax = raw.mode === "create" ? PLAN_CREATE_ATTEMPT_MAX : LIMITS.nodeAttempts + 1;
@@ -133,7 +122,7 @@ function executionAt(value: unknown, label: string): Execution {
   const stack = stackAt(raw.stack, `${label}.stack`);
   const leaf = stack[stack.length - 1];
   const leafKind = leaf.kind;
-  const structural = leafKind === "sequence" || leafKind === "foreach" || leafKind === "repeat" || leafKind === "choose" || (leafKind === "plan" && leaf.mode === "execute");
+  const structural = leafKind === "sequence" || (leafKind === "plan" && leaf.mode === "execute");
   if (structural) throw new Error(`${label}.stack must end at a leaf frame (task, node, or plan creation)`);
   return {
     workflowName: requireString(raw.workflowName, `${label}.workflowName`),

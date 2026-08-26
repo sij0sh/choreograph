@@ -8,6 +8,7 @@ import { invalidateResults } from "../planning/graph.ts";
 import type { Effect, EngineResult, Issue } from "./interpreter.ts";
 import { advance } from "./interpreter.ts";
 
+
 type Outcome = { readonly checkpoint: Checkpoint; readonly issues?: readonly Issue[] };
 
 function deliver(state: Execution): EngineResult {
@@ -63,12 +64,20 @@ function resume(workflow: Workflow, state: Execution, stack: readonly Frame[]): 
 function tryInvalidate(workflow: Workflow, state: Execution, outcome: Outcome, policy: RecoveryPolicy): EngineResult | undefined {
   const targets = (outcome.issues ?? []).map((issue) => issue.target);
   if (targets.length === 0) return undefined;
+  const leaf = state.stack[state.stack.length - 1];
+  const currentPlanKey = leaf?.kind === "node" ? planKeyOf(leaf.key) : leaf?.kind === "plan" ? leaf.key : undefined;
   let matched: { key: string; execution: PlanExecution; removed: string[] } | undefined;
-  for (const [key, execution] of Object.entries(state.plans)) {
-    if (policy.scope && execution.blockId !== policy.scope) continue;
-    const invalidated = invalidateResults(execution, targets);
-    if (invalidated.removed.length > 0 && (!matched || invalidated.removed.length > matched.removed.length)) {
-      matched = { key, execution: invalidated.execution, removed: invalidated.removed };
+  const currentPlan = currentPlanKey ? state.plans[currentPlanKey] : undefined;
+  if (currentPlan && targets.some((target) => currentPlan.plan.nodes.some((node) => node.id === target))) {
+    const invalidated = invalidateResults(currentPlan, targets);
+    matched = { key: currentPlanKey!, execution: invalidated.execution, removed: invalidated.removed };
+  } else {
+    for (const [key, execution] of Object.entries(state.plans)) {
+      if (policy.scope && execution.blockId !== policy.scope) continue;
+      const invalidated = invalidateResults(execution, targets);
+      if (invalidated.removed.length > 0 && (!matched || invalidated.removed.length > matched.removed.length)) {
+        matched = { key, execution: invalidated.execution, removed: invalidated.removed };
+      }
     }
   }
   if (matched && matched.execution.invalidations + 1 > policy.maxReplans) return undefined;

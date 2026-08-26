@@ -36,27 +36,6 @@ steps:
   - run: steps/02-observe.md    # A task
     id: observe
     done: [evidence-recorded]
-  - id: review                  # A loop
-    for_each:
-      items: $observe.data.files
-      as: file
-      do:
-        - run: steps/inspect.md
-  - id: refine                  # An iterative block
-    repeat:
-      max: 3
-      until:
-        equals: [$verify.passed, true]
-      do:
-        - run: steps/improve.md
-  - id: route                   # A branch
-    choose:
-      value: $observe.data.mode
-      cases:
-        fast:
-          - run: steps/quick.md
-      fallback:
-        - run: steps/thorough.md
   - id: investigate             # A dynamic plan
     plan:
       operators: [inspect, trace]
@@ -84,33 +63,11 @@ steps:
 | Kind | Keys | Effect |
 |---|---|---|
 | Task | `run`, `id?`, `tools?`, `model?`, `done?`, `repair?` | Runs one markdown instruction file to completion. |
-| `for_each` | `items`, `as`, `do` | Snapshots `items` once on entry, then runs `do` per item. `$current.<var>` resolves to the active item. |
-| `repeat` | `max`, `until?`, `do` | Runs `do` up to `max` times, stopping early when `until` holds. |
-| `choose` | `value`, `cases`, `fallback?` | Runs the matching case body; unmatched values use `fallback` or skip the block. |
 | `plan` | `operators`, `repair?` | The model composes a bounded plan from trusted operators; the engine runs it one node per turn. |
 
-Every block needs a unique `id` across the workflow; task ids may derive from their file stem.
+Every block needs a unique `id` across the workflow; task ids may derive from their file stem. Workflows are static sequences and plans: loop (`for_each`), iterate (`repeat`), branch (`choose`), predicate (`until`), and data-reference (`$task.field`, `$current`) authoring were removed in v0.2 and now fail as unknown keys.
 
-### Data references
-
-References resolve against checkpoint `data` of the most recent occurrence of a task id, or the current loop iteration:
-
-```text
-$discover.files        # discover's latest checkpoint data.files
-$verify.passed         # verify's latest checkpoint data.passed
-$current.file          # the active for_each item's file field
-```
-
-### Predicates
-
-`repeat.until` and future conditions use six composable operations; complex logic belongs in a task that emits a value:
-
-```yaml
-until:
-  any:
-    - equals: [$verify.passed, true]
-    - exists: $verify.good-enough
-```
+Task outputs reach later positions through the rendered prior checkpoints and `checkpoint.data`; no reference language exists.
 
 ### Recovery
 
@@ -125,7 +82,7 @@ repair:
 ```
 
 - **retry** re-runs the current position while attempts remain.
-- **invalidate** removes the targeted plan results or task checkpoints plus transitive dependents, then resumes at the earliest invalidated node.
+- **invalidate** removes the targeted plan results or task checkpoints plus transitive dependents, then resumes at the earliest invalidated node. WHEN the target names a node of the plan the current position belongs to, that plan owns the issue even when its result is absent. Otherwise the search spans plans in scope.
 - **replan** returns to plan creation, retaining valid completed results.
 - **block** records the checkpoint and waits for the user.
 
@@ -154,7 +111,7 @@ A plan creation pass carries `checkpoint.data.plan`:
 
 Validation happens before anything commits: 2-8 nodes, unique ids, only the block's trusted operators, dependencies on earlier nodes or retained results, and size bounds. Nodes never carry their own tools; the operator ceiling governs.
 
-Hard limits: 2 node attempts, 2 replans, 2 invalidations per plan, 8 nodes, 64 loop items, 16 repeat iterations, 4 KiB summaries, 16 KiB checkpoints, 8 KiB results, 32 KiB plans, 512 KiB total memory.
+Hard limits: 2 node attempts, 2 replans, 2 invalidations per plan, 8 nodes, 4 KiB summaries, 16 KiB checkpoints, 8 KiB results, 32 KiB plans, 512 KiB total memory.
 
 ## Runtime behavior
 
@@ -198,7 +155,7 @@ Optional `model` selectors at workflow or task scope run different models at dif
 
 ```text
 src/
-  authoring/   YAML schema, compiler, references, predicates
+  authoring/   YAML schema, compiler
   domain/      Block AST, execution frames, checkpoints, policy, limits
   engine/      Pure stack interpreter and policy-driven recovery
   planning/    Dynamic plan schema, validation, graph helpers

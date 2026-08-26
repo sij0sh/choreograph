@@ -201,3 +201,57 @@ test("needs-work without matching targets falls through to block", () => {
   assert.equal(replanned.state.stack.at(-1).mode, "create", "unmatched invalidation falls through to replan");
   assert.equal(Object.values(replanned.state.plans)[0].replans, 1);
 });
+
+test("invalidate owns the current plan's target and preserves earlier completed work", () => {
+  const recovery = { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate"] };
+  const earlier = { kind: "plan", id: "earlier", operators: ["inspect"], recovery };
+  const current = { kind: "plan", id: "current", operators: ["inspect"], recovery };
+  const wf = workflow([task("seed"), earlier, current], { operators: OPERATORS });
+  const twoNodes = [node("node-a"), node("node-b", "inspect", { dependsOn: ["node-a"] })];
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("seed")) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: planOf([{ ...twoNodes[0] }, { ...twoNodes[1] }]) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: passNode("node-a") }).state;
+  state = transition(wf, state, { type: "outcome", outcome: passNode("node-b") }).state;
+  state = transition(wf, state, { type: "outcome", outcome: planOf([{ ...twoNodes[0] }, { ...twoNodes[1] }]) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: passNode("node-a") }).state;
+  const before = { earlier: Object.keys(state.plans["root/earlier"].results), current: Object.keys(state.plans["root/current"].results) };
+  assert.deepEqual(before.earlier, ["node-a", "node-b"]);
+  assert.deepEqual(before.current, ["node-a"]);
+
+  const invalidation = transition(wf, state, {
+    type: "outcome",
+    outcome: needsWork(cp("node-a is stale"), [{ target: "node-a", reason: "stale data" }]),
+  });
+  assert.ok(invalidation.ok, invalidation.ok ? "" : invalidation.error);
+  assert.deepEqual(Object.keys(invalidation.state.plans["root/earlier"].results), ["node-a", "node-b"], "the earlier completed plan is untouched");
+  assert.deepEqual(Object.keys(invalidation.state.plans["root/current"].results), [], "the current plan's stale result and its dependent are removed");
+  assert.equal(invalidation.state.plans["root/current"].invalidations, 1);
+  assert.equal(invalidation.state.plans["root/earlier"].invalidations, 0);
+  const leaf = invalidation.state.stack.at(-1);
+  assert.equal(leaf.kind, "node");
+  assert.equal(leaf.nodeId, "node-a", "the run resumes at the invalidated node of the current plan");
+});
+
+
+test("invalidate falls back to the global search for targets outside the current plan", () => {
+  const px = { kind: "plan", id: "px", operators: ["inspect"], recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate"] } };
+  const verifier = task("verify", { recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate"], scope: "px" } });
+  const wf = workflow([task("seed"), px, verifier], { operators: OPERATORS });
+  const twoNodes = [node("node-a"), node("node-b", "inspect", { dependsOn: ["node-a"] })];
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("seed")) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: planOf([{ ...twoNodes[0] }, { ...twoNodes[1] }]) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: passNode("node-a") }).state;
+  state = transition(wf, state, { type: "outcome", outcome: passNode("node-b") }).state;
+  assert.equal(state.stack.at(-1).blockId, "verify");
+  const invalidation = transition(wf, state, {
+    type: "outcome",
+    outcome: needsWork(cp("earlier work is wrong"), [{ target: "node-a", reason: "bad evidence" }]),
+  });
+  assert.ok(invalidation.ok, invalidation.ok ? "" : invalidation.error);
+  assert.equal(invalidation.state.plans["root/px"].invalidations, 1, "the fallback targets the scoped plan from a task position");
+  const leaf = invalidation.state.stack.at(-1);
+  assert.equal(leaf.kind, "node");
+  assert.equal(leaf.nodeId, "node-a");
+});

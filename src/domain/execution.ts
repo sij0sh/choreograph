@@ -16,29 +16,6 @@ export interface TaskFrame {
   readonly attempt: number;
 }
 
-export interface ForEachFrame {
-  readonly kind: "foreach";
-  readonly blockId: string;
-  readonly key: string;
-  readonly items: readonly JsonValue[];
-  readonly index: number;
-  readonly variable: string;
-}
-
-export interface RepeatFrame {
-  readonly kind: "repeat";
-  readonly blockId: string;
-  readonly key: string;
-  readonly iteration: number;
-}
-
-type ChooseFrame = {
-  readonly kind: "choose";
-  readonly blockId: string;
-  readonly key: string;
-  readonly caseName: string;
-};
-
 type PlanFrame = {
   readonly kind: "plan";
   readonly blockId: string;
@@ -55,7 +32,7 @@ export interface NodeFrame {
   readonly attempt: number;
 }
 
-export type Frame = SequenceFrame | TaskFrame | ForEachFrame | RepeatFrame | ChooseFrame | PlanFrame | NodeFrame;
+export type Frame = SequenceFrame | TaskFrame | PlanFrame | NodeFrame;
 
 export interface PlanExecution {
   readonly blockId: string;

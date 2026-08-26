@@ -7,25 +7,19 @@ import { completed, cp, needsWork, sequence, task, workflow } from "../engine/he
 import { start, transition } from "../../src/engine/interpreter.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
 
-function forEachWorkflow() {
-  const body = sequence("body", [task("inspect")]);
-  return workflow([
-    task("discover"),
-    { kind: "foreach", id: "review", items: { root: "discover", path: ["files"] }, as: "file", body },
-    task("deliver"),
-  ]);
+function steppedWorkflow() {
+  return workflow([task("discover"), task("inspect"), task("deliver")]);
 }
 
-function midLoopState() {
-  const wf = forEachWorkflow();
+function midRunState() {
+  const wf = steppedWorkflow();
   let state = start(wf, { runId: "run-1", target: "repo" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("found", { files: ["a", "b", "c"] })) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("inspected a")) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("found")) }).state;
   return { wf, state };
 }
 
 test("an active snapshot round-trips through JSON and resumes", () => {
-  const { wf, state } = midLoopState();
+  const { wf, state } = midRunState();
   const snapshot = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });
   const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
   assert.equal(parsed.status, "active");
@@ -36,36 +30,17 @@ test("an active snapshot round-trips through JSON and resumes", () => {
   assert.ok(migrated.ok, migrated.ok ? "" : migrated.error);
 
   let resumed = parsed.execution;
-  const next = transition(wf, resumed, { type: "outcome", outcome: completed(cp("inspected b")) });
+  const next = transition(wf, resumed, { type: "outcome", outcome: completed(cp("inspected a")) });
   assert.ok(next.ok);
   resumed = next.state;
-  const last = transition(wf, resumed, { type: "outcome", outcome: completed(cp("inspected c")) });
-  assert.ok(last.ok);
-  assert.equal(last.state.stack.at(-1).blockId, "deliver", "the resumed loop finishes its exact remaining iterations");
+  assert.equal(resumed.stack.at(-1).blockId, "deliver", "the resumed run finishes its exact remaining steps");
 });
 
-test("every frame type round-trips", () => {
-  const innerBody = sequence("inner-body", [task("probe")]);
-  const wf = workflow([
-    task("discover"),
-    {
-      kind: "foreach",
-      id: "outer",
-      items: { root: "discover", path: ["files"] },
-      as: "file",
-      body: sequence("outer-body", [
-        {
-          kind: "repeat",
-          id: "retry-zone",
-          max: 2,
-          body: sequence("retry-body", [task("probe")]),
-        },
-      ]),
-    },
-  ]);
+test("task and plan frames round-trip", () => {
+  const wf = workflow([task("discover"), { kind: "plan", id: "investigate", operators: [] }]);
   let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("found", { files: ["x", "y"] })) }).state;
-  assert.deepEqual(state.stack.map((f) => f.kind), ["sequence", "foreach", "sequence", "repeat", "sequence", "task"]);
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("found")) }).state;
+  assert.deepEqual(state.stack.map((f) => f.kind), ["sequence", "plan"]);
   const parsed = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: true }))));
   assert.deepEqual(parsed.execution, state);
   const migrated = validateAgainstWorkflow(wf, parsed.execution);
@@ -152,22 +127,6 @@ test("task, node, and execute-plan attempts keep the single-dimension bound", ()
   assert.equal(roundTrip(executeFour).status, "invalid");
 });
 
-test("authoring-legal deep nesting stays restorable at the frame budget", () => {
-  const ceiling = Math.floor((LIMITS.stackDepth - 2) / 2);
-  let innermost = task("leaf");
-  for (let i = ceiling; i >= 1; i -= 1) {
-    innermost = { kind: "foreach", id: `loop${i}`, items: { root: "seed", path: [] }, as: "item", body: sequence(`loop${i}-body`, [innermost]) };
-  }
-  const wf = workflow([task("seed"), innermost]);
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("found", ["x"])) }).state;
-  assert.equal(state.stack.length, LIMITS.stackDepth, "the deepest legal workflow exactly fills the persisted stack");
-  const parsed = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: false }))));
-  assert.equal(parsed.status, "active");
-  const migrated = validateAgainstWorkflow(wf, parsed.execution);
-  assert.ok(migrated.ok, migrated.ok ? "" : migrated.error);
-});
-
 test("terminal snapshots parse as terminal", () => {
   assert.equal(parseSnapshot(terminalSnapshot("completed", "demo", "r1")).status, "terminal");
   const legacy = parseSnapshot({ v: 3, status: "completed", workflow: "demo", runId: "r1", totalSteps: 4 });
@@ -189,15 +148,15 @@ test("invalid snapshots never partially resume", () => {
 });
 
 test("semantic restore rejects stale positions", () => {
-  const { wf, state } = midLoopState();
+  const { wf, state } = midRunState();
   const edited = workflow([
     task("discover"),
-    { kind: "foreach", id: "review", items: { root: "discover", path: ["files"] }, as: "renamed", body: sequence("body", [task("inspect")]) },
+    task("renamed"),
     task("deliver"),
   ]);
   const drifted = validateAgainstWorkflow(edited, state);
   assert.ok(!drifted.ok);
-  assert.match(drifted.error, /variable/);
+  assert.match(drifted.error, /child/);
 
   const removed = workflow([task("discover"), task("deliver")]);
   const gone = validateAgainstWorkflow(removed, state);
@@ -211,7 +170,7 @@ test("semantic restore rejects stale positions", () => {
 
 test("latestSnapshot finds the newest custom entry on the branch", () => {
   const entry = (data) => ({ type: "custom", customType: "choreograph", data });
-  const { state } = midLoopState();
+  const { state } = midRunState();
   const snap = activeSnapshot({ workflow: "demo", execution: state, delivered: true });
   const branch = [entry({ v: 4, status: "aborted", workflow: "demo", runId: "old" }), entry(snap), { type: "user", text: "hi" }];
   const parsed = latestSnapshot(branch);
@@ -221,7 +180,7 @@ test("latestSnapshot finds the newest custom entry on the branch", () => {
 });
 
 test("latestSnapshot ignores snapshots persisted under the pre-rename type", () => {
-  const { state } = midLoopState();
+  const { state } = midRunState();
   const snap = activeSnapshot({ workflow: "demo", execution: state, delivered: true });
   const parsed = latestSnapshot([{ type: "custom", customType: "pi-workflows", data: snap }]);
   assert.equal(parsed, null);

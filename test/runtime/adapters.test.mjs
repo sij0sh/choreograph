@@ -84,27 +84,6 @@ test("the task prompt carries instructions, context, criteria, and controls", ()
   assert.match(prompt, /workflow_transition/);
 });
 
-test("the foreach prompt shows iteration context", () => {
-  const wf = workflow([
-    task("discover"),
-    { kind: "foreach", id: "review", items: { root: "discover", path: ["files"] }, as: "file", body: sequence("body", [task("inspect")]) },
-  ]);
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("found", { files: ["a.ts", "b.ts"] })) }).state;
-  const prompt = renderPrompt(wf, state, reader({ "WORKFLOW.md": "# Overview", "steps/inspect.md": "# Inspect" }));
-  assert.match(prompt, /Iteration 1\/2/);
-  assert.match(prompt, /file = "a\.ts"/);
-});
-
-test("the repeat prompt shows attempt context", () => {
-  const wf = workflow([
-    { kind: "repeat", id: "refine", max: 3, body: sequence("body", [task("improve")]) },
-  ]);
-  const state = start(wf, { runId: "r1" }).state;
-  const prompt = renderPrompt(wf, state, reader({ "WORKFLOW.md": "# Overview", "steps/improve.md": "# Improve" }));
-  assert.match(prompt, /Attempt 1\/3/);
-});
-
 test("the plan-create prompt lists operator descriptions but never bodies", () => {
   const OPERATORS = new Map([
     ["inspect", { id: "inspect", path: "operators/inspect.md", description: "Inspect code." }],

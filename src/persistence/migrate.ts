@@ -15,13 +15,6 @@ function childrenOf(block: Block | undefined): readonly Block[] | undefined {
   return block?.kind === "sequence" ? block.children : undefined;
 }
 
-function bodyOf(parent: Frame, block: Block | undefined): SequenceBlock | undefined {
-  if (!block) return undefined;
-  if (parent.kind === "foreach" && block.kind === "foreach") return block.body;
-  if (parent.kind === "repeat" && block.kind === "repeat") return block.body;
-  return undefined;
-}
-
 function validatePair(workflow: Workflow, state: Execution, parent: Frame, child: Frame, plans: Readonly<Record<string, PlanExecution>>): string | undefined {
   const parentBlock = blockOf(workflow, parent.blockId);
   if (!parentBlock) return `frame ${parent.key} names unknown block ${parent.blockId}`;
@@ -32,36 +25,6 @@ function validatePair(workflow: Workflow, state: Execution, parent: Frame, child
       if (parent.index < 1 || parent.index > children.length) return `frame ${parent.key} index ${parent.index} is outside the workflow`;
       const expected = children[parent.index - 1];
       if (expected.id !== child.blockId) return `frame ${parent.key} expects child ${expected.id} at index ${parent.index} but holds ${child.blockId}`;
-      return undefined;
-    }
-    case "foreach": {
-      if (parentBlock.kind !== "foreach") return `frame ${parent.key} does not name a for_each block`;
-      if (parent.variable !== parentBlock.as) return `frame ${parent.key} variable ${parent.variable} does not match the workflow binding ${parentBlock.as}`;
-      const body = bodyOf(parent, parentBlock);
-      if (!body || child.blockId !== body.id) return `frame ${parent.key} expects body ${parentBlock.body.id} but holds ${child.blockId}`;
-      if (child.kind !== "sequence") return `frame ${parent.key} body must be a sequence frame`;
-      const expectedKey = `${parent.key}[${parent.index}]/${body.id}`;
-      if (child.key !== expectedKey) return `frame ${child.key} does not match the restored iteration key ${expectedKey}`;
-      return undefined;
-    }
-    case "repeat": {
-      if (parentBlock.kind !== "repeat") return `frame ${parent.key} does not name a repeat block`;
-      const body = bodyOf(parent, parentBlock);
-      if (!body || child.blockId !== body.id) return `frame ${parent.key} expects body ${parentBlock.body.id} but holds ${child.blockId}`;
-      if (child.kind !== "sequence") return `frame ${parent.key} body must be a sequence frame`;
-      if (parent.iteration >= parentBlock.max) return `frame ${parent.key} iteration ${parent.iteration} exceeds the configured max ${parentBlock.max}`;
-      const expectedKey = `${parent.key}#${parent.iteration}/${body.id}`;
-      if (child.key !== expectedKey) return `frame ${child.key} does not match the restored iteration key ${expectedKey}`;
-      return undefined;
-    }
-    case "choose": {
-      if (parentBlock.kind !== "choose") return `frame ${parent.key} does not name a choose block`;
-      const body = parent.caseName === "fallback" ? parentBlock.fallback : parentBlock.cases[parent.caseName];
-      if (!body) return `frame ${parent.key} case ${parent.caseName} no longer exists`;
-      if (child.blockId !== body.id) return `frame ${parent.key} case ${parent.caseName} expects body ${body.id} but holds ${child.blockId}`;
-      if (child.kind !== "sequence") return `frame ${parent.key} case body must be a sequence frame`;
-      const expectedKey = `${parent.key}:${parent.caseName}/${body.id}`;
-      if (child.key !== expectedKey) return `frame ${child.key} does not match the restored case key ${expectedKey}`;
       return undefined;
     }
     case "plan": {
