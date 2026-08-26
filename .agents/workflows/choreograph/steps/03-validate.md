@@ -1,6 +1,6 @@
 # Validate
 
-Purpose: prove the package compiles.
+Purpose: prove the package compiles, contracts included.
 
 ## Do
 Run from the engine repository:
@@ -10,6 +10,9 @@ node -e "import('./src/authoring/parser.ts').then(async (m) => { const root = (p
 ```
 
 WHEN `PI_CODING_AGENT_DIR` is set, the check resolves under `$PI_CODING_AGENT_DIR/workflows`.
+
+The check compiles every discovered contract schema and rejects unsupported
+keywords, so a schema error surfaces here rather than at run time.
 
 Fix every reported diagnostic. Do not report success while any diagnostic remains.
 

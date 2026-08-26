@@ -12,11 +12,13 @@ steps:
     done:
       - target-named
       - steps-planned
+      - contracts-declared
   - run: steps/02-author.md
     id: author
     done:
       - package-written
       - paths-contained
+      - contracts-declared
   - run: steps/03-validate.md
     id: validate
     done:
