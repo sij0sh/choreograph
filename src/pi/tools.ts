@@ -59,6 +59,23 @@ export function normalizeTransitionArguments(args: unknown): Record<string, unkn
       out.issues = nested.issues;
       delete nested.issues;
     }
+    const data = asRecord(nested.data);
+    if (data) {
+      const liftIfShaped = (field: "met" | "issues", isShaped: (value: unknown) => boolean): void => {
+        if (out[field] === undefined && data[field] !== undefined && isShaped(data[field])) {
+          out[field] = data[field];
+          delete data[field];
+          if (Object.keys(data).length === 0) delete nested.data;
+        }
+      };
+      liftIfShaped("met", (value) => Array.isArray(value) && value.every((entry) => typeof entry === "string"));
+      liftIfShaped("issues", (value) =>
+        Array.isArray(value) &&
+        value.every((entry) => {
+          const issue = asRecord(entry);
+          return issue !== undefined && typeof issue.target === "string" && typeof issue.reason === "string";
+        }));
+    }
     
     const stray = Object.keys(nested).filter((key) => !CHECKPOINT_FIELDS.has(key));
     if (stray.length > 0) {
