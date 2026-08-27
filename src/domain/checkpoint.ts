@@ -10,51 +10,122 @@ export interface Checkpoint {
   readonly skipped?: boolean;
 }
 
-function boundedStringList(value: unknown, label: string): string[] | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value)) throw new Error(`${label} must be a list`);
-  if (value.length > LIMITS.checkpointListItems) throw new Error(`${label} must have at most ${LIMITS.checkpointListItems} items`);
-  return value.map((item, index) => {
-    const text = requireString(item, `${label}[${index}]`);
-    if (Buffer.byteLength(text, "utf8") > LIMITS.checkpointItemBytes) throw new Error(`${label}[${index}] exceeds ${LIMITS.checkpointItemBytes} bytes`);
-    return text;
-  });
+const CHECKPOINT_KEYS = ["summary", "evidence", "decisions", "unknowns", "data", "skipped"];
+
+interface Bounded {
+  value?: string[];
+  valid: boolean;
 }
 
-function dataAt(value: unknown, label: string): JsonValue | undefined {
-  if (value === undefined) return undefined;
-  if (!isJsonValue(value)) throw new Error(`${label} must be a JSON value`);
-  if (jsonDepth(value) > LIMITS.jsonDepth) throw new Error(`${label} nesting must not exceed ${LIMITS.jsonDepth} levels`);
-  return value as JsonValue;
+function boundedStringList(value: unknown, label: string, errors: string[]): Bounded {
+  if (value === undefined) return { valid: true };
+  if (!Array.isArray(value)) {
+    errors.push(`${label} must be a list`);
+    return { valid: false };
+  }
+  const out: string[] = [];
+  let valid = true;
+  if (value.length > LIMITS.checkpointListItems) {
+    errors.push(`${label} must have at most ${LIMITS.checkpointListItems} items (was ${value.length}); keep the ${LIMITS.checkpointListItems} most load-bearing entries`);
+    valid = false;
+  }
+  value.forEach((item, index) => {
+    if (typeof item !== "string" || !item.trim()) {
+      errors.push(`${label}[${index}] must be a non-empty string`);
+      valid = false;
+      return;
+    }
+    const bytes = Buffer.byteLength(item, "utf8");
+    if (bytes > LIMITS.checkpointItemBytes) {
+      errors.push(`${label}[${index}] exceeds ${LIMITS.checkpointItemBytes} bytes (was ${bytes}); shorten the entry or move detail into \`data\``);
+      valid = false;
+      return;
+    }
+    out.push(item);
+  });
+  return valid ? { value: out, valid } : { valid: false };
+}
+
+function dataErrors(value: unknown, label: string, errors: string[]): void {
+  if (value === undefined) return;
+  if (!isJsonValue(value)) {
+    errors.push(`${label} must be a JSON value`);
+    return;
+  }
+  if (jsonDepth(value) > LIMITS.jsonDepth) errors.push(`${label} nesting must not exceed ${LIMITS.jsonDepth} levels`);
+}
+
+function normalizedCheckpoint(raw: Record<string, unknown>, exemptsPlan: boolean): Checkpoint | undefined {
+  if (typeof raw.summary !== "string" || !raw.summary.trim()) return undefined;
+  const checkpoint: { summary: string; evidence?: string[]; decisions?: string[]; unknowns?: string[]; data?: JsonValue; skipped?: boolean } = { summary: raw.summary };
+  const list = (value: unknown): string[] | undefined =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : undefined;
+  const evidence = list(raw.evidence);
+  const decisions = list(raw.decisions);
+  const unknowns = list(raw.unknowns);
+  if (evidence?.length) checkpoint.evidence = evidence;
+  if (decisions?.length) checkpoint.decisions = decisions;
+  if (unknowns?.length) checkpoint.unknowns = unknowns;
+  if (isJsonValue(raw.data)) checkpoint.data = raw.data;
+  if (raw.skipped === true) checkpoint.skipped = true;
+  if (exemptsPlan && checkpoint.data !== undefined && typeof checkpoint.data === "object" && checkpoint.data !== null && !Array.isArray(checkpoint.data) && (checkpoint.data as { plan?: unknown }).plan !== undefined) {
+    const rest: Record<string, unknown> = { ...(checkpoint.data as Record<string, unknown>) };
+    delete rest.plan;
+    if (Object.keys(rest).length === 0) delete checkpoint.data;
+    else checkpoint.data = rest as JsonValue;
+  }
+  return checkpoint;
+}
+
+export function checkpointErrors(value: unknown, label: string, exemptsPlan = false): string[] {
+  let raw: Record<string, unknown>;
+  try {
+    raw = objectAt(value, label);
+  } catch (error) {
+    return [error instanceof Error ? error.message : String(error)];
+  }
+  const errors: string[] = [];
+  for (const key of Object.keys(raw)) {
+    if (!CHECKPOINT_KEYS.includes(key)) errors.push(`${label}.${key} is not an accepted checkpoint field`);
+  }
+  if (raw.skipped !== undefined && raw.skipped !== true) errors.push(`${label}.skipped must be true when present`);
+  if (typeof raw.summary !== "string" || !raw.summary.trim()) {
+    errors.push(`${label}.summary must be a non-empty string`);
+  } else {
+    const bytes = Buffer.byteLength(raw.summary, "utf8");
+    if (bytes > LIMITS.checkpointSummaryBytes) {
+      errors.push(`${label}.summary exceeds ${LIMITS.checkpointSummaryBytes} bytes (was ${bytes}); move detail into \`evidence\` or \`data\``);
+    }
+  }
+  boundedStringList(raw.evidence, `${label}.evidence`, errors);
+  boundedStringList(raw.decisions, `${label}.decisions`, errors);
+  boundedStringList(raw.unknowns, `${label}.unknowns`, errors);
+  dataErrors(raw.data, `${label}.data`, errors);
+  const normalized = normalizedCheckpoint(raw, exemptsPlan);
+  if (normalized) {
+    const bytes = canonicalJsonBytes(normalized as unknown as JsonValue);
+    if (bytes > LIMITS.checkpointBytes) {
+      errors.push(`${label} exceeds ${LIMITS.checkpointBytes} bytes (was ${bytes}); trim \`evidence\`/\`decisions\`/\`unknowns\` or narrow \`data\``);
+    }
+  }
+  return errors;
 }
 
 export function validateCheckpoint(value: unknown, label: string, exemptsPlan = false): Checkpoint {
+  const errors = checkpointErrors(value, label, exemptsPlan);
+  if (errors.length > 0) throw new Error(errors.join("; "));
   const raw = objectAt(value, label);
-  for (const key of Object.keys(raw)) {
-    if (! ["summary", "evidence", "decisions", "unknowns", "data", "skipped"].includes(key)) throw new Error(`${label}.${key} is not an accepted checkpoint field`);
-  }
-  if (raw.skipped !== undefined && raw.skipped !== true) throw new Error(`${label}.skipped must be true when present`);
-  const summary = requireString(raw.summary, `${label}.summary`);
-  if (Buffer.byteLength(summary, "utf8") > LIMITS.checkpointSummaryBytes) throw new Error(`${label}.summary exceeds ${LIMITS.checkpointSummaryBytes} bytes`);
-  const checkpoint: { summary: string; evidence?: string[]; decisions?: string[]; unknowns?: string[]; data?: JsonValue; skipped?: boolean } = { summary };
-  const evidence = boundedStringList(raw.evidence, `${label}.evidence`);
-  const decisions = boundedStringList(raw.decisions, `${label}.decisions`);
-  const unknowns = boundedStringList(raw.unknowns, `${label}.unknowns`);
-  const data = dataAt(raw.data, `${label}.data`);
+  const checkpoint: { summary: string; evidence?: string[]; decisions?: string[]; unknowns?: string[]; data?: JsonValue; skipped?: boolean } = {
+    summary: requireString(raw.summary, `${label}.summary`),
+  };
+  const evidence = boundedStringList(raw.evidence, `${label}.evidence`, []).value;
+  const decisions = boundedStringList(raw.decisions, `${label}.decisions`, []).value;
+  const unknowns = boundedStringList(raw.unknowns, `${label}.unknowns`, []).value;
+  const data = raw.data === undefined ? undefined : (raw.data as JsonValue);
   if (evidence) checkpoint.evidence = evidence;
   if (decisions) checkpoint.decisions = decisions;
   if (unknowns) checkpoint.unknowns = unknowns;
   if (data !== undefined) checkpoint.data = data;
   if (raw.skipped === true) checkpoint.skipped = true;
-  const measured = exemptsPlan && data !== undefined && (data as { plan?: unknown })?.plan !== undefined
-    ? (Object.keys(data as object).length === 1
-      ? { summary: checkpoint.summary } as typeof checkpoint
-      : (() => {
-          const rest: Record<string, unknown> = { ...(data as Record<string, unknown>) };
-          delete rest.plan;
-          return { ...checkpoint, data: rest as import("./json.ts").JsonValue };
-        })())
-    : checkpoint;
-  if (canonicalJsonBytes(measured as unknown as JsonValue) > LIMITS.checkpointBytes) throw new Error(`${label} exceeds ${LIMITS.checkpointBytes} bytes`);
   return checkpoint;
 }
