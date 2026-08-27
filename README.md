@@ -290,6 +290,51 @@ A plan must contain 2 to 8 nodes. Node ids must be unique. Each node must use
 an operator allowed by the block. Dependencies may name only earlier nodes or
 retained results from a previous plan revision.
 
+### Script steps
+
+A script step runs one bounded local process with no model turn. The runtime
+spawns it, records its exit, and moves on; `workflow_transition` is rejected at
+script positions.
+
+```yaml
+- id: run-tests
+  script:
+    argv: [npm, test]
+    cwd: .
+    env: { CI: "1" }
+    inheritEnv: [PATH, HOME, LANG]
+    timeoutMs: 120000
+    acceptedExitCodes: [0]
+    stdout: json            # json | text | none
+    stderr: text
+    maxCaptureBytes: 65536
+  output: test-report       # optional contract id
+```
+
+Rules:
+
+- `argv` is required: a non-empty list of non-empty strings. There is no shell;
+  metacharacters are passed through as literal arguments.
+- `cwd` is relative to the workflow directory (default `.`) and must stay inside it.
+- `env` entries override the inherited environment. `inheritEnv` is an allowlist
+  of variable names copied from the agent's environment; nothing else is inherited.
+- `timeoutMs` must be 1000 to 600000 (default 60000). On timeout the process gets
+  SIGTERM, then SIGKILL after a 5 second grace.
+- `acceptedExitCodes` defaults to `[0]`; entries must be 0 to 255.
+- `maxCaptureBytes` defaults to 65536 (cap 1 MiB, shared across stdout and
+  stderr). Output beyond the cap is truncated and flagged in the checkpoint summary.
+- `stdout` mode decides the checkpoint data: `json` parses stdout into the data,
+  `text` stores it as `{ stdout }` (clipped to the checkpoint budget), `none`
+  stores an empty object. `stderr` is captured for diagnostics and never parsed
+  into the data.
+- Script steps accept `id`, `script`, `repair`, `when`, and `output`. They reject
+  `run`, `tools`, `done`, `plan`, `for_each`, and `repeat_until`, and cannot
+  appear inside loop bodies.
+- An accepted exit with output satisfying the `output` contract completes the
+  step. A timeout, a rejected exit code, invalid JSON, a contract violation, or a
+  spawn failure applies the step's `repair` policy; after retries are exhausted
+  the run parks at the script position with a failure checkpoint.
+
 ### Operators
 
 Operators are trusted instruction files under `operators/`. The file stem is
@@ -534,6 +579,10 @@ choreograph enforces these main bounds:
 | Complete checkpoint | 16 KiB |
 | Plan node result | 8 KiB |
 | Iterations per loop | 8 (required) |
+| Script argv entries | 64 |
+| Script env entries | 32 |
+| Script timeout | 1,000–600,000 ms |
+| Script capture (stdout + stderr) | 64 KiB default, 1 MiB max |
 | Total workflow memory | 512 KiB |
 
 Workflows are ordered sequences plus dynamic plans, guards, and bounded loops
