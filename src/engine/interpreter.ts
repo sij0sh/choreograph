@@ -1,5 +1,5 @@
 import type { Checkpoint } from "../domain/checkpoint.ts";
-import { validateCheckpoint } from "../domain/checkpoint.ts";
+import { checkpointErrors, validateCheckpoint } from "../domain/checkpoint.ts";
 import type { Execution, Frame, LoopFrame, LoopState, NodeFrame, PlanExecution, SequenceFrame, TaskFrame } from "../domain/execution.ts";
 import { applyNeedsWork } from "./recovery.ts";
 import { contractError as contractErrorFor } from "../domain/contract.ts";
@@ -295,30 +295,116 @@ function checkCriteria(criteria: readonly string[], met: readonly string[]): str
   return parts.join("; ");
 }
 
-function validateOutcome(outcome: TaskOutcome, planCreate: boolean): string | undefined {
+function joined(errors: readonly string[]): string | undefined {
+  const unique = [...new Set(errors.filter((error) => error.trim().length > 0))];
+  return unique.length > 0 ? unique.join("; ") : undefined;
+}
+
+function outcomeShapeErrors(outcome: TaskOutcome): string[] {
+  const errors: string[] = [];
   const raw = outcome as { met?: unknown; issues?: unknown };
-  if (outcome.status !== "completed" && raw.met !== undefined) return "met is only valid with status \"completed\"";
-  if (outcome.status !== "needs-work" && raw.issues !== undefined) return "issues is only valid with status \"needs-work\"";
+  if (outcome.status !== "completed" && raw.met !== undefined) errors.push("met is only valid with status \"completed\"");
+  if (outcome.status !== "needs-work" && raw.issues !== undefined) errors.push("issues is only valid with status \"needs-work\"");
   if (raw.met !== undefined) {
-    if (!Array.isArray(raw.met)) return "met must be a list of criterion ids";
-    for (const id of raw.met) {
-      if (typeof id !== "string" || !ID_PATTERN.test(id)) return "met entries must match ^[a-z][a-z0-9-]*$";
+    if (!Array.isArray(raw.met)) {
+      errors.push("met must be a list of criterion ids");
+    } else {
+      const offending = [...new Set(raw.met.filter((id) => typeof id !== "string" || !ID_PATTERN.test(id)))];
+      if (offending.length > 0) errors.push(`met entries must match ${ID_PATTERN} (offending: ${offending.map((id) => JSON.stringify(id)).join(", ")}); use the required ids below verbatim`);
     }
   }
   if (raw.issues !== undefined) {
-    if (!Array.isArray(raw.issues)) return "issues must be a list";
-    for (const issue of raw.issues) {
-      if (!issue || typeof issue !== "object" || Array.isArray(issue)) return "issues entries must be objects";
-      if (typeof issue.target !== "string" || !issue.target.trim()) return "issues entries need a non-empty target";
-      if (typeof issue.reason !== "string" || !issue.reason.trim()) return "issues entries need a non-empty reason";
+    if (!Array.isArray(raw.issues)) {
+      errors.push("issues must be a list");
+    } else {
+      raw.issues.forEach((issue, index) => {
+        if (!issue || typeof issue !== "object" || Array.isArray(issue)) {
+          errors.push(`issues[${index}] must be an object`);
+          return;
+        }
+        const entry = issue as { target?: unknown; reason?: unknown };
+        if (typeof entry.target !== "string" || !entry.target.trim()) errors.push(`issues[${index}].target must be a non-empty string`);
+        if (typeof entry.reason !== "string" || !entry.reason.trim()) errors.push(`issues[${index}].reason must be a non-empty string`);
+      });
     }
   }
-  try {
-    validateCheckpoint(outcome.checkpoint, "checkpoint", planCreate);
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+  return errors;
+}
+
+function completedProblems(workflow: Workflow, state: Execution, leaf: Frame, outcome: Extract<TaskOutcome, { status: "completed" }>, planExempt: boolean): string[] {
+  const errors = [...outcomeShapeErrors(outcome), ...checkpointErrors(outcome.checkpoint, "checkpoint", planExempt)];
+  const met = outcome.met ?? [];
+  if (leaf.kind === "task") {
+    const block = blockOf(workflow, leaf.blockId);
+    if (!block || block.kind !== "task") {
+      errors.push(`frame ${leaf.key} does not name a task`);
+      return errors;
+    }
+    const criteria = checkCriteria(block.done ?? [], met);
+    if (criteria) errors.push(criteria);
+    const contract = contractErrorFor(workflow, block.output, outcome.checkpoint.data, `task ${leaf.key} output`);
+    if (contract) errors.push(contract);
+    return errors;
   }
-  return undefined;
+  if (leaf.kind === "plan") {
+    const block = blockOf(workflow, leaf.blockId);
+    if (!block || block.kind !== "plan") {
+      errors.push(`frame ${leaf.key} does not name a plan block`);
+      return errors;
+    }
+    const planValue = (outcome.checkpoint.data as { plan?: unknown } | undefined)?.plan;
+    if (planValue === undefined) {
+      errors.push("plan creation completion must carry checkpoint.data.plan");
+      return errors;
+    }
+    const previous = state.plans[leaf.key];
+    const metadata = resultOperatorsFor(previous);
+    if (metadata.error) {
+      errors.push(metadata.error);
+      return errors;
+    }
+    const retained = retainedResultError(workflow, block, previous, metadata.operators);
+    if (retained) errors.push(retained);
+    const validation = validateDynamicPlan(planValue, planInputFor(workflow, block.operators, new Set(Object.keys(previous?.results ?? {}))));
+    if ("errors" in validation) errors.push(`invalid plan: ${validation.errors.join("; ")}`);
+    return errors;
+  }
+  if (leaf.kind === "node") {
+    const planKey = planKeyOfNode(leaf);
+    const execution = state.plans[planKey];
+    if (!execution || execution.blockId !== leaf.blockId) {
+      errors.push(`node frame ${leaf.key} has no plan execution`);
+      return errors;
+    }
+    const node = execution.plan.nodes.find((entry) => entry.id === leaf.nodeId);
+    if (!node) {
+      errors.push(`node ${leaf.nodeId} is not in the active plan`);
+      return errors;
+    }
+    const criteria = checkCriteria(node.done, met);
+    if (criteria) errors.push(criteria);
+    const operator = workflow.operators.get(node.operator);
+    const contract = contractErrorFor(workflow, operator?.output, outcome.checkpoint.data, `node result ${node.id}`);
+    if (contract) errors.push(contract);
+    try {
+      const result = validateCheckpoint(outcome.checkpoint, `node result ${node.id}`);
+      const bytes = canonicalJsonBytes(result as unknown as JsonValue);
+      if (bytes > LIMITS.nodeResultBytes) {
+        errors.push(`node result ${node.id} exceeds ${LIMITS.nodeResultBytes} bytes (was ${bytes}); trim \`evidence\`/\`data\` or narrow the node result`);
+      }
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+    return errors;
+  }
+  return errors;
+}
+
+function blockedProblems(workflow: Workflow, state: Execution, leaf: Frame, outcome: Extract<TaskOutcome, { status: "blocked" }>, planExempt: boolean): string[] {
+  const errors = [...outcomeShapeErrors(outcome), ...checkpointErrors(outcome.checkpoint, "checkpoint", planExempt)];
+  const contract = contractErrorFor(workflow, outputContractFor(workflow, state, leaf), outcome.checkpoint.data, `checkpoint ${leaf.key}`);
+  if (contract) errors.push(contract);
+  return errors;
 }
 
 function commitCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): Execution["checkpoints"] {
@@ -449,11 +535,9 @@ function completeNode(workflow: Workflow, state: Execution, leaf: NodeFrame, out
   const operator = workflow.operators.get(node.operator);
   const contractError = contractErrorFor(workflow, operator?.output, outcome.checkpoint.data, `node result ${node.id}`);
   if (contractError) return fail(contractError);
-  const { checkpoint } = outcome;
   let result: Checkpoint;
   try {
-    result = validateCheckpoint(checkpoint, `node result ${node.id}`);
-    if (canonicalJsonBytes(result as unknown as JsonValue) > LIMITS.nodeResultBytes) throw new Error(`node result ${node.id} exceeds ${LIMITS.nodeResultBytes} bytes`);
+    result = validateCheckpoint(outcome.checkpoint, `node result ${node.id}`);
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
   }
@@ -499,13 +583,20 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
   }
   const outcome = event.outcome;
   const leaf = state.stack[state.stack.length - 1];
-  const invalid = validateOutcome(outcome, leaf?.kind === "plan" && leaf.mode === "create");
+  const planExempt = leaf?.kind === "plan" && leaf.mode === "create";
+  if (!leaf || !isLeafFrame(leaf)) {
+    const error = joined([...outcomeShapeErrors(outcome), ...checkpointErrors(outcome.checkpoint, "checkpoint", false)]);
+    return fail(error ?? "execution has no current leaf task");
+  }
+  const problems = outcome.status === "completed"
+    ? completedProblems(workflow, state, leaf, outcome, planExempt)
+    : outcome.status === "blocked"
+      ? blockedProblems(workflow, state, leaf, outcome, planExempt)
+      : [...outcomeShapeErrors(outcome), ...checkpointErrors(outcome.checkpoint, "checkpoint", planExempt)];
+  const invalid = joined(problems);
   if (invalid) return fail(invalid);
-  if (!leaf || !isLeafFrame(leaf)) return fail("execution has no current leaf task");
   switch (outcome.status) {
     case "blocked": {
-      const checkpointError = contractErrorFor(workflow, outputContractFor(workflow, state, leaf), outcome.checkpoint.data, `checkpoint ${leaf.key}`);
-      if (checkpointError) return fail(checkpointError);
       const checkpoint = leaf.kind === "plan" ? stripPlanPayload(outcome.checkpoint) : outcome.checkpoint;
       return { ok: true, state: withCheckpoint(state, leaf.key, checkpoint), effect: { kind: "stay" } };
     }
@@ -514,13 +605,6 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
     case "completed": {
       if (leaf.kind === "plan") return completePlanCreation(workflow, state, leaf, outcome);
       if (leaf.kind === "node") return completeNode(workflow, state, leaf, outcome);
-      if (leaf.kind !== "task") return fail("completion for this position is not supported");
-      const block = blockOf(workflow, leaf.blockId);
-      if (!block || block.kind !== "task") return fail(`frame ${leaf.key} does not name a task`);
-      const criteriaError = checkCriteria(block.done ?? [], outcome.met ?? []);
-      if (criteriaError) return fail(criteriaError);
-      const contractError = contractErrorFor(workflow, block.output, outcome.checkpoint.data, `task ${leaf.key} output`);
-      if (contractError) return fail(contractError);
       const committed = withCheckpoint(state, leaf.key, outcome.checkpoint);
       const popped: Execution = { ...committed, stack: state.stack.slice(0, -1) };
       return finishAdvance(workflow, popped, popped.stack);
