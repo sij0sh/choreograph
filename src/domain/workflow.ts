@@ -49,7 +49,28 @@ export interface LoopBlock {
   readonly guard?: GuardClause;
 }
 
-export type Block = TaskBlock | SequenceBlock | PlanBlock | LoopBlock;
+export interface ScriptSpec {
+  readonly argv: readonly string[];
+  readonly cwd: string;
+  readonly env?: Readonly<Record<string, string>>;
+  readonly inheritEnv?: readonly string[];
+  readonly timeoutMs: number;
+  readonly acceptedExitCodes: readonly number[];
+  readonly stdout: "json" | "text" | "none";
+  readonly stderr: "json" | "text" | "none";
+  readonly maxCaptureBytes: number;
+}
+
+export interface ScriptBlock {
+  readonly kind: "script";
+  readonly id: string;
+  readonly script: ScriptSpec;
+  readonly recovery?: RecoveryPolicy;
+  readonly guard?: GuardClause;
+  readonly output?: string;
+}
+
+export type Block = TaskBlock | SequenceBlock | PlanBlock | LoopBlock | ScriptBlock;
 
 export interface OperatorDescriptor {
   readonly id: string;

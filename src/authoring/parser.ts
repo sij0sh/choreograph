@@ -8,6 +8,7 @@ import type {
   LoopBlock,
   OperatorDescriptor,
   PlanBlock,
+  ScriptBlock,
   SequenceBlock,
   TaskBlock,
   Workflow,
@@ -22,6 +23,7 @@ import {
   assertKeys,
   assertUnique,
   booleanAt,
+  escapesWorkflowRoot,
   MAX_INSTRUCTION_BYTES,
   MAX_WORKFLOW_BYTES,
   NAME_PATTERN,
@@ -29,6 +31,7 @@ import {
   parseIdList,
   parseInputBindings,
   parseRecovery,
+  parseScriptSpec,
   parseToolList,
   positiveIntAt,
   stringAt,
@@ -281,7 +284,39 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     const block = parseLoop(loopKeys[0], entry[loopKeys[0]], id, label, context);
     return { ...(guard ? { guard } : {}), ...block, ...(inputs ? { inputs } : {}) };
   }
-  const structural = (["plan"] as const).filter((key) => entry[key] !== undefined);
+  const structural = (["plan", "script"] as const).filter((key) => entry[key] !== undefined);
+  if (structural.length > 1) throw new Error(`${label} declares more than one of: ${structural.join(", ")}`);
+  if (structural[0] === "script") {
+    const id = stringAt(entry.id, `${label}.id`);
+    registerId(context, id, label);
+    for (const key of ["run", "tools", "done", "plan"] as const) {
+      if (entry[key] !== undefined) throw new Error(`${label}.${key} only applies to "run:" tasks`);
+    }
+    const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
+    recordInputEdges(context, id, inputs, label);
+    const guard = parseGuard(entry.when, `${label}.when`);
+    recordGuardEdge(context, id, guard, `${label}.when`);
+    const recovery = entry.repair === undefined ? undefined : parseRecovery(entry.repair, `${label}.repair`);
+    const output = entry.output === undefined ? undefined : stringAt(entry.output, `${label}.output`);
+    if (output !== undefined && !context.contracts.has(output)) {
+      throw new Error(`${label}.output names contract "${output}", which has no contracts/ file`);
+    }
+    const spec = parseScriptSpec(entry.script, `${label}.script`);
+    if (spec.cwd !== ".") {
+      const target = resolve(context.lexicalRoot, spec.cwd);
+      const rel = relative(context.lexicalRoot, target);
+      if (escapesWorkflowRoot(rel)) throw new Error(`${label}.script.cwd escapes the workflow directory`);
+    }
+    return {
+      kind: "script",
+      id,
+      script: spec,
+      ...(recovery ? { recovery } : {}),
+      ...(inputs ? { inputs } : {}),
+      ...(guard ? { guard } : {}),
+      ...(output !== undefined ? { output } : {}),
+    } satisfies ScriptBlock;
+  }
   if (structural.length === 1) {
     const id = stringAt(entry.id, `${label}.id`);
     registerId(context, id, label);

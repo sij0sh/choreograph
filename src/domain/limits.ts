@@ -21,6 +21,14 @@ export const LIMITS = {
   positionInputsBytes: 24_576,
   stackDepth: 24,
   advanceSteps: 10_000,
+  scriptArgvItems: 64,
+  scriptArgBytes: 4_096,
+  scriptEnvEntries: 32,
+  scriptEnvValueBytes: 4_096,
+  scriptTimeoutMinMs: 1_000,
+  scriptTimeoutMaxMs: 600_000,
+  scriptExitCodes: 32,
+  scriptCaptureMaxBytes: 1_048_576,
 } as const;
 
 export const PLAN_CREATE_ATTEMPT_MAX = LIMITS.nodeAttempts + LIMITS.replans;

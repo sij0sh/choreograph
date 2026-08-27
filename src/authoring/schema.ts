@@ -1,11 +1,14 @@
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import { isValidJsonPointer, objectAt, requireString } from "../domain/json.ts";
+import { isAbsolute } from "node:path";
+import { sep } from "node:path";
 import { DEFAULT_PLAN_RECOVERY, DEFAULT_TASK_RECOVERY, type RecoveryAction, type RecoveryPolicy } from "../domain/policy.ts";
 import { GUARD_OPS, VALUE_OPS, type GuardClause, type GuardOp } from "../domain/guard.ts";
 import type { InputBinding } from "../domain/workflow.ts";
 
 export const FRONTMATTER_KEYS = ["description", "steps", "piVisibility", "legalTools", "contracts"] as const;
-export const STEP_KEYS = ["id", "run", "tools", "done", "repair", "plan", "inputs", "output", "when", "for_each", "repeat_until"] as const;
+export const STEP_KEYS = ["id", "run", "tools", "done", "repair", "plan", "script", "inputs", "output", "when", "for_each", "repeat_until"] as const;
+export const SCRIPT_KEYS = ["argv", "cwd", "env", "inheritEnv", "timeoutMs", "acceptedExitCodes", "stdout", "stderr", "maxCaptureBytes"] as const;
 export const OPERATOR_KEYS = ["description", "tools", "output"] as const;
 const RECOVERY_KEYS = ["max_attempts", "max_replans", "strategy", "scope"] as const;
 const RECOVERY_ACTIONS: readonly RecoveryAction[] = ["retry", "invalidate", "replan", "block"];
@@ -117,6 +120,89 @@ export function positiveIntAt(value: unknown, label: string, max: number): numbe
     throw new Error(`${label} must be an integer between 1 and ${max}`);
   }
   return value;
+}
+
+const SCRIPT_CAPTURE_MODES: readonly string[] = ["json", "text", "none"];
+
+export function parseScriptSpec(raw: unknown, label: string): import("../domain/workflow.ts").ScriptSpec {
+  const body = objectAt(raw, label);
+  assertKeys(body, SCRIPT_KEYS, label);
+  if (!Array.isArray(body.argv) || body.argv.length === 0) throw new Error(`${label}.argv must be a non-empty list`);
+  if (body.argv.length > LIMITS.scriptArgvItems) throw new Error(`${label}.argv must have at most ${LIMITS.scriptArgvItems} entries`);
+  const argv = body.argv.map((entry, index) => {
+    const arg = stringAt(entry, `${label}.argv[${index}]`);
+    if (Buffer.byteLength(arg, "utf8") > LIMITS.scriptArgBytes) throw new Error(`${label}.argv[${index}] exceeds ${LIMITS.scriptArgBytes} bytes`);
+    return arg;
+  });
+  let cwd = ".";
+  if (body.cwd !== undefined) {
+    cwd = stringAt(body.cwd, `${label}.cwd`);
+    if (isAbsolute(cwd)) throw new Error(`${label}.cwd must be relative to the workflow directory`);
+  }
+  let env: Record<string, string> | undefined;
+  if (body.env !== undefined) {
+    const rawEnv = objectAt(body.env, `${label}.env`);
+    const names = Object.keys(rawEnv);
+    if (names.length > LIMITS.scriptEnvEntries) throw new Error(`${label}.env must have at most ${LIMITS.scriptEnvEntries} entries`);
+    const merged: Record<string, string> = {};
+    for (const name of names) {
+      if (!matchesEnvName(name)) throw new Error(`${label}.env.${name} must match ^[A-Za-z_][A-Za-z0-9_]*$`);
+      const value = stringAt(rawEnv[name], `${label}.env.${name}`);
+      if (Buffer.byteLength(value, "utf8") > LIMITS.scriptEnvValueBytes) throw new Error(`${label}.env.${name} exceeds ${LIMITS.scriptEnvValueBytes} bytes`);
+      merged[name] = value;
+    }
+    env = merged;
+  }
+  let inheritEnv: string[] | undefined;
+  if (body.inheritEnv !== undefined) {
+    if (!Array.isArray(body.inheritEnv) || body.inheritEnv.length === 0) throw new Error(`${label}.inheritEnv must be a non-empty list`);
+    if (body.inheritEnv.length > LIMITS.scriptEnvEntries) throw new Error(`${label}.inheritEnv must have at most ${LIMITS.scriptEnvEntries} entries`);
+    const names = body.inheritEnv.map((entry, index) => {
+      const name = stringAt(entry, `${label}.inheritEnv[${index}]`);
+      if (!matchesEnvName(name)) throw new Error(`${label}.inheritEnv[${index}] must match ^[A-Za-z_][A-Za-z0-9_]*$`);
+      return name;
+    });
+    assertUnique(names, `${label}.inheritEnv`);
+    inheritEnv = names;
+  }
+  const timeoutMs = intInRangeAt(body.timeoutMs === undefined ? 60_000 : body.timeoutMs, `${label}.timeoutMs`, LIMITS.scriptTimeoutMinMs, LIMITS.scriptTimeoutMaxMs);
+  let acceptedExitCodes: readonly number[] = [0];
+  if (body.acceptedExitCodes !== undefined) {
+    if (!Array.isArray(body.acceptedExitCodes) || body.acceptedExitCodes.length === 0) throw new Error(`${label}.acceptedExitCodes must be a non-empty list`);
+    if (body.acceptedExitCodes.length > LIMITS.scriptExitCodes) throw new Error(`${label}.acceptedExitCodes must have at most ${LIMITS.scriptExitCodes} entries`);
+    acceptedExitCodes = body.acceptedExitCodes.map((entry, index) => {
+      const code = intInRangeAt(entry, `${label}.acceptedExitCodes[${index}]`, 0, 255);
+      return code;
+    });
+    if (new Set(acceptedExitCodes).size !== acceptedExitCodes.length) throw new Error(`${label}.acceptedExitCodes must not contain duplicates`);
+  }
+  const stdout = captureModeAt(body.stdout === undefined ? "text" : body.stdout, `${label}.stdout`);
+  const stderr = captureModeAt(body.stderr === undefined ? "none" : body.stderr, `${label}.stderr`);
+  const maxCaptureBytes = intInRangeAt(body.maxCaptureBytes === undefined ? 65_536 : body.maxCaptureBytes, `${label}.maxCaptureBytes`, 1, LIMITS.scriptCaptureMaxBytes);
+  return { argv, cwd, ...(env !== undefined ? { env } : {}), ...(inheritEnv !== undefined ? { inheritEnv } : {}), timeoutMs, acceptedExitCodes, stdout, stderr, maxCaptureBytes };
+}
+
+function escapesWorkflowRoot(relativePath: string): boolean {
+  return relativePath === ".." || relativePath.startsWith(`..${sep}`);
+}
+
+export { escapesWorkflowRoot };
+
+function matchesEnvName(name: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
+}
+
+function intInRangeAt(value: unknown, label: string, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${label} must be an integer between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function captureModeAt(value: unknown, label: string): "json" | "text" | "none" {
+  const mode = stringAt(value, label);
+  if (!SCRIPT_CAPTURE_MODES.includes(mode)) throw new Error(`${label} must be one of: ${SCRIPT_CAPTURE_MODES.join(", ")}`);
+  return mode as "json" | "text" | "none";
 }
 
 const GUARD_KEYS = ["from", "select", "op", "value"] as const;
