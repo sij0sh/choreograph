@@ -57,11 +57,13 @@ const TRANSITION_CONTRACT = [
   "## Transition contract",
   "Conclude the current position with exactly one `workflow_transition` call.",
   "- `status`: `completed` when the criteria are met, `needs-work` when the output has problems, or `blocked` when you cannot proceed.",
-  "- `met`: the required criterion IDs below that are complete. Only valid with `status: \"completed\"`; a completion must list every required criterion.",
-  "- `checkpoint`: an object with a required `summary` and optional `evidence`, `decisions`, `unknowns`, and `data` fields.",
+  "- `met`: the required criterion IDs below that are complete, copied verbatim. Only valid with `status: \"completed\"`; a completion must list every required criterion.",
+  "- `checkpoint`: an object with a required `summary` and optional `evidence`, `decisions`, `unknowns`, and `data` fields. No other fields exist at the top level or inside `checkpoint`; structured output goes inside `checkpoint.data`.",
+  "- Caps: `evidence`/`decisions`/`unknowns` at most " + LIMITS.checkpointListItems + " items of " + LIMITS.checkpointItemBytes + " bytes each; `summary` at most " + LIMITS.checkpointSummaryBytes / 1024 + " KiB; the whole checkpoint at most " + LIMITS.checkpointBytes / 1024 + " KiB.",
   "- `checkpoint.data` must satisfy the current position's declared output contract when one exists.",
   "- `issues`: problems found, each `{ target, reason }`. Only valid with `status: \"needs-work\"`; recovery policy decides what happens next.",
-  "Invalid transitions return errors without changing the run.",
+  "A rejected transition reports every violation at once and changes nothing. Example of the exact shape:",
+  '`{ "status": "completed", "met": ["first-criterion-id"], "checkpoint": { "summary": "...", "evidence": ["..."], "data": { "...": "position-specific output" } } }`',
 ].join("\n");
 
 function priorCheckpoints(workflow: Workflow, state: Execution, beforeKey: string): string {
@@ -122,7 +124,7 @@ const PLAN_SCHEMA_SECTION = [
   '`{ "version": 1, "nodes": [ { "id", "operator", "objective", "dependsOn"?, "evidence"?, "done" } ] }`',
   `- 2 to ${LIMITS.planNodes} nodes; unique ids matching ${ID_PATTERN}; each operator must appear in the registry above.`,
   "- `dependsOn` names only earlier nodes in declaration order or retained completed node ids.",
-  "- `done` lists 1 to 8 criterion ids for this node's completion.",
+  "- `done` lists 1 to " + LIMITS.planNodeListItems + " criterion ids for this node's completion; each entry must match " + ID_PATTERN + " (lowercase ids like `paths-mapped`, never prose sentences).",
   `- Unknown keys and plans above ${LIMITS.planBytes / 1024} KiB are rejected.`,
 ].join("\n");
 
