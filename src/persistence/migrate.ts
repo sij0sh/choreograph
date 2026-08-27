@@ -75,6 +75,7 @@ function validateLeaf(workflow: Workflow, state: Execution, leaf: Frame): string
   if (!block) return `frame ${leaf.key} names unknown block ${leaf.blockId}`;
   switch (leaf.kind) {
     case "task":
+      if (block.kind === "script") return undefined;
       if (block.kind !== "task") return `frame ${leaf.key} does not name a task`;
       return undefined;
     case "node":
@@ -100,7 +101,7 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
       .find(({ planKey, node }) => `${planKey}/${node.id}` === key);
     if (!block && !nodeEntry) return `checkpoint key ${key} does not belong to any block in the current workflow`;
     if (checkpoint.skipped === true) continue;
-    if (block?.kind === "task") {
+    if (block?.kind === "task" || block?.kind === "script") {
       const problem = contractProblem(workflow, block.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
       if (problem) return problem;
     }
