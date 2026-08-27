@@ -8,6 +8,19 @@ export function sequence(id, children) {
   return { kind: "sequence", id, children };
 }
 
+export function loop(id, mode, options = {}) {
+  const bodyStep = task(options.bodyId ?? `${id}-step`, options.body ?? {});
+  return {
+    kind: "loop",
+    id,
+    mode,
+    body: sequence(`${id}-body`, [bodyStep]),
+    maxIterations: options.maxIterations ?? 8,
+    ...(mode === "for-each" ? { itemsBinding: options.itemsBinding ?? { from: "gather", select: "/data/files" } } : {}),
+    ...(mode === "repeat-until" ? { condition: options.condition ?? { from: bodyStep.id, select: "/data/exitCode", op: "equals", value: 0 } } : {}),
+  };
+}
+
 export function contractOf(id, schema) {
   return { id, path: `contracts/${id}.schema.json`, schema, validate: compileContract(schema, `contracts/${id}`) };
 }

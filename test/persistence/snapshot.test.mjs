@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { activeSnapshot, parseSnapshot, terminalSnapshot } from "../../src/persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
 import { latestSnapshot } from "../../src/persistence/store.ts";
-import { completed, cp, needsWork, sequence, task, workflow } from "../engine/helpers.mjs";
+import { completed, cp, loop, needsWork, sequence, task, workflow } from "../engine/helpers.mjs";
 import { start, transition } from "../../src/engine/interpreter.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
 
@@ -248,4 +248,51 @@ test("skipped checkpoints round-trip and stay resumable", () => {
   const roundTrip = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: false }))));
   assert.equal(roundTrip.status, "active");
   assert.equal(roundTrip.execution.checkpoints["root/deep"].skipped, true);
+});
+
+test("a mid-loop snapshot round-trips and resumes the exact iteration", () => {
+  const wf = workflow([task("gather"), loop("review", "for-each"), task("deliver")]);
+  let state = start(wf, { runId: "run-9", target: "repo" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("gathered", { files: ["a", "b", "c"] })) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed a")) }).state;
+  assert.equal(state.stack.at(-1).key, "root/review/loop[2]/review-step");
+  const snapshot = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });
+  const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
+  assert.equal(parsed.status, "active");
+  assert.deepEqual(parsed.execution, state);
+  assert.equal(parsed.execution.loops["root/review"].iteration, 2);
+  assert.deepEqual(parsed.execution.loops["root/review"].items, ["a", "b", "c"]);
+  const migrated = validateAgainstWorkflow(wf, parsed.execution);
+  assert.ok(migrated.ok, migrated.ok ? "" : migrated.error);
+  const next = transition(wf, parsed.execution, { type: "outcome", outcome: completed(cp("reviewed b")) });
+  assert.ok(next.ok);
+  assert.equal(next.state.stack.at(-1).key, "root/review/loop[3]/review-step");
+});
+
+test("loop snapshots reject out-of-range iterations and orphan loop state", () => {
+  const wf = workflow([task("gather"), loop("review", "for-each", { maxIterations: 2 }), task("deliver")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: ["a"] })) }).state;
+  const snapshot = JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: true })));
+  snapshot.execution.loops["root/review"].iteration = 9;
+  snapshot.execution.stack[1].scopeId = "loop[9]";
+  snapshot.execution.stack[2].key = "root/review/loop[9]";
+  snapshot.execution.stack[2].index = 0;
+  const outOfRange = parseSnapshot(snapshot);
+  assert.equal(outOfRange.status, "invalid");
+  assert.match(outOfRange.error, /iteration must be between 1 and 8/);
+  const snapshot2 = JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: true })));
+  snapshot2.execution.loops["root/orphan"] = { iteration: 1 };
+  const orphan = parseSnapshot(snapshot2);
+  assert.equal(orphan.status, "invalid");
+  assert.match(orphan.error, /no matching loop frame/);
+});
+
+test("a loop-free v5 snapshot restores identically alongside loop support", () => {
+  const { wf, state } = midRunState();
+  const snapshot = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });
+  const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
+  assert.equal(parsed.status, "active");
+  assert.deepEqual(parsed.execution, state);
+  assert.deepEqual(parsed.execution.loops, {});
 });

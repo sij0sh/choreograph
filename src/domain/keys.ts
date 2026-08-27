@@ -6,3 +6,7 @@ export function lastSegment(key: string): string {
 export function planKeyOf(nodeKey: string): string {
   return nodeKey.slice(0, nodeKey.lastIndexOf("/"));
 }
+
+export function scopeKey(loopKey: string, iteration: number): string {
+  return `${loopKey}/loop[${iteration}]`;
+}

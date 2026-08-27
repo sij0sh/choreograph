@@ -207,6 +207,39 @@ A task runs one Markdown instruction file to completion.
 Every block id must be unique within the workflow and match
 `^[a-z][a-z0-9-]*$`.
 
+### Loop blocks
+
+A loop block runs a single `run` step body repeatedly, under a hard cap.
+There are two kinds.
+
+```yaml
+- id: review-files
+  for_each:
+    items: { from: gather, select: /data/files }
+    body: { run: steps/review-one.md }
+    maxItems: 8
+
+- id: fix-until-green
+  repeat_until:
+    body: { run: steps/apply-fix.md }
+    when: { from: apply-fix, select: /data/exitCode, op: equals, value: 0 }
+    maxIterations: 3
+```
+
+| Field | Required | Effect |
+|---|---:|---|
+| `for_each` or `repeat_until` | Yes | Chooses the loop kind; a step declares at most one. |
+| `items` | `for_each` | Input binding that must resolve to a list of at most `maxItems` JSON values. Materialized once at loop start. |
+| `body` | Yes | One step entry with `run` only. |
+| `maxItems` / `maxIterations` | Yes | Integer 1 to 8. The loop finishes when items run out or the cap is reached. |
+| `when` (inside `repeat_until`) | `repeat_until` | Guard evaluated after each iteration, do-while style. Cap exhaustion finishes the loop and marks the aggregate `exhausted: true`. |
+| `id`, `inputs`, `repair`, `when` (step-level) | No | Same meaning as for tasks; step-level `when` guards skip the whole loop. |
+
+Each iteration writes its body checkpoint under a scoped key such as
+`root/review-files/loop[2]/review-one`. On completion the loop writes one
+aggregate checkpoint at its own key with the mode, iteration count, and
+per-iteration summaries. Invalidating a producer rewinds the whole loop.
+
 ### Plan blocks
 
 A plan block asks the model to create a bounded plan from trusted operators.
@@ -500,9 +533,13 @@ choreograph enforces these main bounds:
 | Checkpoint summary | 4 KiB |
 | Complete checkpoint | 16 KiB |
 | Plan node result | 8 KiB |
+| Iterations per loop | 8 (required) |
 | Total workflow memory | 512 KiB |
 
-Workflows are ordered sequences plus dynamic plans and guards. They do not support loops or free-form expressions over earlier task data; use a `when` guard for conditional steps instead.
+Workflows are ordered sequences plus dynamic plans, guards, and bounded loops
+(`for_each`, `repeat_until`). They do not support nested loops, unbounded
+`while`, concurrency, or free-form expressions over earlier task data; use a
+`when` guard for conditional steps instead.
 
 ## Development
 

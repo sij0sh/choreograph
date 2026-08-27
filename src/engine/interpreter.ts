@@ -1,13 +1,14 @@
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
-import type { Execution, Frame, NodeFrame, PlanExecution, SequenceFrame, TaskFrame } from "../domain/execution.ts";
+import type { Execution, Frame, LoopFrame, LoopState, NodeFrame, PlanExecution, SequenceFrame, TaskFrame } from "../domain/execution.ts";
 import { applyNeedsWork } from "./recovery.ts";
 import { contractError as contractErrorFor } from "../domain/contract.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
-import { planKeyOf } from "../domain/keys.ts";
+import { planKeyOf, scopeKey } from "../domain/keys.ts";
 import { evaluateGuard, skipReason, type GuardClause } from "../domain/guard.ts";
-import type { PlanBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
+import type { LoopBlock, PlanBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
+import { resolveBinding } from "../domain/artifacts.ts";
 import { canonicalJson, canonicalJsonBytes, type JsonValue } from "../domain/json.ts";
 import { firstIncompleteNode } from "../planning/graph.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
@@ -54,11 +55,16 @@ function sequenceAt(workflow: Workflow, frame: SequenceFrame): SequenceBlock | u
   return block?.kind === "sequence" ? block : undefined;
 }
 
+function loopAt(workflow: Workflow, blockId: string): LoopBlock | undefined {
+  const block = blockOf(workflow, blockId);
+  return block?.kind === "loop" ? block : undefined;
+}
+
 function childKey(parentKey: string, childId: string): string {
   return `${parentKey}/${childId}`;
 }
 
-type PushResult = { leaf: boolean } | { error: string };
+type PushResult = { leaf: boolean; loops?: Record<string, LoopState> } | { error: string };
 
 function pushBlock(workflow: Workflow, state: Execution, stack: Frame[], parentKey: string, childId: string): PushResult {
   const child = blockOf(workflow, childId);
@@ -72,6 +78,28 @@ function pushBlock(workflow: Workflow, state: Execution, stack: Frame[], parentK
     case "sequence":
       stack.push({ kind: "sequence", blockId: child.id, key, index: 0 });
       return { leaf: false };
+    case "loop": {
+      const existing = state.loops[key];
+      if (existing) {
+        stack.push({ kind: "loop", blockId: child.id, key, scopeId: `loop[${existing.iteration}]` });
+        return { leaf: false };
+      }
+      let items: readonly JsonValue[] | undefined;
+      if (child.mode === "for-each") {
+        const resolved = resolveBinding(workflow, view, child.itemsBinding!);
+        if (!resolved.ok) return { error: `loop ${child.id} could not resolve items: ${resolved.error}` };
+        if (!Array.isArray(resolved.value)) return { error: `loop ${child.id} items must resolve to a list` };
+        if (resolved.value.length > child.maxIterations) {
+          return { error: `loop ${child.id} has ${resolved.value.length} items, above its cap of ${child.maxIterations}` };
+        }
+        items = resolved.value as readonly JsonValue[];
+      }
+      stack.push({ kind: "loop", blockId: child.id, key, scopeId: "loop[1]" });
+      return {
+        leaf: false,
+        loops: { ...state.loops, [key]: { iteration: 1, ...(items ? { items } : {}) } },
+      };
+    }
     case "plan": {
       const existing = state.plans[key];
       if (existing && !existing.awaitingPlan && firstIncompleteNode(existing)) {
@@ -112,6 +140,64 @@ function skipBlock(state: Execution, parentKey: string, guard: GuardClause, bloc
   return { ...withCp, plans };
 }
 
+function iterationSummaries(state: Execution, loopKey: string, iterations: number): readonly string[] {
+  const summaries: string[] = [];
+  for (let iteration = 1; iteration <= iterations; iteration += 1) {
+    const scoped = scopeKey(loopKey, iteration);
+    for (const [key, checkpoint] of Object.entries(state.checkpoints)) {
+      if (key.startsWith(`${scoped}/`)) summaries.push(clipSummary(checkpoint.summary));
+    }
+  }
+  return summaries.slice(0, LIMITS.checkpointListItems);
+}
+
+function finishLoop(state: Execution, loopKey: string, block: LoopBlock): { state: Execution } | { error: string } {
+  const loopState = state.loops[loopKey];
+  if (!loopState) return { error: `loop frame ${loopKey} has no loop state` };
+  const iterations = block.mode === "for-each" ? loopState.items?.length ?? 0 : loopState.iteration;
+  const summaries = iterationSummaries(state, loopKey, iterations);
+  const data: Record<string, JsonValue> = { mode: block.mode, iterations };
+  if (loopState.exhausted) data.exhausted = true;
+  if (summaries.length) data.results = [...summaries];
+  const checkpoint: Checkpoint = {
+    summary: clipSummary(
+      loopState.exhausted
+        ? `Loop ${block.id} reached its cap of ${block.maxIterations} iterations without the condition holding.`
+        : `Loop ${block.id} completed ${iterations} iteration${iterations === 1 ? "" : "s"}.`,
+    ),
+    data,
+  };
+  try {
+    validateCheckpoint(checkpoint, `loop ${loopKey}`);
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+  const loops = { ...state.loops };
+  delete loops[loopKey];
+  return { state: withCheckpoint({ ...state, loops }, loopKey, checkpoint) };
+}
+
+function afterBodyComplete(workflow: Workflow, state: Execution, loopFrame: LoopFrame): { state: Execution } | { error: string } {
+  const loopKey = loopFrame.key;
+  const block = loopAt(workflow, loopFrame.blockId);
+  if (!block) return { error: `loop frame ${loopKey} does not name a loop` };
+  const loopState = state.loops[loopKey];
+  if (!loopState) return { error: `loop frame ${loopKey} has no loop state` };
+  const completed = loopState.iteration;
+  if (block.mode === "for-each") {
+    return { state: { ...state, loops: { ...state.loops, [loopKey]: { ...loopState, iteration: completed + 1 } } } };
+  }
+  const guard = evaluateGuard(workflow, state, block.condition!);
+  if (!guard.ok) return { error: `loop ${block.id} condition could not resolve: ${guard.error}` };
+  if (guard.holds) {
+    return { state: { ...state, loops: { ...state.loops, [loopKey]: { ...loopState, done: true } } } };
+  }
+  if (completed >= block.maxIterations) {
+    return { state: { ...state, loops: { ...state.loops, [loopKey]: { ...loopState, done: true, exhausted: true } } } };
+  }
+  return { state: { ...state, loops: { ...state.loops, [loopKey]: { ...loopState, iteration: completed + 1 } } } };
+}
+
 export function advance(workflow: Workflow, state: Execution): AdvanceResult {
   const stack = [...state.stack];
   let working: Execution = state;
@@ -127,11 +213,19 @@ export function advance(workflow: Workflow, state: Execution): AdvanceResult {
         const child = block.children[top.index];
         if (!child) {
           stack.pop();
+          const parent = stack[stack.length - 1];
+          if (parent?.kind === "loop") {
+            const advanced = afterBodyComplete(workflow, working, parent);
+            if ("error" in advanced) return { ok: false, error: advanced.error };
+            working = advanced.state;
+            const loopState = working.loops[parent.key];
+            if (loopState && !loopState.done) stack[stack.length - 1] = { ...parent, scopeId: `loop[${loopState.iteration}]` };
+          }
           continue;
         }
         const advanced: SequenceFrame = { ...top, index: top.index + 1 };
         stack[topIndex] = advanced;
-        if ((child.kind === "task" || child.kind === "plan") && child.guard) {
+        if ((child.kind === "task" || child.kind === "plan" || child.kind === "loop") && child.guard) {
           const view: Execution = { ...working, stack };
           const guard = evaluateGuard(workflow, view, child.guard);
           if (!guard.ok) return { ok: false, error: `guard for ${child.id} could not resolve: ${guard.error}` };
@@ -142,7 +236,27 @@ export function advance(workflow: Workflow, state: Execution): AdvanceResult {
         }
         const pushed = pushBlock(workflow, { ...working, stack }, stack, advanced.key, child.id);
         if ("error" in pushed) return { ok: false, error: pushed.error };
+        if (pushed.loops) working = { ...working, loops: pushed.loops };
         if (pushed.leaf) return { ok: true, state: { ...working, stack } };
+        continue;
+      }
+      case "loop": {
+        const block = loopAt(workflow, top.blockId);
+        if (!block) return { ok: false, error: `frame ${top.key} does not name a loop` };
+        const loopState = working.loops[top.key];
+        if (!loopState) return { ok: false, error: `loop frame ${top.key} has no loop state` };
+        if (loopState.iteration > block.maxIterations) {
+          return { ok: false, error: `loop ${block.id} exceeded its iteration cap of ${block.maxIterations}` };
+        }
+        if (loopState.done || (block.mode === "for-each" && loopState.iteration > (loopState.items?.length ?? 0))) {
+          const finished = finishLoop(working, top.key, block);
+          if ("error" in finished) return { ok: false, error: finished.error };
+          stack.pop();
+          working = finished.state;
+          continue;
+        }
+        const scoped = scopeKey(top.key, loopState.iteration);
+        stack.push({ kind: "sequence", blockId: block.body.id, key: scoped, index: 0 });
         continue;
       }
       case "plan": {
@@ -368,6 +482,7 @@ export function start(workflow: Workflow, input: StartInput): EngineResult {
     checkpoints: {},
     checkpointOrder: [],
     plans: {},
+    loops: {},
   };
   const entered: Execution = { ...base, stack: [{ kind: "sequence", blockId: workflow.root.id, key: workflow.root.id, index: 0 }] };
   const advanced = advance(workflow, entered);

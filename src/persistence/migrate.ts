@@ -1,6 +1,6 @@
 import type { Execution, Frame, PlanExecution } from "../domain/execution.ts";
 import { LIMITS } from "../domain/limits.ts";
-import { lastSegment, planKeyOf } from "../domain/keys.ts";
+import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
 import type { Block, SequenceBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
@@ -47,6 +47,22 @@ function validatePair(workflow: Workflow, state: Execution, parent: Frame, child
       if (child.kind !== "node") return `frame ${parent.key} must carry a node frame, not ${child.kind}`;
       if (!execution.plan.nodes.some((node) => node.id === child.nodeId)) return `node ${child.nodeId} is not in the active plan for ${parent.key}`;
       if (child.attempt < 1 || child.attempt > LIMITS.nodeAttempts + 1) return `node ${child.nodeId} attempt ${child.attempt} is out of bounds`;
+      return undefined;
+    }
+    case "loop": {
+      if (parentBlock.kind !== "loop") return `frame ${parent.key} does not name a loop block`;
+      if (child.kind !== "sequence" || child.blockId !== parentBlock.body.id) {
+        return `frame ${parent.key} must carry its body sequence ${parentBlock.body.id}, not ${child.blockId}`;
+      }
+      const loopState = state.loops[parent.key];
+      if (!loopState) return `frame ${parent.key} has no matching loop state`;
+      if (child.key !== scopeKey(parent.key, loopState.iteration)) {
+        return `frame ${parent.key} expects body scope ${scopeKey(parent.key, loopState.iteration)} but holds ${child.key}`;
+      }
+      if (child.key !== `${parent.key}/${parent.scopeId}`) return `frame ${parent.key} scope ${parent.scopeId} does not match body key ${child.key}`;
+      if (loopState.iteration > parentBlock.maxIterations) {
+        return `loop ${parentBlock.id} iteration ${loopState.iteration} exceeds its cap of ${parentBlock.maxIterations}`;
+      }
       return undefined;
     }
     default:

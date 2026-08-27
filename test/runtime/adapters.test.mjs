@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { effectiveTools, CONTROL_TOOLS } from "../../src/runtime/capabilities.ts";
 import { statusValue } from "../../src/runtime/status.ts";
 import { readBlockFrom, renderPrompt, rosterPrompt } from "../../src/runtime/prompts.ts";
-import { completed, cp, sequence, task, workflow } from "../engine/helpers.mjs";
+import { completed, cp, loop, sequence, task, workflow } from "../engine/helpers.mjs";
 import { start, transition } from "../../src/engine/interpreter.ts";
 
 const BASE = ["read", "bash", "edit"];
@@ -169,4 +169,30 @@ test("runtime instruction reads enforce the authoring size cap", () => {
   const normalRead = readBlockFrom({ readFileSync: (path) => normal[path] });
   const okPrompt = renderPrompt(wf, state, normalRead);
   assert.ok(okPrompt.includes("# Fine"), "in-bound bodies still render");
+});
+
+test("loop body prompts carry the iteration context and current item", () => {
+  const wf = workflow([task("gather"), loop("review", "for-each"), task("deliver")]);
+  let state = start(wf, { runId: "run-2" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("gathered", { files: ["alpha.md", "beta.md"] })) }).state;
+  const prompt = renderPrompt(
+    wf,
+    state,
+    reader({ "WORKFLOW.md": "# Overview", "steps/gather.md": "# Gather", "steps/review-step.md": "# Review one", "steps/deliver.md": "# Deliver" }),
+  );
+  assert.match(prompt, /## Loop context/);
+  assert.match(prompt, /Loop `review` \(for each\), iteration 1 of 2\./);
+  assert.match(prompt, /Current item: "alpha\.md"/);
+});
+
+test("repeat-until prompts carry the iteration and cap without an item", () => {
+  const wf = workflow([loop("until-green", "repeat-until", { maxIterations: 3 }), task("deliver")]);
+  const state = start(wf, { runId: "run-3" }).state;
+  const prompt = renderPrompt(
+    wf,
+    state,
+    reader({ "WORKFLOW.md": "# Overview", "steps/until-green-step.md": "# Fix", "steps/deliver.md": "# Deliver" }),
+  );
+  assert.match(prompt, /iteration 1 of 3/);
+  assert.ok(!prompt.includes("Current item:"), "repeat-until has no items");
 });

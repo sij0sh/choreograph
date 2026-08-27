@@ -66,8 +66,34 @@ function rewindToChild(workflow: Workflow, stack: readonly Frame[], blockId: str
   return undefined;
 }
 
+function loopOwningBody(workflow: Workflow, blockId: string): string | undefined {
+  for (const block of workflowBlocks(workflow)) {
+    if (block.kind === "loop" && block.body.children.some((child) => child.id === blockId)) return block.id;
+  }
+  return undefined;
+}
+
+function pruneLoops(workflow: Workflow, state: Execution, stack: readonly Frame[]): Execution {
+  const active = new Set(stack.filter((frame) => frame.kind === "loop").map((frame) => (frame as { key: string }).key));
+  const loops = { ...state.loops };
+  const checkpoints = { ...state.checkpoints };
+  let changed = false;
+  for (const key of Object.keys(state.loops)) {
+    if (active.has(key)) continue;
+    delete loops[key];
+    changed = true;
+    for (const cpKey of Object.keys(checkpoints)) {
+      if (cpKey === key || cpKey.startsWith(`${key}/`)) delete checkpoints[cpKey];
+    }
+  }
+  if (!changed) return state;
+  const checkpointOrder = state.checkpointOrder.filter((key) => checkpoints[key] !== undefined);
+  return { ...state, loops, checkpoints, checkpointOrder };
+}
+
 function resume(workflow: Workflow, state: Execution, stack: readonly Frame[]): EngineResult | undefined {
-  const advanced = advance(workflow, { ...state, stack });
+  const pruned = pruneLoops(workflow, state, stack);
+  const advanced = advance(workflow, { ...pruned, stack });
   if (!advanced.ok) return undefined;
   if (advanced.state.stack.length === 0) return fail("recovery rewound past every runnable block");
   return deliver(advanced.state);
@@ -79,7 +105,11 @@ function blockOrder(workflow: Workflow): ReadonlyMap<string, number> {
 
 function rewindToEarliest(workflow: Workflow, stack: readonly Frame[], candidates: ReadonlySet<string>): readonly Frame[] | undefined {
   const order = blockOrder(workflow);
-  const ordered = [...candidates].sort((left, right) => (order.get(left) ?? Number.MAX_SAFE_INTEGER) - (order.get(right) ?? Number.MAX_SAFE_INTEGER));
+  const targets = new Set<string>();
+  for (const candidate of candidates) {
+    targets.add(loopOwningBody(workflow, candidate) ?? candidate);
+  }
+  const ordered = [...targets].sort((left, right) => (order.get(left) ?? Number.MAX_SAFE_INTEGER) - (order.get(right) ?? Number.MAX_SAFE_INTEGER));
   for (const blockId of ordered) {
     const rewound = rewindToChild(workflow, stack, blockId);
     if (rewound) return rewound;

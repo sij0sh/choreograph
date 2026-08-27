@@ -36,7 +36,20 @@ export interface PlanBlock {
   readonly guard?: GuardClause;
 }
 
-export type Block = TaskBlock | SequenceBlock | PlanBlock;
+export interface LoopBlock {
+  readonly kind: "loop";
+  readonly id: string;
+  readonly mode: "for-each" | "repeat-until";
+  readonly body: SequenceBlock;
+  readonly itemsBinding?: InputBinding;
+  readonly condition?: GuardClause;
+  readonly maxIterations: number;
+  readonly recovery?: RecoveryPolicy;
+  readonly inputs?: Readonly<Record<string, InputBinding>>;
+  readonly guard?: GuardClause;
+}
+
+export type Block = TaskBlock | SequenceBlock | PlanBlock | LoopBlock;
 
 export interface OperatorDescriptor {
   readonly id: string;
@@ -66,6 +79,9 @@ function collect(block: Block, into: Map<string, Block>): void {
   switch (block.kind) {
     case "sequence":
       block.children.forEach((child) => collect(child, into));
+      break;
+    case "loop":
+      collect(block.body, into);
       break;
   }
 }

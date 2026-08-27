@@ -172,3 +172,52 @@ test("invalid workflow metadata surfaces one session-start warning", () => {
   handlers.get("session_start")(undefined, ctx);
   assert.ok(notices.some((notice) => /Skipped invalid workflow metadata/.test(notice.message)));
 });
+
+test("a for_each loop runs end to end and persists mid-loop", async () => {
+  const ext = buildExtension(`
+description: Loop run.
+piVisibility: true
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: review
+    for_each:
+      items: { from: gather, select: /data/files }
+      body: { run: steps/review-one.md }
+      maxItems: 8
+  - id: deliver
+    run: steps/deliver.md
+`, { files: ["steps/frame.md", "steps/deliver.md", "steps/review-one.md"] });
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run" }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+  const transition = ext.tools.get("workflow_transition");
+
+  await transition.execute("id", { status: "completed", checkpoint: { summary: "listed", data: { files: ["a", "b"] } } }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+  let prompt = ext.handlers.get("before_agent_start")({ systemPrompt: "base" }).systemPrompt;
+  assert.match(prompt, /# steps\/review-one\.md/);
+  assert.match(prompt, /iteration 1 of 2/);
+  assert.match(prompt, /Current item: "a"/);
+
+  const midLoop = ext.entries.at(-1).data;
+  assert.equal(midLoop.status, "active");
+  assert.equal(midLoop.execution.loops["root/review"].iteration, 1);
+
+  await transition.execute("id", { status: "completed", checkpoint: { summary: "reviewed a" } }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+  prompt = ext.handlers.get("before_agent_start")({ systemPrompt: "base" }).systemPrompt;
+  assert.match(prompt, /iteration 2 of 2/);
+  assert.match(prompt, /Current item: "b"/);
+
+  const final = await transition.execute("id", { status: "completed", checkpoint: { summary: "reviewed b" } }, undefined, () => {}, ctx);
+  assert.ok(!final.isError, final.content[0].text);
+  await settle(ext.handlers, ctx);
+  prompt = ext.handlers.get("before_agent_start")({ systemPrompt: "base" }).systemPrompt;
+  assert.match(prompt, /# steps\/deliver\.md/);
+
+  const done = await transition.execute("id", { status: "completed", checkpoint: { summary: "done" } }, undefined, () => {}, ctx);
+  assert.ok(done.terminate);
+  assert.equal(done.details.status, "completed");
+});

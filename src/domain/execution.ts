@@ -24,6 +24,13 @@ type PlanFrame = {
   readonly attempt: number;
 }
 
+export interface LoopFrame {
+  readonly kind: "loop";
+  readonly blockId: string;
+  readonly key: string;
+  readonly scopeId: string;
+}
+
 export interface NodeFrame {
   readonly kind: "node";
   readonly blockId: string;
@@ -32,7 +39,7 @@ export interface NodeFrame {
   readonly attempt: number;
 }
 
-export type Frame = SequenceFrame | TaskFrame | PlanFrame | NodeFrame;
+export type Frame = SequenceFrame | TaskFrame | PlanFrame | NodeFrame | LoopFrame;
 
 export interface PlanExecution {
   readonly blockId: string;
@@ -47,6 +54,13 @@ export interface PlanExecution {
 
 type ExecutionStatus = "active" | "completed" | "aborted";
 
+export interface LoopState {
+  readonly iteration: number;
+  readonly items?: readonly JsonValue[];
+  readonly done?: boolean;
+  readonly exhausted?: boolean;
+}
+
 export interface Execution {
   readonly workflowName: string;
   readonly runId: string;
@@ -56,4 +70,5 @@ export interface Execution {
   readonly checkpoints: Readonly<Record<string, Checkpoint>>;
   readonly checkpointOrder: readonly string[];
   readonly plans: Readonly<Record<string, PlanExecution>>;
+  readonly loops: Readonly<Record<string, LoopState>>;
 }

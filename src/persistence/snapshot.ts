@@ -27,7 +27,7 @@ export type ParsedSnapshot =
   | { readonly status: "terminal" }
   | { readonly status: "invalid"; readonly error: string };
 
-const FRAME_KINDS = ["sequence", "task", "plan", "node"] as const;
+const FRAME_KINDS = ["sequence", "task", "plan", "node", "loop"] as const;
 type FrameKind = (typeof FRAME_KINDS)[number];
 
 function frameAt(value: unknown, label: string): Frame {
@@ -53,6 +53,15 @@ function frameAt(value: unknown, label: string): Frame {
     }
     case "node":
       return { kind, blockId, key, nodeId: requireString(raw.nodeId, `${label}.nodeId`), attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
+    case "loop": {
+      const scopeId = requireString(raw.scopeId, `${label}.scopeId`);
+      if (!/^loop\[\d+\]$/.test(scopeId)) throw new Error(`${label}.scopeId must look like loop[2]`);
+      const iteration = Number(scopeId.slice(5, -1));
+      if (iteration < 1 || iteration > LIMITS.checkpointListItems) {
+        throw new Error(`${label}.scopeId iteration must be between 1 and ${LIMITS.checkpointListItems}`);
+      }
+      return { kind, blockId, key, scopeId };
+    }
   }
 }
 
@@ -122,10 +131,41 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
   return plans;
 }
 
+function loopsAt(value: unknown, label: string): Record<string, Execution["loops"][string]> {
+  const raw = objectAt(value, label);
+  const loops: Record<string, Execution["loops"][string]> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    const loopRaw = objectAt(entry, `${label}.${key}`);
+    for (const field of Object.keys(loopRaw)) {
+      if (!["iteration", "items", "done", "exhausted"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted loop field`);
+    }
+    const iteration = loopRaw.iteration;
+    if (typeof iteration !== "number" || !Number.isInteger(iteration) || iteration < 1 || iteration > LIMITS.checkpointListItems) {
+      throw new Error(`${label}.${key}.iteration must be an integer between 1 and ${LIMITS.checkpointListItems}`);
+    }
+    if (loopRaw.done !== undefined && typeof loopRaw.done !== "boolean") throw new Error(`${label}.${key}.done must be a boolean`);
+    if (loopRaw.exhausted !== undefined && typeof loopRaw.exhausted !== "boolean") throw new Error(`${label}.${key}.exhausted must be a boolean`);
+    let items: readonly JsonValue[] | undefined;
+    if (loopRaw.items !== undefined) {
+      if (!Array.isArray(loopRaw.items)) throw new Error(`${label}.${key}.items must be a list`);
+      if (loopRaw.items.length > LIMITS.checkpointListItems) throw new Error(`${label}.${key}.items must have at most ${LIMITS.checkpointListItems} entries`);
+      if (loopRaw.items.some((item) => !isJsonValue(item))) throw new Error(`${label}.${key}.items entries must be JSON values`);
+      items = loopRaw.items as readonly JsonValue[];
+    }
+    loops[key] = {
+      iteration,
+      ...(items !== undefined ? { items } : {}),
+      ...(loopRaw.done === true ? { done: true } : {}),
+      ...(loopRaw.exhausted === true ? { exhausted: true } : {}),
+    };
+  }
+  return loops;
+}
+
 function executionAt(value: unknown, label: string): Execution {
   const raw = objectAt(value, label);
   for (const field of Object.keys(raw)) {
-    if (!["workflowName", "runId", "target", "status", "stack", "checkpoints", "checkpointOrder", "plans"].includes(field)) {
+    if (!["workflowName", "runId", "target", "status", "stack", "checkpoints", "checkpointOrder", "plans", "loops"].includes(field)) {
       throw new Error(`${label}.${field} is not an accepted execution field`);
     }
   }
@@ -134,10 +174,23 @@ function executionAt(value: unknown, label: string): Execution {
   const stack = stackAt(raw.stack, `${label}.stack`);
   const leaf = stack[stack.length - 1];
   const leafKind = leaf.kind;
-  const structural = leafKind === "sequence" || (leafKind === "plan" && leaf.mode === "execute");
+  const structural = leafKind === "sequence" || leafKind === "loop" || (leafKind === "plan" && leaf.mode === "execute");
   if (structural) throw new Error(`${label}.stack must end at a leaf frame (task, node, or plan creation)`);
   const checkpoints = checkpointsAt(raw.checkpoints ?? {}, `${label}.checkpoints`);
   const plans = plansAt(raw.plans ?? {}, `${label}.plans`);
+  const loops = loopsAt(raw.loops ?? {}, `${label}.loops`);
+  for (const frame of stack) {
+    if (frame.kind !== "loop") continue;
+    const loopState = loops[frame.key];
+    if (!loopState) throw new Error(`${label}.loops is missing state for loop frame ${frame.key}`);
+    if (frame.scopeId !== `loop[${loopState.iteration}]`) {
+      throw new Error(`${label}.loops[${frame.key}].iteration does not match frame scope ${frame.scopeId}`);
+    }
+  }
+  const activeLoopKeys = new Set(stack.filter((frame) => frame.kind === "loop").map((frame) => frame.key));
+  for (const key of Object.keys(loops)) {
+    if (!activeLoopKeys.has(key)) throw new Error(`${label}.loops[${key}] has no matching loop frame`);
+  }
   const orderRaw = raw.checkpointOrder === undefined ? Object.keys(checkpoints) : raw.checkpointOrder;
   if (!Array.isArray(orderRaw) || orderRaw.some((key) => typeof key !== "string")) throw new Error(`${label}.checkpointOrder must be a list of checkpoint keys`);
   if (new Set(orderRaw).size !== orderRaw.length) throw new Error(`${label}.checkpointOrder must not contain duplicates`);
@@ -157,6 +210,7 @@ function executionAt(value: unknown, label: string): Execution {
     checkpoints,
     checkpointOrder: orderRaw,
     plans,
+    loops,
   };
 }
 

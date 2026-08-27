@@ -131,17 +131,13 @@ steps:
 
 
 test("steps reject bad shapes", () => {
-  const loopKey = workflowDir("loopkey", `
+  const unknownKey = workflowDir("unknownkey", `
 description: x
 steps:
   - id: weird
-    for_each:
-      items: whatever
-      as: item
-      do:
-        - run: steps/frame.md
+    script: [npm, test]
 `);
-  assert.throws(() => loadWorkflowManifest(loopKey), /unknown steps\[0\] key: for_each/);
+  assert.throws(() => loadWorkflowManifest(unknownKey), /unknown steps\[0\] key: script/);
   const taskKeyOnPlan = workflowDir("taskkey", `
 description: x
 steps:
@@ -249,4 +245,139 @@ test("discovery accepts symlinked workflow directories and skips invalid links",
   const { workflows, diagnostics } = discoverWorkflows(root);
   assert.deepEqual(workflows.map((wf) => wf.name).sort(), ["link-flow", "real-flow"], "the symlinked directory loads like a real one");
   assert.equal(diagnostics.length, 0, "non-directory and broken links stay silently skipped");
+});
+
+test("for_each and repeat_until compile into loop blocks", () => {
+  const dir = workflowDir("loops", `
+description: Loop run.
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: review-files
+    for_each:
+      items: { from: gather, select: /data/files }
+      body: { run: steps/discover.md }
+      maxItems: 8
+  - id: fix-until-green
+    repeat_until:
+      body: { run: steps/02-deliver.md }
+      when: { from: deliver, select: /data/exitCode, op: equals, value: 0 }
+      maxIterations: 3
+`);
+  const wf = loadWorkflowManifest(dir);
+  const each = wf.root.children[1];
+  assert.equal(each.kind, "loop");
+  assert.equal(each.mode, "for-each");
+  assert.equal(each.maxIterations, 8);
+  assert.deepEqual(each.itemsBinding, { from: "gather", select: "/data/files" });
+  assert.equal(each.body.kind, "sequence");
+  assert.equal(each.body.id, "review-files-body");
+  assert.equal(each.body.children[0].instructionPath.endsWith("steps/discover.md"), true);
+  const repeat = wf.root.children[2];
+  assert.equal(repeat.kind, "loop");
+  assert.equal(repeat.mode, "repeat-until");
+  assert.equal(repeat.maxIterations, 3);
+  assert.deepEqual(repeat.condition, { from: "deliver", select: "/data/exitCode", op: "equals", value: 0 });
+  assert.equal(each.recovery, undefined);
+});
+
+test("loop steps reject bad shapes", () => {
+  const cases = [
+    ["mixed-keys", `
+steps:
+  - id: bad
+    run: steps/frame.md
+    for_each:
+      items: { from: gather, select: /data/files }
+      body: { run: steps/frame.md }
+      maxItems: 4
+`, /only applies to "run:" tasks/],
+    ["missing-cap", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    for_each:
+      items: { from: gather }
+      body: { run: steps/frame.md }
+`, /for_each.maxItems must be an integer between 1 and 8/],
+    ["cap-too-large", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    repeat_until:
+      body: { run: steps/frame.md }
+      when: { from: gather, op: exists }
+      maxIterations: 9
+`, /maxIterations must be an integer between 1 and 8/],
+    ["body-mixes", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    for_each:
+      items: { from: gather }
+      body: { run: steps/frame.md, tools: [read] }
+      maxItems: 4
+`, /loop body is a single "run:" step/],
+    ["for-each-when", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    for_each:
+      items: { from: gather }
+      body: { run: steps/frame.md }
+      when: { from: gather, op: exists }
+      maxItems: 4
+`, /for_each.when is only accepted by repeat_until/],
+    ["repeat-items", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    repeat_until:
+      body: { run: steps/frame.md }
+      items: { from: gather }
+      when: { from: gather, op: exists }
+      maxIterations: 4
+`, /repeat_until.items is only accepted by for_each/],
+    ["forward-ref", `
+steps:
+  - id: bad
+    for_each:
+      items: { from: gather, select: /data/files }
+      body: { run: steps/frame.md }
+      maxItems: 4
+`, /which is not an earlier step/],
+    ["both-kinds", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    for_each:
+      items: { from: gather }
+      body: { run: steps/frame.md }
+      maxItems: 4
+    repeat_until:
+      body: { run: steps/frame.md }
+      when: { from: gather, op: exists }
+      maxIterations: 4
+`, /declares more than one of/],
+    ["bad-when-op", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    repeat_until:
+      body: { run: steps/frame.md }
+      when: { from: gather, op: approximately }
+      maxIterations: 4
+`, /when.op must be one of/],
+  ];
+  for (const [name, frontmatter, pattern] of cases) {
+    const dir = workflowDir(name, `description: x\n${frontmatter}`);
+    assert.throws(() => loadWorkflowManifest(dir), pattern, name);
+  }
 });

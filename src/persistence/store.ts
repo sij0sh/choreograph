@@ -18,6 +18,7 @@ export function withinMemoryBound(snapshot: ActiveSnapshotV5): boolean {
     checkpoints: snapshot.execution.checkpoints,
     checkpointOrder: snapshot.execution.checkpointOrder,
     plans: snapshot.execution.plans,
+    loops: snapshot.execution.loops,
   } as unknown as JsonValue);
   return bytes <= LIMITS.memoryBytes;
 }

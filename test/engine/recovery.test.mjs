@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { start, transition } from "../../src/engine/interpreter.ts";
-import { completed, cp, needsWork, task, workflow } from "./helpers.mjs";
+import { completed, cp, loop, needsWork, task, workflow } from "./helpers.mjs";
 
 const OPERATORS = new Map([
   ["inspect", { id: "inspect", path: "operators/inspect.md", description: "Inspect code." }],
@@ -254,4 +254,24 @@ test("invalidate falls back to the global search for targets outside the current
   const leaf = invalidation.state.stack.at(-1);
   assert.equal(leaf.kind, "node");
   assert.equal(leaf.nodeId, "node-a");
+});
+
+test("invalidating the items producer rewinds the whole loop", () => {
+  const review = loop("review", "for-each", { body: { recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate", "block"] } } });
+  const wf = workflow([task("gather"), review, task("deliver")], {
+    inputEdges: { review: ["gather"] },
+  });
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("gathered", { files: ["a", "b"] })) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed a")) }).state;
+  assert.equal(state.stack.at(-1).key, "root/review/loop[2]/review-step");
+
+  const rewound = transition(wf, state, { type: "outcome", outcome: needsWork(cp("files were stale"), [{ target: "gather", reason: "the item list came from a partial read" }]) });
+  assert.ok(rewound.ok, rewound.ok ? "" : rewound.error);
+  const leaf = rewound.state.stack.at(-1);
+  assert.equal(leaf.kind, "task");
+  assert.equal(leaf.blockId, "gather", "the run rewinds to the producer before the loop");
+  assert.equal(rewound.state.loops["root/review"], undefined, "the loop state is cleared on rewind");
+  assert.equal(rewound.state.checkpoints["root/review/loop[1]/review-step"], undefined, "scoped iteration checkpoints are cleared");
+  assert.equal(rewound.state.checkpoints["root/review"], undefined, "the loop aggregate is cleared");
 });

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
 import { activeSnapshot } from "../../src/persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
-import { completed, cp, task, workflow } from "../engine/helpers.mjs";
+import { completed, cp, loop, task, workflow } from "../engine/helpers.mjs";
 import { start, transition } from "../../src/engine/interpreter.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
 
@@ -247,4 +247,19 @@ test("an abort while delivery is pending suppresses the continuation message", a
   assert.equal(delivered, false);
   assert.equal(sent.length, 0, "the send is never invoked once the run is no longer live");
   assert.equal(coordinator.sentDelivery, null, "no delivery marker is recorded");
+});
+
+test("loop aggregates over the checkpoint bound are rejected", () => {
+  const items = ["a", "b", "c", "d", "e", "f"];
+  const wf = workflow([task("gather"), loop("review", "for-each", { maxIterations: 8 }), task("deliver")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: items })) }).state;
+  let result = { ok: true, state };
+  for (let i = 0; i < items.length - 1; i += 1) {
+    result = transition(wf, result.state, { type: "outcome", outcome: completed(cp(`reviewed ${items[i]} `.repeat(300))) });
+    assert.ok(result.ok, `iteration ${i + 1} should succeed`);
+  }
+  const oversized = transition(wf, result.state, { type: "outcome", outcome: completed(cp(`reviewed ${items.at(-1)} `.repeat(300))) });
+  assert.ok(!oversized.ok);
+  assert.match(oversized.error, /exceeds 16384 bytes/);
 });

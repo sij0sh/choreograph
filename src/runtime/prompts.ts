@@ -7,6 +7,7 @@ import { ID_PATTERN, LIMITS } from "../domain/limits.ts"
 import type { Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { lastSegment } from "../domain/keys.ts";
+import type { LoopFrame } from "../domain/execution.ts";
 import { inputSection } from "./prompts-inputs.ts";
 
 type ReadBlock = (path: string, label: string) => string;
@@ -74,6 +75,19 @@ function priorCheckpoints(workflow: Workflow, state: Execution, beforeKey: strin
 function criteriaList(done: readonly string[] | undefined): string {
   if (!done || done.length === 0) return "Required criteria: none";
   return ["Required criteria:", ...done.map((id) => `- \`${id}\``)].join("\n");
+}
+
+function loopContext(workflow: Workflow, state: Execution, positionKey: string): string {
+  const frame = [...state.stack].reverse().find((entry): entry is LoopFrame => entry.kind === "loop" && positionKey.startsWith(`${entry.key}/`));
+  if (!frame) return "";
+  const block = blockOf(workflow, frame.blockId);
+  const loopState = state.loops[frame.key];
+  if (block?.kind !== "loop" || !loopState) return "";
+  const total = block.mode === "for-each" ? loopState.items?.length ?? 0 : block.maxIterations;
+  const item = block.mode === "for-each" && loopState.items && loopState.items[loopState.iteration - 1] !== undefined
+    ? `\nCurrent item: ${clip(canonicalJson(loopState.items[loopState.iteration - 1]), 512)}`
+    : "";
+  return [`## Loop context`, `Loop \`${block.id}\` (${block.mode.replace("-", " ")}), iteration ${loopState.iteration} of ${total}.${item}`].join("\n");
 }
 
 function operatorRoster(workflow: Workflow, allowed: readonly string[]): string {
@@ -151,6 +165,7 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
       readBody(read, workflow.overviewPath, "Workflow overview"),
       inputSection(workflow, state, position.task!.inputs),
       position.task!.inputs ? "" : priorCheckpoints(workflow, state, position.key),
+      loopContext(workflow, state, position.key),
       "## Current task instructions",
       "",
       readBody(read, position.task!.instructionPath, "Task instructions"),
