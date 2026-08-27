@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { RuntimeCoordinator, newRunId } from "../../src/runtime/coordinator.ts";
-import { activeSnapshot } from "../../src/persistence/snapshot.ts";
+import { activeSnapshot, terminalSnapshot } from "../../src/persistence/snapshot.ts";
 import { completed, cp, task, workflow } from "../engine/helpers.mjs";
 import { start } from "../../src/engine/interpreter.ts";
 
@@ -268,6 +268,32 @@ test("abort restores idle tools and ignores later transitions", async () => {
   await assert.rejects(() => runtime.transition({ status: "completed", met: [], checkpoint: cp("x") }, undefined, h.ctx), /no active workflow/);
 });
 
+test("abort persists the pre-abort execution in the terminal snapshot", async () => {
+  const h = harness();
+  const wf = simpleWorkflow();
+  const runtime = coordinator(h, [wf]);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  await runtime.handleAgentSettled(h.ctx);
+  await runtime.abort(undefined, h.ctx);
+  const terminal = h.entries.at(-1).data;
+  assert.equal(terminal.status, "aborted");
+  assert.equal(terminal.v, 5);
+  assert.equal(terminal.execution.status, "aborted");
+  assert.equal(terminal.execution.stack.at(-1)?.key, "root/frame");
+  assert.equal(Object.keys(terminal.execution.checkpoints).length, 0, "the pre-abort state survives");
+});
+
+test("a terminal snapshot reload stays idle", () => {
+  const h = harness();
+  const wf = simpleWorkflow();
+  h.entries.push({ type: "custom", customType: "choreograph", data: terminalSnapshot("completed", wf.name, "r1", { ...start(wf, { runId: "r1" }).state, stack: [], status: "completed" }) });
+  const runtime = coordinator(h, [wf]);
+  runtime.handleSessionStart(h.ctx);
+  assert.equal(runtime.handleBeforeAgentStart({ systemPrompt: "base" }), undefined, "no run prompt after a terminal snapshot");
+  assert.ok(!h.ctx.ui.notices.some((notice) => /Resumed/.test(notice.message)));
+});
+
 test("completion persists a terminal snapshot and sends a summary request", async () => {
   const h = harness();
   const wf = simpleWorkflow();
@@ -279,6 +305,23 @@ test("completion persists a terminal snapshot and sends a summary request", asyn
   ]);
   assert.equal(h.entries.at(-1).data.status, "completed");
   assert.ok(h.sent.some((entry) => /is complete\./.test(entry.message)));
+});
+
+test("completion persists the post-transition execution in the terminal snapshot", async () => {
+  const h = harness();
+  const wf = simpleWorkflow();
+  const runtime = coordinator(h, [wf]);
+  runtime.handleSessionStart(h.ctx);
+  await runTo(h.ctx, runtime, wf, [
+    { status: "completed", met: ["framed"], checkpoint: cp("framed") },
+    { status: "completed", checkpoint: cp("delivered") },
+  ]);
+  const terminal = h.entries.at(-1).data;
+  assert.equal(terminal.status, "completed");
+  assert.equal(terminal.v, 5);
+  assert.equal(terminal.execution.status, "completed");
+  assert.deepEqual(terminal.execution.stack, [], "the post-transition stack is empty");
+  assert.deepEqual(Object.keys(terminal.execution.checkpoints).sort(), ["root/deliver", "root/frame"], "every checkpoint survives in the terminal snapshot");
 });
 
 test("session resume restores the active run and re-renders its prompt", async () => {

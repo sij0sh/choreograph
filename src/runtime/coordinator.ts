@@ -185,7 +185,7 @@ export class RuntimeCoordinator {
       };
     }
     if (result.effect.kind === "complete") {
-      return this.finishRun(current, ctx, "completed");
+      return this.finishRun(current, ctx, "completed", result.state);
     }
     const next: ActiveState = { ...current, execution: result.state, delivered: result.effect.kind === "stay" };
     const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: next.delivered });
@@ -222,9 +222,9 @@ export class RuntimeCoordinator {
     };
   }
 
-  private async finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted"): Promise<ToolResult> {
+  private async finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Execution): Promise<ToolResult> {
     try {
-      this.commit(terminalSnapshot(status, current.workflow.name, current.execution.runId), `${status === "completed" ? "completion" : "abort"} of ${current.workflow.title} run ${current.execution.runId}`);
+      this.commit(terminalSnapshot(status, current.workflow.name, current.execution.runId, final), `${status === "completed" ? "completion" : "abort"} of ${current.workflow.title} run ${current.execution.runId}`);
     } catch (error) {
       if (!(error instanceof WorkflowStorageError)) throw error;
       return {
@@ -258,7 +258,7 @@ export class RuntimeCoordinator {
   async abort(signal: AbortSignal | undefined, ctx: UiContext): Promise<ToolResult> {
     const current = this.requireActive();
     assertNotCancelled(signal);
-    return this.finishRun(current, ctx, "aborted");
+    return this.finishRun(current, ctx, "aborted", { ...current.execution, status: "aborted" });
   }
 
   restoreRun(ctx: UiContext): void {

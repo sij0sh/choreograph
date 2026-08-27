@@ -133,6 +133,18 @@ test("terminal snapshots parse as terminal", () => {
   assert.equal(legacy.status, "terminal");
 });
 
+test("terminal snapshots keep the version and tolerate a final execution", () => {
+  const { wf, state } = midRunState();
+  const completedState = { ...state, stack: [], status: "completed" };
+  const snapshot = terminalSnapshot("completed", wf.name, "run-1", completedState);
+  assert.equal(snapshot.v, 5);
+  const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
+  assert.equal(parsed.status, "terminal");
+  const abortedState = { ...state, status: "aborted" };
+  const aborted = parseSnapshot(JSON.parse(JSON.stringify(terminalSnapshot("aborted", wf.name, "run-1", abortedState))));
+  assert.equal(aborted.status, "terminal");
+});
+
 test("pre-version-5 active snapshots report as invalid", () => {
   const stale = parseSnapshot({ v: 3, status: "active", workflow: "demo", runId: "r1", position: { kind: "step", stepId: "frame" }, target: "", delivered: false, memory: { steps: {} } });
   assert.equal(stale.status, "invalid");

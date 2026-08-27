@@ -18,8 +18,8 @@ export type ActiveSnapshotV5 = {
 };
 
 type TerminalSnapshot =
-  | { readonly v: 5; readonly status: "completed"; readonly workflow: string; readonly runId: string }
-  | { readonly v: 5; readonly status: "aborted"; readonly workflow: string; readonly runId: string };
+  | { readonly v: 5; readonly status: "completed"; readonly workflow: string; readonly runId: string; readonly execution?: Execution }
+  | { readonly v: 5; readonly status: "aborted"; readonly workflow: string; readonly runId: string; readonly execution?: Execution };
 
 export type ParsedSnapshot =
   | ActiveSnapshotV5
@@ -264,6 +264,11 @@ export function activeSnapshot(fields: {
   };
 }
 
-export function terminalSnapshot(status: "completed" | "aborted", workflow: string, runId: string): TerminalSnapshot {
-  return { v: 5, status, workflow, runId };
+export function terminalSnapshot(
+  status: "completed" | "aborted",
+  workflow: string,
+  runId: string,
+  execution?: Execution,
+): TerminalSnapshot {
+  return { v: 5, status, workflow, runId, ...(execution ? { execution } : {}) };
 }
