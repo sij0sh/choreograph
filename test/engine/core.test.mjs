@@ -68,6 +68,33 @@ test("criteria gate completion", () => {
   assert.ok(pass.ok);
 });
 
+test("a rejected completion reports unknown and missing criteria together with the valid ids", () => {
+  const wf = workflow([task("frame", { done: ["scope-clear", "target-known"] })]);
+  const started = start(wf, { runId: "r1" });
+  const bad = transition(wf, started.state, { type: "outcome", outcome: completed(cp("partial"), ["scope-clear", "bogus"]) });
+  assert.ok(!bad.ok);
+  assert.match(bad.error, /unknown criterion id: bogus/);
+  assert.match(bad.error, /missing: target-known/);
+  assert.match(bad.error, /required ids for this position: `scope-clear`, `target-known`/);
+});
+
+test("a rejected completion aggregates checkpoint and criteria violations in one message", () => {
+  const wf = workflow([task("frame", { done: ["scope-clear"] })]);
+  const started = start(wf, { runId: "r1" });
+  const bad = transition(wf, started.state, {
+    type: "outcome",
+    outcome: { status: "completed", met: ["nope"], checkpoint: { data: { detail: "x" }, evidence: ["a".repeat(600)] } },
+  });
+  assert.ok(!bad.ok);
+  assert.match(bad.error, /unknown criterion id: nope/);
+  assert.match(bad.error, /missing: scope-clear/);
+  assert.match(bad.error, /checkpoint\.summary must be a non-empty string/);
+  assert.match(bad.error, /checkpoint\.evidence\[0\] exceeds 512 bytes \(was 600\)/);
+  assert.match(bad.error, /exceeds 512 bytes \(was 600\)/);
+  const violations = bad.error.split("; ").length;
+  assert.ok(violations >= 4, `expected at least 4 distinct violations, got: ${bad.error}`);
+});
+
 test("met and issues are rejected outside their outcomes", () => {
   const wf = workflow([task("a")]);
   const started = start(wf, { runId: "r1" });
