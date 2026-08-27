@@ -37,6 +37,7 @@ function policyFor(workflow: Workflow, leaf: Frame): RecoveryPolicy | undefined 
   const block = blockOf(workflow, leaf.blockId);
   if (!block) return undefined;
   if (leaf.kind === "task" && block.kind === "task") return resolveRecovery(block.recovery, DEFAULT_TASK_RECOVERY);
+  if (leaf.kind === "task" && block.kind === "script") return resolveRecovery(block.recovery, DEFAULT_TASK_RECOVERY);
   if ((leaf.kind === "node" || leaf.kind === "plan") && block.kind === "plan") return resolveRecovery(block.recovery, DEFAULT_PLAN_RECOVERY);
   return undefined;
 }

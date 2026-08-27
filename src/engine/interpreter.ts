@@ -6,10 +6,10 @@ import { contractError as contractErrorFor } from "../domain/contract.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import { planKeyOf, scopeKey } from "../domain/keys.ts";
 import { evaluateGuard, skipReason, type GuardClause } from "../domain/guard.ts";
-import type { LoopBlock, PlanBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
+import type { LoopBlock, PlanBlock, ScriptBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { resolveBinding } from "../domain/artifacts.ts";
-import { canonicalJson, canonicalJsonBytes, type JsonValue } from "../domain/json.ts";
+import { canonicalJson, canonicalJsonBytes, isJsonValue, type JsonValue } from "../domain/json.ts";
 import { firstIncompleteNode } from "../planning/graph.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
 
@@ -25,13 +25,15 @@ export type TaskOutcome =
 
 type WorkflowEvent =
   | { readonly type: "outcome"; readonly outcome: TaskOutcome }
-  | { readonly type: "abort" };
+  | { readonly type: "abort" }
+  | { readonly type: "process-exit"; readonly key: string; readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean } };
 
 export type Effect =
   | { readonly kind: "deliver" }
   | { readonly kind: "stay" }
   | { readonly kind: "complete" }
-  | { readonly kind: "aborted" };
+  | { readonly kind: "aborted" }
+  | { readonly kind: "run-process"; readonly key: string; readonly spec: import("../domain/workflow.ts").ScriptSpec };
 
 export type EngineResult =
   | { readonly ok: true; readonly state: Execution; readonly effect: Effect }
@@ -48,6 +50,11 @@ function fail(error: string): EngineResult {
 
 function isLeafFrame(frame: Frame): boolean {
   return frame.kind === "task" || frame.kind === "node" || (frame.kind === "plan" && frame.mode === "create");
+}
+
+function scriptBlockAt(workflow: Workflow, blockId: string): ScriptBlock | undefined {
+  const block = blockOf(workflow, blockId);
+  return block?.kind === "script" ? block : undefined;
 }
 
 function sequenceAt(workflow: Workflow, frame: SequenceFrame): SequenceBlock | undefined {
@@ -73,6 +80,9 @@ function pushBlock(workflow: Workflow, state: Execution, stack: Frame[], parentK
   const view: Execution = { ...state, stack };
   switch (child.kind) {
     case "task":
+      stack.push({ kind: "task", blockId: child.id, key, attempt: 1 });
+      return { leaf: true };
+    case "script":
       stack.push({ kind: "task", blockId: child.id, key, attempt: 1 });
       return { leaf: true };
     case "sequence":
@@ -225,7 +235,7 @@ export function advance(workflow: Workflow, state: Execution): AdvanceResult {
         }
         const advanced: SequenceFrame = { ...top, index: top.index + 1 };
         stack[topIndex] = advanced;
-        if ((child.kind === "task" || child.kind === "plan" || child.kind === "loop") && child.guard) {
+        if ((child.kind === "task" || child.kind === "plan" || child.kind === "loop" || child.kind === "script") && child.guard) {
           const view: Execution = { ...working, stack };
           const guard = evaluateGuard(workflow, view, child.guard);
           if (!guard.ok) return { ok: false, error: `guard for ${child.id} could not resolve: ${guard.error}` };
@@ -438,7 +448,18 @@ function finishAdvance(workflow: Workflow, state: Execution, stack: readonly Fra
   if (advanced.state.stack.length === 0) {
     return { ok: true, state: { ...advanced.state, stack: [], status: "completed" }, effect: { kind: "complete" } };
   }
-  return { ok: true, state: advanced.state, effect: { kind: "deliver" } };
+  return leafEffect(workflow, advanced.state, { kind: "deliver" });
+}
+
+function leafEffect(workflow: Workflow, state: Execution, fallback: Effect): EngineResult {
+  const leaf = state.stack[state.stack.length - 1];
+  if (leaf?.kind === "task") {
+    const block = blockOf(workflow, leaf.blockId);
+    if (block?.kind === "script") {
+      return { ok: true, state, effect: { kind: "run-process", key: leaf.key, spec: block.script } };
+    }
+  }
+  return { ok: true, state, effect: fallback };
 }
 
 function resultOperatorsFor(previous: PlanExecution | undefined): { readonly operators: Record<string, string>; readonly error?: string } {
@@ -573,7 +594,7 @@ export function start(workflow: Workflow, input: StartInput): EngineResult {
   const advanced = advance(workflow, entered);
   if (!advanced.ok) return fail(advanced.error);
   if (advanced.state.stack.length === 0) return fail("workflow has no runnable steps");
-  return { ok: true, state: advanced.state, effect: { kind: "deliver" } };
+  return leafEffect(workflow, advanced.state, { kind: "deliver" });
 }
 
 export function transition(workflow: Workflow, state: Execution, event: WorkflowEvent): EngineResult {
@@ -581,9 +602,15 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
   if (event.type === "abort") {
     return { ok: true, state: { ...state, status: "aborted" }, effect: { kind: "aborted" } };
   }
+  if (event.type === "process-exit") {
+    return applyProcessExit(workflow, state, event);
+  }
   const outcome = event.outcome;
   const leaf = state.stack[state.stack.length - 1];
   const planExempt = leaf?.kind === "plan" && leaf.mode === "create";
+  if (leaf?.kind === "task" && blockOf(workflow, leaf.blockId)?.kind === "script") {
+    return fail(`position ${leaf.key} is a script step; the runtime executes it and it does not accept transitions`);
+  }
   if (!leaf || !isLeafFrame(leaf)) {
     const error = joined([...outcomeShapeErrors(outcome), ...checkpointErrors(outcome.checkpoint, "checkpoint", false)]);
     return fail(error ?? "execution has no current leaf task");
@@ -610,6 +637,72 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
       return finishAdvance(workflow, popped, popped.stack);
     }
   }
+}
+
+interface ProcessExitEvent {
+  readonly key: string;
+  readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean; readonly spawnError?: string };
+}
+
+const TEXT_STDOUT_BUDGET_BYTES = LIMITS.checkpointBytes - 256;
+
+function scriptStdoutValue(spec: import("../domain/workflow.ts").ScriptSpec, exit: ProcessExitEvent["exit"], key: string): { value: import("../domain/json.ts").JsonValue } | { error: string } {
+  if (spec.stdout === "json") {
+    try {
+      const parsed = JSON.parse(exit.stdout) as unknown;
+      if (!isJsonValue(parsed)) return { error: "stdout is not a JSON value" };
+      return { value: parsed };
+    } catch (error) {
+      return { error: `stdout is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+  if (spec.stdout === "text") {
+    let stdout = exit.stdout;
+    if (Buffer.byteLength(stdout, "utf8") > TEXT_STDOUT_BUDGET_BYTES) {
+      while (stdout.length > 0 && Buffer.byteLength(stdout, "utf8") > TEXT_STDOUT_BUDGET_BYTES) stdout = stdout.slice(0, -16);
+    }
+    return { value: { stdout } };
+  }
+  return { value: {} };
+}
+
+function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessExitEvent): EngineResult {
+  const leaf = state.stack[state.stack.length - 1];
+  if (!leaf || leaf.kind !== "task") return fail(`process exit ${event.key} has no script leaf`);
+  const block = blockOf(workflow, leaf.blockId);
+  if (block?.kind !== "script") return fail(`frame ${leaf.key} is not a script position`);
+  if (leaf.key !== event.key) return fail(`process exit key ${event.key} does not match the script leaf ${leaf.key}`);
+  const spec = block.script;
+  const accepted = !event.exit.timedOut && event.exit.code !== undefined && spec.acceptedExitCodes.includes(event.exit.code);
+  if (accepted) {
+    const parsed = scriptStdoutValue(spec, event.exit, leaf.key);
+    if ("error" in parsed) return scriptFailure(workflow, state, leaf, block, parsed.error);
+    const contract = contractErrorFor(workflow, block.output, parsed.value, `script ${leaf.key} output`);
+    if (contract) return scriptFailure(workflow, state, leaf, block, contract);
+    const truncated = event.exit.truncated ? " (captured output was truncated)" : "";
+    const checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}.${truncated}`), data: parsed.value };
+    try {
+      validateCheckpoint(checkpoint, `script ${leaf.key}`);
+    } catch (error) {
+      return scriptFailure(workflow, state, leaf, block, error instanceof Error ? error.message : String(error));
+    }
+    const committed = withCheckpoint(state, leaf.key, checkpoint);
+    const popped: Execution = { ...committed, stack: state.stack.slice(0, -1) };
+    return finishAdvance(workflow, popped, popped.stack);
+  }
+  const reason = event.exit.timedOut
+    ? `timed out after ${spec.timeoutMs}ms`
+    : event.exit.spawnError !== undefined
+      ? `failed to start: ${event.exit.spawnError}`
+      : event.exit.code === undefined
+        ? `was terminated by signal ${event.exit.signal ?? "unknown"}`
+        : `exited with code ${event.exit.code}, which is not in acceptedExitCodes [${spec.acceptedExitCodes.join(", ")}]`;
+  return scriptFailure(workflow, state, leaf, block, reason);
+}
+
+function scriptFailure(workflow: Workflow, state: Execution, leaf: Extract<Frame, TaskFrame>, block: ScriptBlock, reason: string): EngineResult {
+  const checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} ${reason}.`) };
+  return applyNeedsWork(workflow, state, { checkpoint, issues: [{ target: block.id, reason }] });
 }
 
 interface PositionInfo {
