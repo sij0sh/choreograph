@@ -221,3 +221,68 @@ steps:
   assert.ok(done.terminate);
   assert.equal(done.details.status, "completed");
 });
+
+const SCRIPTED = `
+description: A scripted run.
+piVisibility: true
+steps:
+  - steps/frame.md
+  - id: probe
+    script:
+      argv: [node, -e, "process.stdout.write('computed')"]
+      inheritEnv: [PATH]
+  - steps/deliver.md
+`;
+
+test("a script step runs between tasks without a model turn and persists", async () => {
+  const ext = buildExtension(SCRIPTED);
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run" }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+  assert.ok(ext.sent.at(-1).includes("root/frame"), "the first control message is delivered");
+
+  const prompt = ext.handlers.get("before_agent_start")({ systemPrompt: "base" });
+  assert.match(prompt.systemPrompt, /# steps\/frame\.md/, "the model only ever sees the task position");
+
+  const transition = ext.tools.get("workflow_transition");
+  const first = await transition.execute("id", { status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
+  assert.ok(!first.isError, first.content[0].text);
+  await settle(ext.handlers, ctx);
+
+  const snapshots = ext.entries.filter((entry) => entry.customType === "choreograph");
+  const scriptSnapshot = snapshots.find((entry) => entry.data.execution?.checkpoints?.["root/probe"]);
+  assert.ok(scriptSnapshot, "the script checkpoint is persisted");
+  assert.equal(scriptSnapshot.data.execution.checkpoints["root/probe"].data.stdout, "computed");
+  assert.equal(scriptSnapshot.data.execution.stack.at(-1).blockId, "deliver", "the run advanced past the script without a model turn");
+  assert.ok(ext.sent.every((message) => !message.includes("root/probe")), "no control message names the script position");
+  assert.ok(ext.sent.at(-1).includes("root/deliver"), "the post-script task is delivered");
+
+  const prompt2 = ext.handlers.get("before_agent_start")({ systemPrompt: "base" });
+  assert.match(prompt2.systemPrompt, /# steps\/deliver\.md/);
+
+  const final = await transition.execute("id", { status: "completed", checkpoint: { summary: "delivered" } }, undefined, () => {}, ctx);
+  assert.ok(!final.isError, final.content[0].text);
+  assert.ok(
+    ext.entries.some((entry) => entry.customType === "choreograph" && entry.data.status === "completed"),
+    "the run completes with a terminal snapshot",
+  );
+});
+
+test("a persisted run restores through the script position", async () => {
+  const ext = buildExtension(SCRIPTED);
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run" }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+  await ext.tools.get("workflow_transition").execute("id", { status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+
+  const revived = buildExtension(SCRIPTED);
+  revived.entries.push(...ext.entries);
+  const freshCtx = revived.ctx();
+  revived.handlers.get("session_start")(undefined, freshCtx);
+  await settle(revived.handlers, freshCtx);
+  const prompt = revived.handlers.get("before_agent_start")({ systemPrompt: "base" });
+  assert.match(prompt.systemPrompt, /# steps\/deliver\.md/, "the restored run re-drives the script and continues at the next task");
+});

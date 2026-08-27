@@ -137,7 +137,7 @@ steps:
   - id: weird
     script: [npm, test]
 `);
-  assert.throws(() => loadWorkflowManifest(unknownKey), /unknown steps\[0\] key: script/);
+  assert.throws(() => loadWorkflowManifest(unknownKey), /steps\[0\].script must be an object/);
   const taskKeyOnPlan = workflowDir("taskkey", `
 description: x
 steps:
@@ -375,6 +375,140 @@ steps:
       when: { from: gather, op: approximately }
       maxIterations: 4
 `, /when.op must be one of/],
+  ];
+  for (const [name, frontmatter, pattern] of cases) {
+    const dir = workflowDir(name, `description: x\n${frontmatter}`);
+    assert.throws(() => loadWorkflowManifest(dir), pattern, name);
+  }
+});
+
+test("script steps compile with defaults, spec fields, and recovery", () => {
+  const dir = workflowDir("scripts", `
+description: Script run.
+contracts:
+  report: contracts/report.schema.json
+steps:
+  - steps/frame.md
+  - id: probe
+    script:
+      argv: [node, test.js]
+      cwd: .
+      env: { CI: "1" }
+      inheritEnv: [PATH, HOME]
+      timeoutMs: 5000
+      acceptedExitCodes: [0, 2]
+      stdout: json
+      stderr: text
+      maxCaptureBytes: 1024
+    repair: { max_attempts: 1, strategy: [block] }
+    output: report
+`);
+  mkdirSync(join(dir, "contracts"), { recursive: true });
+  writeFileSync(join(dir, "contracts", "report.schema.json"), JSON.stringify({ type: "object" }));
+  const wf = loadWorkflowManifest(dir);
+  const block = wf.root.children[1];
+  assert.equal(block.kind, "script");
+  assert.deepEqual(block.script.argv, ["node", "test.js"]);
+  assert.deepEqual(block.script.env, { CI: "1" });
+  assert.deepEqual(block.script.inheritEnv, ["PATH", "HOME"]);
+  assert.equal(block.script.timeoutMs, 5000);
+  assert.deepEqual(block.script.acceptedExitCodes, [0, 2]);
+  assert.equal(block.script.stdout, "json");
+  assert.equal(block.script.stderr, "text");
+  assert.equal(block.script.maxCaptureBytes, 1024);
+  assert.equal(block.recovery.maxAttempts, 1);
+  assert.equal(block.output, "report");
+});
+
+test("script steps fill defaults for optional fields", () => {
+  const dir = workflowDir("script-defaults", `
+description: Defaults run.
+steps:
+  - id: probe
+    script:
+      argv: [node, test.js]
+`);
+  const block = loadWorkflowManifest(dir).root.children[0];
+  assert.equal(block.script.cwd, ".");
+  assert.equal(block.script.timeoutMs, 60_000);
+  assert.deepEqual(block.script.acceptedExitCodes, [0]);
+  assert.equal(block.script.stdout, "text");
+  assert.equal(block.script.stderr, "none");
+  assert.equal(block.script.maxCaptureBytes, 65_536);
+});
+
+test("script step rejections", () => {
+  const cases = [
+    ["missing-argv", `
+steps:
+  - id: probe
+    script: { cwd: . }
+`, /script.argv must be a non-empty list/],
+    ["empty-argv", `
+steps:
+  - id: probe
+    script: { argv: [] }
+`, /script.argv must be a non-empty list/],
+    ["bad-timeout", `
+steps:
+  - id: probe
+    script: { argv: [node], timeoutMs: 999 }
+`, /timeoutMs must be an integer between 1000 and 600000/],
+    ["bad-exit-code", `
+steps:
+  - id: probe
+    script: { argv: [node], acceptedExitCodes: [0, 256] }
+`, /acceptedExitCodes\[1\] must be an integer between 0 and 255/],
+    ["bad-capture-mode", `
+steps:
+  - id: probe
+    script: { argv: [node], stdout: blob }
+`, /script.stdout must be one of: json, text, none/],
+    ["absolute-cwd", `
+steps:
+  - id: probe
+    script: { argv: [node], cwd: /etc }
+`, /script.cwd must be relative to the workflow directory/],
+    ["escaping-cwd", `
+steps:
+  - id: probe
+    script: { argv: [node], cwd: ../outside }
+`, /script.cwd escapes the workflow directory/],
+    ["mixing-run", `
+steps:
+  - id: probe
+    run: steps/frame.md
+    script: { argv: [node] }
+`, /run only applies to "run:" tasks/],
+    ["mixing-done", `
+steps:
+  - id: probe
+    done: [x]
+    script: { argv: [node] }
+`, /done only applies to "run:" tasks/],
+    ["mixing-plan", `
+steps:
+  - id: probe
+    plan:
+      operators: []
+    script: { argv: [node] }
+`, /declares more than one of: plan, script/],
+    ["unknown-script-key", `
+steps:
+  - id: probe
+    script: { argv: [node], shell: true }
+`, /unknown steps\[0\].script key: shell/],
+    ["bad-env-name", `
+steps:
+  - id: probe
+    script: { argv: [node], env: { "1BAD": "x" } }
+`, /script.env.1BAD must match/],
+    ["bad-output-contract", `
+steps:
+  - id: probe
+    script: { argv: [node] }
+    output: missing-contract
+`, /names contract "missing-contract", which has no contracts\/ file/],
   ];
   for (const [name, frontmatter, pattern] of cases) {
     const dir = workflowDir(name, `description: x\n${frontmatter}`);

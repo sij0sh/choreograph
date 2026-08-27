@@ -4,6 +4,25 @@ export function task(id, options = {}) {
   return { kind: "task", id, instructionPath: `steps/${id}.md`, ...options };
 }
 
+export function script(id, options = {}) {
+  const { spec, ...rest } = options;
+  return {
+    kind: "script",
+    id,
+    script: {
+      argv: ["node", "-e", "process.stdout.write('ok')"],
+      cwd: ".",
+      timeoutMs: 10_000,
+      acceptedExitCodes: [0],
+      stdout: "text",
+      stderr: "none",
+      maxCaptureBytes: 65_536,
+      ...spec,
+    },
+    ...rest,
+  };
+}
+
 export function sequence(id, children) {
   return { kind: "sequence", id, children };
 }
