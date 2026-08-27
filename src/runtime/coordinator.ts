@@ -1,12 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { start as engineStart, currentPosition, transition as engineTransition } from "../engine/interpreter.ts";
 import type { Execution } from "../domain/execution.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { LIMITS } from "../domain/limits.ts";
 import type { Issue, TaskOutcome } from "../engine/interpreter.ts";
-import type { Workflow } from "../domain/workflow.ts";
-import { workflowBlocks } from "../domain/workflow.ts";
+import type { ScriptBlock, ScriptSpec, Workflow } from "../domain/workflow.ts";
+import { blockOf, workflowBlocks } from "../domain/workflow.ts";
+import { runProcess } from "./process-runner.ts";
 import { latestSnapshot, withinMemoryBound, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
 import { activeSnapshot, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../persistence/migrate.ts";
@@ -46,6 +48,7 @@ type ActiveState = {
   workflow: Workflow;
   execution: Execution;
   delivered: boolean;
+  parked?: boolean;
 };
 
 type RunState = { status: "idle" } | ActiveState;
@@ -126,6 +129,7 @@ export class RuntimeCoordinator {
 
   private async deliverPending(ctx: UiContext): Promise<void> {
     if (this.state.status !== "active" || this.state.delivered) return;
+    if (scriptLeafOf(this.state.workflow, this.state.execution) && !this.state.parked) return;
     const pending = this.state;
     const leaf = pending.execution.stack[pending.execution.stack.length - 1];
     const delivered = await this.delivery.deliver({
@@ -155,8 +159,8 @@ export class RuntimeCoordinator {
     this.commit(this.snapshotOf(next, false), `start of ${workflow.title} run ${next.execution.runId}`);
     this.adoptActive(next, ctx);
     ctx.ui.notify(`${workflow.title} started.`, "info");
-    await this.deliverPending(ctx);
-    return next;
+    const finalExecution = await this.driveProcesses(next, ctx);
+    return { ...next, execution: finalExecution };
   }
 
   async transition(params: unknown, signal: AbortSignal | undefined, ctx: UiContext): Promise<ToolResult> {
@@ -207,19 +211,78 @@ export class RuntimeCoordinator {
       };
     }
     this.adoptActive(next, ctx);
-    if (result.effect.kind === "deliver") await this.deliverPending(ctx);
+    await this.driveProcesses(next, ctx);
+    if (this.state.status !== "active") {
+      return {
+        content: [{ type: "text", text: `${current.workflow.title} run ${current.execution.runId} completed during script execution. A summary request arrives in the next message.` }],
+        details: { workflow: current.workflow.name, runId: current.execution.runId, status: "completed" },
+        terminate: true,
+      };
+    }
     return {
       content: [
         {
           type: "text",
           text:
             result.effect.kind === "stay"
-              ? `Recorded ${raw.status}. The run stays at ${next.execution.stack.at(-1)?.key}; the checkpoint is saved.`
-              : `Recorded ${raw.status}. Continue at ${next.execution.stack.at(-1)?.key}; instructions arrive in the next message.`,
+              ? `Recorded ${raw.status}. The run stays at ${this.state.execution.stack.at(-1)?.key}; the checkpoint is saved.`
+              : `Recorded ${raw.status}. Continue at ${this.state.execution.stack.at(-1)?.key}; instructions arrive in the next message.`,
         },
       ],
-      details: { workflow: next.workflow.name, runId: next.execution.runId, position: next.execution.stack.at(-1)?.key, status: raw.status === "blocked" ? "blocked" : "active" },
+      details: { workflow: this.state.workflow.name, runId: this.state.execution.runId, position: this.state.execution.stack.at(-1)?.key, status: raw.status === "blocked" ? "blocked" : "active" },
     };
+  }
+
+  private async driveProcesses(active: ActiveState, ctx: UiContext): Promise<Execution> {
+    let current = active;
+    let execution = active.execution;
+    while (this.state === current) {
+      const script = scriptLeafOf(current.workflow, current.execution);
+      if (!script) {
+        await this.deliverPending(ctx);
+        return execution;
+      }
+      const spec = script.block.script;
+      const exit = await runProcess({
+        argv: [...spec.argv],
+        cwd: resolve(dirname(current.workflow.overviewPath), spec.cwd),
+        env: scriptEnv(spec),
+        timeoutMs: spec.timeoutMs,
+        maxCaptureBytes: spec.maxCaptureBytes,
+      });
+      if (this.state !== current) return execution;
+      const applied = engineTransition(current.workflow, current.execution, { type: "process-exit", key: script.key, exit });
+      if (!applied.ok) {
+        ctx.ui.notify(`Script result for ${script.key} could not be applied: ${applied.error}. The run stays at ${script.key}.`, "error");
+        return execution;
+      }
+      execution = applied.state;
+      if (applied.effect.kind === "complete") {
+        await this.finishRun(current, ctx, "completed", applied.state);
+        return execution;
+      }
+      const parked = applied.effect.kind === "stay";
+      const next: ActiveState = { ...current, execution: applied.state, delivered: false, ...(parked ? { parked: true } : { parked: undefined }) };
+      const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: false });
+      if (!withinMemoryBound(pendingSnapshot)) {
+        ctx.ui.notify(`The run's persisted state would exceed ${LIMITS.memoryBytes / 1024} KiB after script ${script.key}; the run is paused. Abort the run or narrow the workflow outputs.`, "error");
+        return execution;
+      }
+      try {
+        this.commit(this.snapshotOf(next, false), `script ${script.key} in ${current.workflow.title} run ${current.execution.runId}`);
+      } catch (error) {
+        if (!(error instanceof WorkflowStorageError)) throw error;
+        ctx.ui.notify(`${error.message}. The run stays at ${script.key}.`, "error");
+        return execution;
+      }
+      this.adoptActive(next, ctx);
+      if (parked) {
+        await this.deliverPending(ctx);
+        return execution;
+      }
+      current = next;
+    }
+    return execution;
   }
 
   private async finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Execution): Promise<ToolResult> {
@@ -291,6 +354,7 @@ export class RuntimeCoordinator {
       : this.knownTools().filter((name) => !this.isWorkflowTool(name));
     this.adoptActive(state, ctx);
     ctx.ui.notify(`Resumed ${workflow.title} run \`${state.execution.runId}\` at ${state.execution.stack.at(-1)?.key}.`, "info");
+    void this.driveProcesses(state, ctx);
   }
 
   handleSessionStart(ctx: UiContext): { unknownTools: string[] } {
@@ -343,5 +407,23 @@ function blocksWithTools(workflow: Workflow): readonly (readonly string[])[] {
   return workflowBlocks(workflow)
     .filter((block) => block.kind === "task" && block.tools)
     .map((block) => (block as { tools: readonly string[] }).tools ?? []);
+}
+
+function scriptLeafOf(workflow: Workflow, execution: Execution): { key: string; block: ScriptBlock } | undefined {
+  if (execution.status !== "active") return undefined;
+  const leaf = execution.stack[execution.stack.length - 1];
+  if (!leaf || leaf.kind !== "task") return undefined;
+  const block = blockOf(workflow, leaf.blockId);
+  return block?.kind === "script" ? { key: leaf.key, block } : undefined;
+}
+
+function scriptEnv(spec: ScriptSpec): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of spec.inheritEnv ?? []) {
+    const value = process.env[name];
+    if (value !== undefined) env[name] = value;
+  }
+  if (spec.env) Object.assign(env, spec.env);
+  return env;
 }
 
