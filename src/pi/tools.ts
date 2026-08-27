@@ -1,12 +1,91 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
-import { ID_PATTERN } from "../domain/limits.ts";
+import { Type, type Static } from "typebox";
+import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator, ToolResult } from "../runtime/coordinator.ts";
 import { START_TOOL_NAME } from "../runtime/coordinator.ts";
 import { ABORT_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/capabilities.ts";
 
 const NO_PARAMETERS = { type: "object", properties: {}, additionalProperties: false } as const;
+
+interface RawRecord { [key: string]: unknown }
+
+function asRecord(value: unknown): RawRecord | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as RawRecord) : undefined;
+}
+
+const CHECKPOINT_FIELDS = new Set(["summary", "evidence", "decisions", "unknowns", "data", "skipped"]);
+
+
+
+
+
+
+
+
+export function normalizeTransitionArguments(args: unknown): Record<string, unknown> {
+  const input = asRecord(args);
+  if (!input) return (args ?? {}) as Record<string, unknown>;
+  const out: RawRecord = { ...input };
+
+  
+  for (const wrapper of ["outcome", "result"] as const) {
+    const inner = asRecord(out[wrapper]);
+    if (inner && out.checkpoint === undefined && out.status === undefined) {
+      delete out[wrapper];
+      for (const [key, value] of Object.entries(inner)) {
+        if (out[key] === undefined) out[key] = value;
+      }
+    } else {
+      delete out[wrapper];
+    }
+  }
+
+  
+  if (out.status === undefined && typeof out.outcomeStatus === "string") out.status = out.outcomeStatus;
+  delete out.outcomeStatus;
+  const checkpoint = asRecord(out.checkpoint);
+  if (checkpoint) {
+    const nested: RawRecord = { ...checkpoint };
+    if (out.status === undefined && typeof nested.status === "string") {
+      out.status = nested.status;
+      delete nested.status;
+    }
+    if (out.met === undefined && nested.met !== undefined) {
+      out.met = nested.met;
+      delete nested.met;
+    }
+    if (out.issues === undefined && nested.issues !== undefined) {
+      out.issues = nested.issues;
+      delete nested.issues;
+    }
+    
+    const stray = Object.keys(nested).filter((key) => !CHECKPOINT_FIELDS.has(key));
+    if (stray.length > 0) {
+      const data = asRecord(nested.data) ?? {};
+      const dataOut: RawRecord = { ...data };
+      for (const key of stray) {
+        if (dataOut[key] === undefined) dataOut[key] = nested[key];
+        delete nested[key];
+      }
+      nested.data = dataOut;
+    }
+    out.checkpoint = nested;
+  }
+
+  
+  if (typeof out.met === "string") {
+    out.met = out.met.split(/[\s,]+/).filter((part) => part.length > 0);
+  }
+  if (Array.isArray(out.met)) {
+    out.met = out.met.map((entry) => {
+      if (typeof entry !== "string") return entry;
+      const trimmed = entry.trim();
+      return ID_PATTERN.test(trimmed) ? trimmed : trimmed.replaceAll("_", "-").toLowerCase();
+    });
+  }
+  return out;
+}
 
 export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordinator, workflows: readonly Workflow[]): void {
   const visible = workflows.filter((workflow) => workflow.piVisibility);
@@ -52,48 +131,57 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
     });
   }
 
+  const transitionParameters = Type.Object(
+    {
+      status: Type.Unsafe<"completed" | "needs-work" | "blocked">({
+        type: "string",
+        enum: ["completed", "needs-work", "blocked"],
+        description: "The outcome of the current position.",
+      }),
+      met: Type.Optional(
+        Type.Array(Type.String({ pattern: ID_PATTERN.source, description: "A criterion id matching ^[a-z][a-z0-9-]*$." }), {
+          uniqueItems: true,
+          description: "Criterion ids copied verbatim from the position's required criteria. A completion must list every required criterion.",
+        }),
+      ),
+      checkpoint: Type.Object(
+        {
+          summary: Type.String({ description: `What was done and concluded at this position; at most ${LIMITS.checkpointSummaryBytes} bytes.` }),
+          evidence: Type.Optional(Type.Array(Type.String({ description: `One reference or finding; at most ${LIMITS.checkpointItemBytes} bytes each.` }), { maxItems: LIMITS.checkpointListItems, description: "Evidence references backing the summary." })),
+          decisions: Type.Optional(Type.Array(Type.String({ description: `One decision; at most ${LIMITS.checkpointItemBytes} bytes each.` }), { maxItems: LIMITS.checkpointListItems, description: "Decisions taken." })),
+          unknowns: Type.Optional(Type.Array(Type.String({ description: `One open question or risk; at most ${LIMITS.checkpointItemBytes} bytes each.` }), { maxItems: LIMITS.checkpointListItems, description: "Open questions or risks." })),
+          data: Type.Optional(Type.Any({ description: "Structured payload; plan creation carries data.plan here. All other position-specific output lives here." })),
+        },
+        { additionalProperties: false },
+      ),
+      issues: Type.Optional(
+        Type.Array(
+          Type.Object(
+            {
+              target: Type.String({ minLength: 1, description: "The block, node, or task id the problem concerns." }),
+              reason: Type.String({ minLength: 1, description: "Why the target needs work." }),
+            },
+            { additionalProperties: false },
+          ),
+          { description: "Problems found; only valid with status \"needs-work\"." },
+        ),
+      ),
+    },
+    { additionalProperties: false },
+  );
+
   pi.registerTool({
     name: TRANSITION_TOOL_NAME,
     label: "Transition workflow",
-    description: "Record the outcome of the current workflow position: completed (criteria met), needs-work (problems found; recovery policy decides what happens), or blocked (cannot proceed).",
-    parameters: Type.Object(
-      {
-        status: Type.Unsafe<"completed" | "needs-work" | "blocked">({
-          type: "string",
-          enum: ["completed", "needs-work", "blocked"],
-          description: "The outcome of the current position.",
-        }),
-        met: Type.Optional(
-          Type.Array(Type.String({ pattern: ID_PATTERN.source, description: "A criterion id matching ^[a-z][a-z0-9-]*$." }), {
-            uniqueItems: true,
-            description: "Criterion ids claimed complete. A completion must list every required criterion.",
-          }),
-        ),
-        checkpoint: Type.Object(
-          {
-            summary: Type.String({ description: "What was done and concluded at this position." }),
-            evidence: Type.Optional(Type.Array(Type.String(), { description: "Evidence references backing the summary." })),
-            decisions: Type.Optional(Type.Array(Type.String(), { description: "Decisions taken." })),
-            unknowns: Type.Optional(Type.Array(Type.String(), { description: "Open questions or risks." })),
-            data: Type.Optional(Type.Any({ description: "Structured payload; plan creation carries data.plan here." })),
-          },
-          { additionalProperties: false },
-        ),
-        issues: Type.Optional(
-          Type.Array(
-            Type.Object(
-              {
-                target: Type.String({ minLength: 1, description: "The block, node, or task id the problem concerns." }),
-                reason: Type.String({ minLength: 1, description: "Why the target needs work." }),
-              },
-              { additionalProperties: false },
-            ),
-            { description: "Problems found; only valid with status \"needs-work\"." },
-          ),
-        ),
-      },
-      { additionalProperties: false },
-    ),
+    description: [
+      "Record the outcome of the current workflow position: completed (criteria met), needs-work (problems found; recovery policy decides what happens), or blocked (cannot proceed).",
+      "Exact shape: { status, met?, checkpoint: { summary, evidence?, decisions?, unknowns?, data? }, issues? }.",
+      "Copy `met` criterion ids verbatim from the position's required criteria; list every required id on completion.",
+      `Caps: evidence/decisions/unknowns at most ${LIMITS.checkpointListItems} items of ${LIMITS.checkpointItemBytes} bytes each; summary at most ${LIMITS.checkpointSummaryBytes / 1024} KiB; the checkpoint at most ${LIMITS.checkpointBytes / 1024} KiB.`,
+      "There are no other fields; position-specific output goes inside checkpoint.data. Rejections report every violation at once.",
+    ].join(" "),
+    prepareArguments: normalizeTransitionArguments as (args: unknown) => Static<typeof transitionParameters>,
+    parameters: transitionParameters,
     async execute(_id, params, signal, _update, ctx) {
       return runtime.transition(params, signal, ctx);
     },
