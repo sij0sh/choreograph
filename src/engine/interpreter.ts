@@ -283,15 +283,16 @@ export function advance(workflow: Workflow, state: Execution): AdvanceResult {
 
 function checkCriteria(criteria: readonly string[], met: readonly string[]): string | undefined {
   const known = new Set(criteria);
-  for (const id of met) {
-    if (!known.has(id)) return `unknown criterion id: ${id}`;
-  }
+  const unknownIds = met.filter((id) => !known.has(id));
   const metSet = new Set(met);
+  const missingIds = criteria.filter((id) => !metSet.has(id));
   if (metSet.size !== met.length) return "met must not contain duplicates";
-  for (const id of criteria) {
-    if (!metSet.has(id)) return `completion must list every required criterion; missing: ${id}`;
-  }
-  return undefined;
+  if (unknownIds.length === 0 && missingIds.length === 0) return undefined;
+  const parts: string[] = [];
+  if (unknownIds.length > 0) parts.push(`unknown criterion id: ${unknownIds.join(", ")}`);
+  if (missingIds.length > 0) parts.push(`completion must list every required criterion; missing: ${missingIds.join(", ")}`);
+  if (criteria.length > 0) parts.push(`required ids for this position: ${criteria.map((id) => `\`${id}\``).join(", ")}`);
+  return parts.join("; ");
 }
 
 function validateOutcome(outcome: TaskOutcome, planCreate: boolean): string | undefined {
