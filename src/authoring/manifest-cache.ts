@@ -108,11 +108,11 @@ function decodeWorkflow(cached: CachedWorkflow): Workflow {
     description: cached.description,
     overviewPath: cached.overviewPath,
     piVisibility: cached.piVisibility,
-    ...(cached.tools !== undefined ? { tools: cached.tools } : {}),
     root: cached.root,
     operators: new Map(cached.operators),
     contracts,
     inputEdges: new Map(cached.inputEdges),
+    ...(cached.tools !== undefined ? { tools: cached.tools } : {}),
   };
 }
 
