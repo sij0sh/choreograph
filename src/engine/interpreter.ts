@@ -4,10 +4,12 @@ import type { Execution, Frame, LoopFrame, LoopState, NodeFrame, PlanExecution, 
 import { applyNeedsWork } from "./recovery.ts";
 import { contractError as contractErrorFor } from "../domain/contract.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
-import { planKeyOf, scopeKey } from "../domain/keys.ts";
+import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
 import { evaluateGuard, skipReason, type GuardClause } from "../domain/guard.ts";
 import type { LoopBlock, PlanBlock, ScriptBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
+import { processSpecOf } from "../domain/node.ts";
+import { upsertInvocation } from "../domain/execution.ts";
 import { resolveBinding } from "../domain/artifacts.ts";
 import { canonicalJson, canonicalJsonBytes, isJsonValue, type JsonValue } from "../domain/json.ts";
 import { firstIncompleteNode } from "../planning/graph.ts";
@@ -33,7 +35,7 @@ export type Effect =
   | { readonly kind: "stay" }
   | { readonly kind: "complete" }
   | { readonly kind: "aborted" }
-  | { readonly kind: "run-process"; readonly key: string; readonly spec: import("../domain/workflow.ts").ScriptSpec };
+  | { readonly kind: "run-process"; readonly key: string; readonly node: ReturnType<typeof processSpecOf> };
 
 export type EngineResult =
   | { readonly ok: true; readonly state: Execution; readonly effect: Effect }
@@ -50,6 +52,14 @@ function fail(error: string): EngineResult {
 
 function isLeafFrame(frame: Frame): boolean {
   return frame.kind === "task" || frame.kind === "node" || (frame.kind === "plan" && frame.mode === "create");
+}
+
+export function scriptLeafAt(workflow: Workflow, state: Execution): { key: string; block: ScriptBlock } | undefined {
+  if (state.status !== "active") return undefined;
+  const leaf = state.stack[state.stack.length - 1];
+  if (!leaf || leaf.kind !== "task") return undefined;
+  const block = blockOf(workflow, leaf.blockId);
+  return block?.kind === "script" ? { key: leaf.key, block } : undefined;
 }
 
 function scriptBlockAt(workflow: Workflow, blockId: string): ScriptBlock | undefined {
@@ -161,30 +171,62 @@ function iterationSummaries(state: Execution, loopKey: string, iterations: numbe
   return summaries.slice(0, LIMITS.checkpointListItems);
 }
 
+function iterationRecords(state: Execution, block: LoopBlock, loopKey: string, iterations: number, withOutputs: boolean): readonly JsonValue[] {
+  const items = state.loops[loopKey]?.items;
+  const records: JsonValue[] = [];
+  for (let iteration = 1; iteration <= iterations; iteration += 1) {
+    const scoped = `${scopeKey(loopKey, iteration)}/`;
+    const record: Record<string, JsonValue> = { iteration };
+    if (block.mode === "for-each" && items?.[iteration - 1] !== undefined) record.item = items[iteration - 1];
+    if (withOutputs) {
+      const outputs: Record<string, JsonValue> = {};
+      for (const key of state.checkpointOrder) {
+        if (!key.startsWith(scoped)) continue;
+        const data = state.checkpoints[key]?.data;
+        if (data !== undefined) outputs[lastSegment(key)] = data;
+      }
+      if (Object.keys(outputs).length > 0) record.outputs = outputs;
+    }
+    records.push(record as JsonValue);
+  }
+  return records;
+}
+
 function finishLoop(state: Execution, loopKey: string, block: LoopBlock): { state: Execution } | { error: string } {
   const loopState = state.loops[loopKey];
   if (!loopState) return { error: `loop frame ${loopKey} has no loop state` };
   const iterations = block.mode === "for-each" ? loopState.items?.length ?? 0 : loopState.iteration;
+  const base: Record<string, JsonValue> = { mode: block.mode, iterations };
+  if (loopState.exhausted) base.exhausted = true;
   const summaries = iterationSummaries(state, loopKey, iterations);
-  const data: Record<string, JsonValue> = { mode: block.mode, iterations };
-  if (loopState.exhausted) data.exhausted = true;
-  if (summaries.length) data.results = [...summaries];
-  const checkpoint: Checkpoint = {
-    summary: clipSummary(
-      loopState.exhausted
-        ? `Loop ${block.id} reached its cap of ${block.maxIterations} iterations without the condition holding.`
-        : `Loop ${block.id} completed ${iterations} iteration${iterations === 1 ? "" : "s"}.`,
-    ),
-    data,
-  };
-  try {
-    validateCheckpoint(checkpoint, `loop ${loopKey}`);
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) };
+  const fullRecords = iterationRecords(state, block, loopKey, iterations, true);
+  const itemRecords = fullRecords.map((record) => {
+    const copy = { ...(record as Record<string, JsonValue>) };
+    delete copy.outputs;
+    return copy as JsonValue;
+  });
+  const candidates: readonly JsonValue[] = [
+    ...(fullRecords.length ? [{ ...base, results: [...fullRecords] } as JsonValue] : []),
+    ...(block.mode === "for-each" && fullRecords.length ? [{ ...base, results: [...itemRecords] } as JsonValue] : []),
+    ...(summaries.length ? [{ ...base, results: [...summaries] } as JsonValue] : []),
+    ...(iterations === 0 ? [base as JsonValue] : []),
+  ];
+  const label = `loop ${loopKey}`;
+  const summaryText = loopState.exhausted
+    ? `Loop ${block.id} reached its cap of ${block.maxIterations} iterations without the condition holding.`
+    : `Loop ${block.id} completed ${iterations} iteration${iterations === 1 ? "" : "s"}.`;
+  const problems: string[] = [];
+  for (const candidate of candidates) {
+    const checkpoint: Checkpoint = { summary: clipSummary(summaryText), data: candidate };
+    const errors = checkpointErrors(checkpoint, label);
+    if (errors.length === 0) {
+      const loops = { ...state.loops };
+      delete loops[loopKey];
+      return { state: withCheckpoint({ ...state, loops }, loopKey, checkpoint) };
+    }
+    problems.push(...errors);
   }
-  const loops = { ...state.loops };
-  delete loops[loopKey];
-  return { state: withCheckpoint({ ...state, loops }, loopKey, checkpoint) };
+  return { error: joined(problems) ?? `${label} aggregate exceeded its checkpoint budget` };
 }
 
 function afterBodyComplete(workflow: Workflow, state: Execution, loopFrame: LoopFrame): { state: Execution } | { error: string } {
@@ -456,10 +498,29 @@ function leafEffect(workflow: Workflow, state: Execution, fallback: Effect): Eng
   if (leaf?.kind === "task") {
     const block = blockOf(workflow, leaf.blockId);
     if (block?.kind === "script") {
-      return { ok: true, state, effect: { kind: "run-process", key: leaf.key, spec: block.script } };
+      const invocations = upsertInvocation(state, leaf.key, {
+        blockId: leaf.blockId,
+        key: leaf.key,
+        runner: "process",
+        status: "running",
+        attempt: leaf.attempt,
+      });
+      const withInvocation: Execution = invocations === state.invocations ? state : { ...state, invocations };
+      return { ok: true, state: withInvocation, effect: { kind: "run-process", key: leaf.key, node: processSpecOf(block) } };
     }
   }
   return { ok: true, state, effect: fallback };
+}
+
+function scriptInvocation(state: Execution, leaf: Extract<Frame, TaskFrame>, status: "waiting" | "succeeded" | "canceled"): Execution {
+  const invocations = upsertInvocation(state, leaf.key, {
+    blockId: leaf.blockId,
+    key: leaf.key,
+    runner: "process",
+    status,
+    attempt: leaf.attempt,
+  });
+  return invocations === state.invocations ? state : { ...state, invocations };
 }
 
 function resultOperatorsFor(previous: PlanExecution | undefined): { readonly operators: Record<string, string>; readonly error?: string } {
@@ -686,8 +747,8 @@ function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessEx
     } catch (error) {
       return scriptFailure(workflow, state, leaf, block, error instanceof Error ? error.message : String(error));
     }
-    const committed = withCheckpoint(state, leaf.key, checkpoint);
-    const popped: Execution = { ...committed, stack: state.stack.slice(0, -1) };
+    const succeeded = scriptInvocation(withCheckpoint(state, leaf.key, checkpoint), leaf, "succeeded");
+    const popped: Execution = { ...succeeded, stack: state.stack.slice(0, -1) };
     return finishAdvance(workflow, popped, popped.stack);
   }
   const reason = event.exit.timedOut
@@ -702,7 +763,9 @@ function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessEx
 
 function scriptFailure(workflow: Workflow, state: Execution, leaf: Extract<Frame, TaskFrame>, block: ScriptBlock, reason: string): EngineResult {
   const checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} ${reason}.`) };
-  return applyNeedsWork(workflow, state, { checkpoint, issues: [{ target: block.id, reason }] });
+  const result = applyNeedsWork(workflow, state, { checkpoint, issues: [{ target: block.id, reason }] });
+  if (!result.ok || result.effect.kind !== "stay") return result;
+  return { ...result, state: scriptInvocation(result.state, leaf, "waiting") };
 }
 
 interface PositionInfo {

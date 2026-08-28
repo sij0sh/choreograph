@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { discoverWorkflows } from "./authoring/parser.ts";
 import { RuntimeCoordinator } from "./runtime/coordinator.ts";
-import { registerWorkflowCommands } from "./pi/commands.ts";
+import { registerRuntimeCommands, registerWorkflowCommands } from "./pi/commands.ts";
 import { registerLifecycleHandlers } from "./pi/events.ts";
 import { registerWorkflowTools } from "./pi/tools.ts";
 
@@ -15,5 +15,6 @@ export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WO
   const runtime = new RuntimeCoordinator(pi, workflows);
   registerWorkflowTools(pi, runtime, workflows);
   registerWorkflowCommands(pi, runtime, workflows);
+  registerRuntimeCommands(pi, runtime);
   registerLifecycleHandlers(pi, runtime, diagnostics);
 }

@@ -12,7 +12,8 @@ test("start at a script step returns a run-process effect", () => {
   assert.ok(result.ok);
   assert.equal(result.effect.kind, "run-process");
   assert.equal(result.effect.key, "root/run-tests");
-  assert.deepEqual(result.effect.spec.argv[0], "node");
+  assert.deepEqual(result.effect.node.spec.argv[0], "node");
+  assert.equal(result.effect.node.runner, "process", "the effect names its runner");
   assert.equal(result.state.stack.at(-1).blockId, "run-tests");
   assert.equal(result.state.stack.at(-1).kind, "task", "script leaves reuse the task frame kind");
 });

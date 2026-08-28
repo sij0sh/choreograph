@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { start, transition } from "../../src/engine/interpreter.ts";
-import { completed, cp, task, workflow } from "../engine/helpers.mjs";
-import { resolveBinding } from "../../src/runtime/artifacts.ts";
+import { completed, cp, loop, script, task, workflow } from "../engine/helpers.mjs";
+import { processSpecOf } from "../../src/domain/node.ts";
+import { resolveBinding, resolveScriptInputs } from "../../src/runtime/artifacts.ts";
 import { inputSection } from "../../src/runtime/prompts-inputs.ts";
 import { renderPrompt } from "../../src/runtime/prompts.ts";
 
@@ -156,4 +157,98 @@ test("prompts stay unchanged for workflows without bindings", () => {
   const prompt = renderPrompt(wf, state, reader({ "WORKFLOW.md": "# Overview", "steps/frame.md": "# Frame" }));
   assert.ok(!prompt.includes("## Inputs"), "no inputs section without bindings");
   assert.match(prompt, /# Frame/);
+});
+
+test("script checkpoints and loop aggregates bind downstream", () => {
+  const wf = workflow([
+    script("probe", { spec: { stdout: "json" } }),
+    task("use", { inputs: { from_script: { from: "probe", select: "/data/pass" } } }),
+  ]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, {
+    type: "process-exit",
+    key: "root/probe",
+    exit: { code: 0, timedOut: false, stdout: '{"pass":7,"fail":0}\n', stderr: "", truncated: false },
+  }).state;
+  const binding = resolveBinding(wf, state, { from: "probe", select: "/data/pass" });
+  assert.equal(binding.ok, true);
+  assert.equal(binding.value, 7);
+
+  const section = inputSection(wf, state, { from_script: { from: "probe", select: "/data/pass" } });
+  assert.match(section, /## Inputs/);
+  assert.match(section, /`from_script` from `probe`/);
+});
+
+test("$item binds the current loop item inside the body", () => {
+  const wf = workflow([
+    task("gather"),
+    loop("review", "for-each", { body: { inputs: { item: { from: "$item" }, name: { from: "$item", select: "/name" } } } }),
+    task("deliver"),
+  ]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: [{ name: "a" }, { name: "b" }] })) }).state;
+  const first = resolveBinding(wf, state, { from: "$item", select: "/name" });
+  assert.equal(first.ok, true);
+  assert.equal(first.value, "a");
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed a")) }).state;
+  const second = resolveBinding(wf, state, { from: "$item" });
+  assert.equal(second.ok, true);
+  assert.deepEqual(second.value, { name: "b" });
+
+  const outside = resolveBinding(wf, state, { from: "deliver" });
+  assert.equal(outside.ok, false);
+
+  const plain = workflow([task("gather"), task("deliver")]);
+  const plainState = start(plain, { runId: "r1" }).state;
+  const noItem = resolveBinding(plain, plainState, { from: "$item" });
+  assert.equal(noItem.ok, false);
+  assert.match(noItem.error, /only inside a for_each loop body/);
+
+  const section = inputSection(wf, state, { item: { from: "$item" }, name: { from: "$item", select: "/name" } });
+  assert.match(section, /`item` from `\$item`/);
+  assert.match(section, /\{"name":"b"\}/);
+  assert.match(section, /"b"/);
+});
+
+test("a completed loop aggregate is a downstream binding source", () => {
+  const wf = workflow([task("gather"), loop("review", "for-each"), task("deliver", { inputs: { review: { from: "review", select: "/iterations" } } })]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: ["a", "b"] })) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed a")) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed b")) }).state;
+  const binding = resolveBinding(wf, state, { from: "review" });
+  assert.equal(binding.ok, true);
+  assert.equal(binding.value.data.mode, "for-each");
+  assert.equal(binding.value.data.iterations, 2);
+  assert.deepEqual(binding.value.data.results.map((record) => record.item), ["a", "b"]);
+  const selected = resolveBinding(wf, state, { from: "review", select: "/data/results/1/item" });
+  assert.equal(selected.ok, true);
+  assert.equal(selected.value, "b");
+  assert.match(inputSection(wf, state, { review: { from: "review", select: "/data/iterations" } }), /`review` from `review`/);
+  assert.match(inputSection(wf, state, { review: { from: "review", select: "/data/iterations" } }), /\b2\b/);
+});
+
+test("processSpecOf preserves script inputs for the runner", () => {
+  const block = script("probe", { inputs: { prior: { from: "frame", select: "/data/id" } }, spec: { stdout: "json" } });
+  const spec = processSpecOf(block, "/workflow-dir");
+  assert.deepEqual(spec.inputs, { prior: { from: "frame", select: "/data/id" } });
+  assert.equal(processSpecOf(script("bare", { spec: { stdout: "json" } })).inputs, undefined);
+});
+
+test("script inputs resolve through declared bindings before execution", () => {
+  const wf = workflow([task("frame"), script("probe", { spec: { stdout: "json" }, inputs: { id: { from: "frame", select: "/data/id" }, whole: { from: "frame" } } })]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed", { id: "main.ts" })) }).state;
+  const block = wf.root.children[1];
+
+  const resolved = resolveScriptInputs(wf, state, block.inputs);
+  assert.equal(resolved.ok, true);
+  assert.deepEqual(resolved.inputs, { id: "main.ts", whole: { summary: "framed", data: { id: "main.ts" } } });
+
+  const early = resolveScriptInputs(wf, { ...state, checkpoints: {}, checkpointOrder: [] }, block.inputs);
+  assert.equal(early.ok, false);
+  assert.match(early.error, /input "id".*no recorded checkpoint/);
+
+  const nothing = resolveScriptInputs(wf, state, undefined);
+  assert.deepEqual(nothing, { ok: true, inputs: {} });
 });

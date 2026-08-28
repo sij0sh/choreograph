@@ -214,7 +214,15 @@ test("for_each runs the body once per item and aggregates", () => {
   }
   const aggregate = state.checkpoints["root/review"];
   assert.ok(aggregate, "the loop writes one aggregate checkpoint");
-  assert.deepEqual(aggregate.data, { mode: "for-each", iterations: 3, results: ["reviewed a", "reviewed b", "reviewed c"] });
+  assert.deepEqual(aggregate.data, {
+    mode: "for-each",
+    iterations: 3,
+    results: [
+      { iteration: 1, item: "a" },
+      { iteration: 2, item: "b" },
+      { iteration: 3, item: "c" },
+    ],
+  });
   assert.equal(state.stack.at(-1).blockId, "deliver");
   assert.equal(state.loops["root/review"], undefined, "loop state is cleared on completion");
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("done")) }).state;
@@ -240,7 +248,14 @@ test("repeat_until exits when the condition holds", () => {
   assert.equal(state.stack.at(-1).key, "root/until-green/loop[2]/until-green-step", "a false condition reruns the body");
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 2", { exitCode: 0 })) }).state;
   const aggregate = state.checkpoints["root/until-green"];
-  assert.deepEqual(aggregate.data, { mode: "repeat-until", iterations: 2, results: ["try 1", "try 2"] });
+  assert.deepEqual(aggregate.data, {
+    mode: "repeat-until",
+    iterations: 2,
+    results: [
+      { iteration: 1, outputs: { "until-green-step": { exitCode: 1 } } },
+      { iteration: 2, outputs: { "until-green-step": { exitCode: 0 } } },
+    ],
+  });
   assert.equal(state.stack.at(-1).blockId, "deliver");
 });
 

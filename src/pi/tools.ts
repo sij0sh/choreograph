@@ -4,7 +4,7 @@ import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator, ToolResult } from "../runtime/coordinator.ts";
 import { START_TOOL_NAME } from "../runtime/coordinator.ts";
-import { ABORT_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/capabilities.ts";
+import { ABORT_TOOL_NAME, RETRY_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/capabilities.ts";
 
 const NO_PARAMETERS = { type: "object", properties: {}, additionalProperties: false } as const;
 
@@ -211,6 +211,16 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
     parameters: NO_PARAMETERS,
     async execute(_id, _params, signal, _update, ctx) {
       return runtime.abort(signal, ctx);
+    },
+  });
+
+  pi.registerTool({
+    name: RETRY_TOOL_NAME,
+    label: "Retry script",
+    description: "Re-run the failed script the workflow is parked at. Valid only while the run is parked at a script position after its retries were exhausted.",
+    parameters: NO_PARAMETERS,
+    async execute(_id, _params, signal, _update, ctx) {
+      return runtime.retry(signal, ctx);
     },
   });
 }
