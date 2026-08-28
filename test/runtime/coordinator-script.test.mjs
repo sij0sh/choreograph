@@ -282,6 +282,44 @@ test("workflow_retry is rejected away from a parked script", async () => {
   assert.equal(result.details.status, "not-script");
 });
 
+test("workflow_retry rejects while a script is still in flight", async () => {
+  const dir = tempDir();
+  const marker = join(dir, "inflight.txt");
+  const h = harness();
+  const wf = workflow([
+    script("long", {
+      spec: {
+        argv: ["node", "-e", "require('node:fs').writeFileSync(process.env.MARKER, 'started\\n'); setInterval(() => {}, 1_000)"],
+        inheritEnv: ["PATH"],
+        env: { MARKER: marker },
+        timeoutMs: 60_000,
+      },
+      recovery: { maxAttempts: 1, strategy: ["block"] },
+    }),
+    task("deliver"),
+  ]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  const started = runtime.startWorkflow(h.ctx, wf, "");
+  await waitFor(() => exists(marker));
+  const snapshotsBefore = h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").length;
+  const result = await runtime.retry(undefined, h.ctx);
+  assert.ok(result.isError, "the mid-flight retry is rejected");
+  assert.match(result.content[0].text, /parked at a failed script/, "the rejection states the parked precondition");
+  assert.equal(result.details.status, "not-script");
+  assert.equal(
+    h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").length,
+    snapshotsBefore,
+    "no mid-flight snapshot is committed",
+  );
+  const events = runtime.journal.all.filter((event) => event.key === "root/long");
+  assert.equal(events.filter((event) => event.type === "node-started").length, 1, "one node-started for attempt 1");
+  assert.equal(events.filter((event) => event.type === "retry-scheduled").length, 0, "no retry is scheduled");
+  assert.ok(!h.sent.some((entry) => entry.message.includes("Retried process")), "no false completion reply is sent");
+  await runtime.abort(undefined, h.ctx);
+  await started;
+});
+
 test("abort cancels an in-flight script and terminates the process", async () => {
   const dir = tempDir();
   const marker = join(dir, "abort.txt");

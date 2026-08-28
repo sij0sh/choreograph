@@ -988,7 +988,7 @@ export class RuntimeCoordinator {
     const current = this.requireActive();
     assertNotCancelled(signal);
     const process = processLeafAt(current.workflow, current.execution);
-    if (!process) {
+    if (!process || !current.parked) {
       return {
         content: [{ type: "text", text: `workflow_retry applies only when the run is parked at a failed script or process operator node; the run is at ${current.execution.stack.at(-1)?.key}.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, position: current.execution.stack.at(-1)?.key, status: "not-script" },
