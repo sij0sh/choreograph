@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { compileWorkflow } from "../authoring/compile.ts";
 import { DEFINITIONS_ENTRY_TYPE, buildGeneratedWorkflow, parseDefinitionSpec, writePromotedWorkflow, type GeneratedWorkflow, type WorkflowDefinitionSpec } from "../authoring/generated.ts";
-import type { CompiledWorkflow } from "../domain/compiled-workflow.ts";
+import type { CompiledBlock, CompiledWorkflowV2 } from "../domain/compiled-workflow.ts";
 import { ProcessRunner } from "./runner.ts";
 import { resolveScriptInputs } from "./artifacts.ts";
 import { processSpecOf } from "../domain/node.ts";
@@ -61,10 +61,24 @@ type ActiveState = {
 
 type RunState = { status: "idle" } | ActiveState;
 
+/** A workflow definition failed strict compilation (for example, a required file is unreadable); the run must not start. */
+export class WorkflowCompileError extends Error {
+  readonly detail: string;
+
+  constructor(workflow: Workflow, cause: unknown) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`Cannot compile the definition of ${workflow.title}: ${detail}. The run did not start; restore the file or fix the definition, then start again.`, { cause });
+    this.name = "WorkflowCompileError";
+    this.detail = detail;
+  }
+}
+
+const defaultRead = readBlockFrom({ readFileSync });
+
 export class RuntimeCoordinator {
   readonly workflows: readonly Workflow[];
   readonly visibleWorkflows: readonly Workflow[];
-  private readonly compiled: ReadonlyMap<string, CompiledWorkflow>;
+  private readonly compiledCache = new Map<string, CompiledWorkflowV2>();
   private readonly generated = new Map<string, { spec: WorkflowDefinitionSpec; built: GeneratedWorkflow }>();
   private readonly virtualInstructions = new Map<string, string>();
   private readonly processRunner = new ProcessRunner();
@@ -77,7 +91,9 @@ export class RuntimeCoordinator {
   };
   private readonly store: SnapshotStore;
   private readonly read: ReturnType<typeof readBlockFrom>;
-  private readonly promptRead = (path: string, label: string): string => this.virtualInstructions.get(path) ?? this.read(path, label);
+  private readonly injectedReader: boolean;
+  private readonly frozenPrompts = new Map<string, string>();
+  private readonly promptRead = (path: string, label: string): string => this.frozenPrompts.get(path) ?? this.virtualInstructions.get(path) ?? this.read(path, label);
   private state: RunState = { status: "idle" };
   private baselineTools: string[] | null = null;
   private readonly delivery: DeliveryCoordinator;
@@ -87,25 +103,15 @@ export class RuntimeCoordinator {
   private tuiMode: TuiMode = tuiModeFromEnv(process.env.CHOREOGRAPH_TUI);
   private eventsPersistWarned = false;
 
-  constructor(pi: RuntimeCoordinator["pi"], workflows: readonly Workflow[], read: ReturnType<typeof readBlockFrom> = readBlockFrom({ readFileSync })) {
+  constructor(pi: RuntimeCoordinator["pi"], workflows: readonly Workflow[], read: ReturnType<typeof readBlockFrom> = defaultRead) {
     this.pi = pi;
     this.workflows = workflows;
-    this.compiled = new Map(workflows.map((workflow) => {
-      const dir = dirname(workflow.overviewPath);
-      const compiled = compileWorkflow(workflow, (path) => {
-        try {
-          return readFileSync(path, "utf8");
-        } catch {
-          return undefined;
-        }
-      }, dir);
-      return [workflow.name, compiled];
-    }));
     this.visibleWorkflows = workflows.filter((workflow) => workflow.piVisibility);
     this.store = {
       append: (snapshot) => this.pi.appendEntry(SNAPSHOT_TYPE, snapshot),
     };
     this.read = read;
+    this.injectedReader = read !== defaultRead;
     this.delivery = new DeliveryCoordinator({
       send: async (message) => {
         await this.pi.sendUserMessage(message, { deliverAs: "followUp" });
@@ -127,6 +133,56 @@ export class RuntimeCoordinator {
 
   private now(): number {
     return Date.now();
+  }
+
+  /**
+   * Freeze prompt sources for the active run. Prompt rendering reads these
+   * frozen copies instead of the live files, so a mid-run edit cannot change
+   * behavior without a restart or a digest mismatch on resume.
+   */
+  private freezePromptSources(workflow: Workflow): void {
+    this.frozenPrompts.clear();
+    const compiled = this.generated.get(workflow.name)?.built.compiled ?? this.compiledFor(workflow);
+    if (!compiled) return;
+    const dir = dirname(workflow.overviewPath);
+    const add = (ref: { path: string; content: string }): void => {
+      this.frozenPrompts.set(resolve(dir, ref.path), ref.content);
+    };
+    add(compiled.overview);
+    for (const operator of Object.values(compiled.operators)) add(operator.content);
+    const visit = (block: CompiledBlock): void => {
+      if (block.kind === "task") add(block.instruction);
+      else if (block.kind === "sequence") for (const child of block.children) visit(child);
+      else if (block.kind === "loop") visit(block.body);
+    };
+    visit(compiled.root);
+  }
+
+  /**
+   * Compile a workflow's definition lazily and memoize it. Compilation is strict: unreadable
+   * required files fail it. With the default (real-filesystem) reader a strict failure refuses
+   * the run via WorkflowCompileError; only coordinators constructed with an injected reader
+   * (virtual or in-memory definitions, as tests and generated workflows use) fall back to it.
+   */
+  private compiledFor(workflow: Workflow): CompiledWorkflowV2 | undefined {
+    const cached = this.compiledCache.get(workflow.name);
+    if (cached) return cached;
+    const dir = dirname(workflow.overviewPath);
+    let compiled: CompiledWorkflowV2;
+    try {
+      compiled = compileWorkflow(workflow, (path) => {
+        try {
+          return readFileSync(path, "utf8");
+        } catch {
+          return undefined;
+        }
+      }, dir);
+    } catch (error) {
+      if (!this.injectedReader) throw new WorkflowCompileError(workflow, error);
+      compiled = compileWorkflow(workflow, (path) => this.read(path, "compiled definition"), dir);
+    }
+    this.compiledCache.set(workflow.name, compiled);
+    return compiled;
   }
 
   private clipReason(value: string | undefined): string {
@@ -284,7 +340,8 @@ export class RuntimeCoordinator {
   private beginRun(workflow: Workflow, target: string, ctx: UiContext): ActiveState {
     const started = engineStart(workflow, { runId: newRunId(), target: target.trim() });
     if (!started.ok) throw new Error(started.error);
-    const digest = this.compiled.get(workflow.name)?.digest ?? this.generated.get(workflow.name)?.built.compiled.digest;
+    this.freezePromptSources(workflow);
+    const digest = this.generated.get(workflow.name)?.built.compiled.digest ?? this.compiledFor(workflow)?.digest;
     const execution: Execution = digest ? { ...started.state, definitionDigest: digest } : started.state;
     const next: ActiveState = { status: "active", workflow, execution, delivered: false };
     this.commit(this.snapshotOf(next, false), `start of ${workflow.title} run ${next.execution.runId}`);
@@ -671,11 +728,19 @@ export class RuntimeCoordinator {
       ctx.ui.notify(`Cannot resume ${workflow.title} run \`${snapshot.execution.runId}\`: ${migrated.error}.`, "warning");
       return;
     }
-    const expectedDigest = this.compiled.get(workflow.name)?.digest ?? this.generated.get(workflow.name)?.built.compiled.digest;
+    let expectedDigest: string | undefined;
+    try {
+      expectedDigest = this.generated.get(workflow.name)?.built.compiled.digest ?? this.compiledFor(workflow)?.digest;
+    } catch (error) {
+      const detail = error instanceof WorkflowCompileError ? error.detail : error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`Cannot resume ${workflow.title} run \`${snapshot.execution.runId}\`: its definition no longer compiles (${detail}). Restore the files, then start the workflow again.`, "warning");
+      return;
+    }
     if (expectedDigest && snapshot.execution.definitionDigest !== undefined && snapshot.execution.definitionDigest !== expectedDigest) {
       ctx.ui.notify(`Cannot resume ${workflow.title} run \`${snapshot.execution.runId}\`: the workflow changed since the run started (definition digest mismatch). Start the workflow again.`, "warning");
       return;
     }
+    this.freezePromptSources(workflow);
     const leafScript = scriptLeafAt(workflow, migrated.execution);
     const leafKey = migrated.execution.stack[migrated.execution.stack.length - 1]?.key;
     const leafWaiting = leafKey !== undefined && migrated.execution.invocations?.[leafKey]?.status === "waiting";

@@ -3,7 +3,7 @@ import { Type, type Static } from "typebox";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator, ToolResult } from "../runtime/coordinator.ts";
-import { START_TOOL_NAME } from "../runtime/coordinator.ts";
+import { START_TOOL_NAME, WorkflowCompileError } from "../runtime/coordinator.ts";
 import { ABORT_TOOL_NAME, RETRY_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/capabilities.ts";
 
 const NO_PARAMETERS = { type: "object", properties: {}, additionalProperties: false } as const;
@@ -129,6 +129,13 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
         try {
           run = await runtime.startWorkflow(ctx, workflow, params.target ?? "", signal);
         } catch (error) {
+          if (error instanceof WorkflowCompileError) {
+            return {
+              content: [{ type: "text", text: `${error.message} The session stays idle.` }],
+              details: { workflow: params.name, status: "definition-uncompilable" },
+              isError: true,
+            } satisfies ToolResult;
+          }
           if (!(error instanceof Error && error.name === "WorkflowStorageError")) throw error;
           return {
             content: [{ type: "text", text: `${error.message}. The session stays idle.` }],

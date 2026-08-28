@@ -6,7 +6,7 @@ import { deriveTitle, loadWorkflowManifest } from "./parser.ts";
 import { LIMITS, NAME_PATTERN } from "../domain/limits.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { TaskBlock, Workflow } from "../domain/workflow.ts";
-import type { CompiledWorkflow } from "../domain/compiled-workflow.ts";
+import type { CompiledWorkflowV2 } from "../domain/compiled-workflow.ts";
 
 /**
  * A serializable workflow definition produced at runtime. The MVP grammar is
@@ -27,7 +27,7 @@ export interface WorkflowDefinitionSpec {
 
 export interface GeneratedWorkflow {
   readonly workflow: Workflow;
-  readonly compiled: CompiledWorkflow;
+  readonly compiled: CompiledWorkflowV2;
   /** Instruction content keyed by virtual path; consumed by the prompt reader. */
   readonly instructions: Readonly<Record<string, string>>;
 }
@@ -104,6 +104,8 @@ function buildStepFiles(spec: WorkflowDefinitionSpec): { files: Readonly<Record<
     files[path] = step.instruction;
     steps.push({ kind: "task", id: step.id, instructionPath: path, ...(step.done ? { done: step.done } : {}) });
   }
+  const title = spec.title ?? deriveTitle(spec.name);
+  files[`/choreograph-generated/${spec.name}/WORKFLOW.md`] = `# ${title}\n\n${spec.description}\n`;
   return { files, steps };
 }
 
