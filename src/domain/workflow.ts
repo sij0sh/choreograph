@@ -59,6 +59,14 @@ export interface ScriptSpec {
   readonly stdout: "json" | "text" | "none";
   readonly stderr: "json" | "text" | "none";
   readonly maxCaptureBytes: number;
+  /** Files captured from the script's working directory into the artifact store after an accepted exit. */
+  readonly files?: readonly ScriptFileCapture[];
+}
+
+/** One declared file output: a capture name and a path relative to the script's cwd. */
+export interface ScriptFileCapture {
+  readonly name: string;
+  readonly path: string;
 }
 
 export interface ScriptBlock {

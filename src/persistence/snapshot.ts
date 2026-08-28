@@ -6,6 +6,7 @@ import type { PlanExecution } from "../domain/execution.ts";
 import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.ts";
 import type { NodeInvocation, NodeStatus, RunnerKind } from "../domain/node.ts";
+import type { HandoffManifestV1 } from "../domain/handoff.ts";
 
 const NODE_STATUSES: readonly NodeStatus[] = ["running", "waiting", "succeeded", "failed", "canceled", "skipped"];
 const RUNNER_KINDS: readonly RunnerKind[] = ["agent", "process"];
@@ -44,14 +45,24 @@ export type ActiveSnapshotV5 = {
   readonly delivered: boolean;
   readonly baselineTools?: readonly string[];
   readonly parked?: boolean;
+  readonly handoff?: HandoffManifestV1;
 };
 
 type TerminalSnapshot =
-  | { readonly v: 5; readonly status: "completed"; readonly workflow: string; readonly runId: string; readonly execution?: Execution }
-  | { readonly v: 5; readonly status: "aborted"; readonly workflow: string; readonly runId: string; readonly execution?: Execution };
+  | { readonly v: 5; readonly status: "completed"; readonly workflow: string; readonly runId: string; readonly execution?: Execution; readonly handoff?: HandoffManifestV1 }
+  | { readonly v: 5; readonly status: "aborted"; readonly workflow: string; readonly runId: string; readonly execution?: Execution; readonly handoff?: HandoffManifestV1 };
+
+export type RolloverSnapshotV6 = {
+  readonly v: 6;
+  readonly status: "rollover-pending";
+  readonly workflow: string;
+  readonly runId: string;
+  readonly transferId: string;
+};
 
 export type ParsedSnapshot =
   | ActiveSnapshotV5
+  | RolloverSnapshotV6
   | TerminalSnapshot
   | { readonly status: "terminal" }
   | { readonly status: "invalid"; readonly error: string };
@@ -253,6 +264,12 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
   if (typeof data !== "object" || data === null) return null;
   const snapshot = data as Record<string, unknown>;
   if (snapshot.status === "completed" || snapshot.status === "aborted") return { status: "terminal" };
+  if (snapshot.status === "rollover-pending") {
+    if (snapshot.v !== 6 || typeof snapshot.workflow !== "string" || typeof snapshot.runId !== "string" || typeof snapshot.transferId !== "string") {
+      return { status: "invalid", error: "rollover snapshot fields are invalid" };
+    }
+    return { v: 6, status: "rollover-pending", workflow: snapshot.workflow, runId: snapshot.runId, transferId: snapshot.transferId };
+  }
   if (snapshot.status !== "active") return null;
   if (snapshot.v !== 5) {
     return { status: "invalid", error: "snapshot version must be 5; snapshots from earlier engine versions are not resumable" };
@@ -271,6 +288,10 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
     }
     if (snapshot.parked !== undefined && typeof snapshot.parked !== "boolean") throw new Error("snapshot.parked must be a boolean");
     const baselineTools = snapshot.baselineTools as string[] | undefined;
+    const handoff = snapshot.handoff as HandoffManifestV1 | undefined;
+    if (handoff !== undefined && (handoff.v !== 1 || handoff.runId !== execution.runId || handoff.genesis?.run?.runId !== execution.runId)) {
+      throw new Error("snapshot.handoff does not match snapshot.execution.runId");
+    }
     return {
       v: 5,
       status: "active",
@@ -279,6 +300,7 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
       delivered: snapshot.delivered as boolean,
       ...(baselineTools ? { baselineTools } : {}),
       ...(snapshot.parked === true ? { parked: true } : {}),
+      ...(handoff ? { handoff } : {}),
     };
   } catch (error) {
     return { status: "invalid", error: error instanceof Error ? error.message : String(error) };
@@ -291,6 +313,7 @@ export function activeSnapshot(fields: {
   delivered: boolean;
   baselineTools?: readonly string[];
   parked?: boolean;
+  handoff?: HandoffManifestV1;
 }): ActiveSnapshotV5 {
   return {
     v: 5,
@@ -300,7 +323,12 @@ export function activeSnapshot(fields: {
     delivered: fields.delivered,
     ...(fields.baselineTools ? { baselineTools: [...new Set(fields.baselineTools)] } : {}),
     ...(fields.parked === true ? { parked: true } : {}),
+    ...(fields.handoff ? { handoff: fields.handoff } : {}),
   };
+}
+
+export function rolloverSnapshot(workflow: string, runId: string, transferId: string): RolloverSnapshotV6 {
+  return { v: 6, status: "rollover-pending", workflow, runId, transferId };
 }
 
 export function terminalSnapshot(
@@ -308,6 +336,7 @@ export function terminalSnapshot(
   workflow: string,
   runId: string,
   execution?: Execution,
+  handoff?: HandoffManifestV1,
 ): TerminalSnapshot {
-  return { v: 5, status, workflow, runId, ...(execution ? { execution } : {}) };
+  return { v: 5, status, workflow, runId, ...(execution ? { execution } : {}), ...(handoff ? { handoff } : {}) };
 }

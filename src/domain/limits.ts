@@ -29,6 +29,7 @@ export const LIMITS = {
   scriptTimeoutMaxMs: 600_000,
   scriptExitCodes: 32,
   scriptCaptureMaxBytes: 1_048_576,
+  scriptCaptureFiles: 4,
   generatedSteps: 16,
   generatedDefinitionBytes: 128_000,
 } as const;

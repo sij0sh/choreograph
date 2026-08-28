@@ -337,8 +337,24 @@ Rules:
   `text` stores it as `{ stdout }`, `none` stores an empty object. When an output
   would exceed the checkpoint budget, a run with an artifact store publishes it
   there and keeps a reference (`json`) or a short preview plus an `artifact`
-  reference (`text`); without a store, `text` is clipped to the budget. `stderr`
-  is captured for diagnostics and never parsed into the data.
+  reference (`text`); without a store, `text` is clipped to the budget. Whenever
+  the stored `stdout` text is a clip or a preview rather than the full stream,
+  the data carries `stdoutTruncated: true`.
+- `stderr` mode decides how standard error is honored. `none` (the default) keeps
+  stderr diagnostic-only: captured for the run's log artifacts, never parsed into
+  the data. `text` adds the captured text under the `stderr` key of the data;
+  beyond the checkpoint budget it is clipped (`stderrTruncated: true`) or, with a
+  store, previewed with a `stderrArtifact` reference. `json` parses stderr and
+  stores the decoded value under `stderr`; stderr that is not valid JSON fails the
+  step like invalid stdout JSON. When `stdout: json` decodes to a non-object while
+  a `stderr` value or captured files exist, the data becomes an object with the
+  decoded stdout under `stdout`.
+- `files` optionally lists up to 4 file outputs as `{ name, path }` entries, with
+  `path` relative to the script's `cwd` and inside the workflow directory. After
+  an accepted exit each file is published to the run's artifact store
+  (`application/octet-stream`), and the references land under the `files` key of
+  the data, so downstream steps can bind them like any artifact reference. A
+  capture file that cannot be read fails the step through its repair policy.
 - Script steps accept `id`, `script`, `repair`, `when`, `inputs`, and `output`.
   They reject `run`, `tools`, `done`, `plan`, `for_each`, and `repeat_until`, and
   cannot appear inside loop bodies.
@@ -552,17 +568,39 @@ moving between positions and resumes active runs from the current session
 branch. Snapshot format changes can make older active runs non-resumable; Pi
 shows a warning and leaves the session idle in that case.
 
-### Context isolation
+### Context epochs
 
-Each position's kickoff is a one-line control message. During a run, the
-LLM context starts at the latest control message for the active run: earlier
-positions' tool output and conversation are dropped from the model's view.
-Session history and the transcript UI stay complete; only what the model
-sees is narrowed. Checkpoints carry the durable state between positions, so
-a later position re-reads what it needs instead of inheriting the transcript.
-If the control message is missing (for example after resuming into a session
-branch that predates it), choreograph keeps the full context instead of
-filtering.
+Each model-bearing position runs as a bounded context epoch. After accepting a
+checkpoint, choreograph runs any intervening scripts, prepares a transfer, and
+uses an internal command to switch Pi to a new child session before the next
+model position. The final report also runs in a fresh child session. Parent
+sessions retain their complete transcripts, but those transcripts cannot leak
+into later provider requests.
+
+Each child session contains only:
+
+1. An immutable Genesis handoff for the original request and constraints.
+2. A cumulative rollup plus recent checkpoint handoffs.
+3. A bounded projection of the immediately preceding epoch.
+4. The next position's control message and system prompt.
+
+The exact `Execution` snapshot remains authoritative. Handoffs carry model
+context only. Large checkpoint data and rollup sources are stored as content-
+addressed run artifacts. `workflow_handoff_read` retrieves an exact source by
+checksum when a position needs omitted detail.
+
+When handoffs exceed their allocation, choreograph rolls the oldest 75 percent
+into a cumulative rollup and keeps the newest 25 percent verbatim. Genesis and
+open items remain protected. Choreograph refuses a transfer when protected data
+cannot fit the selected model instead of silently summarizing Genesis.
+
+During an epoch, context isolation retains the protected capsule and starts the
+live transcript at the latest control message. A defensive token cap prevents a
+single request from releasing hidden session history. Workflow-aware compaction
+re-renders the protected capsule verbatim and summarizes only epoch content.
+For non-persistent Pi sessions, choreograph falls back to same-session control
+message isolation and keeps isolation active through the completion-summary
+turn.
 
 ### Tool access
 
@@ -576,8 +614,9 @@ then intersects that baseline with each configured ceiling:
 Active-run snapshots persist that baseline. Reloading a session restores the
 run's full tool set instead of the narrowed active one.
 
-`workflow_transition` and `workflow_abort` remain available during a run. An
-unknown tool name has no effect and produces a warning at session start.
+`workflow_transition`, `workflow_abort`, and `workflow_handoff_read` remain
+available during a run. An unknown tool name has no effect and produces a
+warning at session start.
 
 ### Generated workflows
 

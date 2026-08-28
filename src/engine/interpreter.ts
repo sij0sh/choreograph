@@ -10,7 +10,7 @@ import type { LoopBlock, PlanBlock, ScriptBlock, SequenceBlock, TaskBlock, Workf
 import { blockOf } from "../domain/workflow.ts";
 import { processSpecOf, type NodeInvocation, type NodeStatus, type RunnerKind } from "../domain/node.ts";
 import { upsertInvocation } from "../domain/execution.ts";
-import { isArtifactRef, resolveBinding, type ArtifactSink, type ArtifactSinkProvider } from "../domain/artifacts.ts";
+import { isArtifactRef, resolveBinding, type ArtifactRef, type ArtifactSink, type ArtifactSinkProvider } from "../domain/artifacts.ts";
 import { canonicalJson, canonicalJsonBytes, isJsonValue, type JsonValue } from "../domain/json.ts";
 import { firstIncompleteNode } from "../planning/graph.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
@@ -28,7 +28,7 @@ export type TaskOutcome =
 type WorkflowEvent =
   | { readonly type: "outcome"; readonly outcome: TaskOutcome }
   | { readonly type: "abort" }
-  | { readonly type: "process-exit"; readonly key: string; readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean }; readonly store?: ArtifactSink };
+  | { readonly type: "process-exit"; readonly key: string; readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean }; readonly files?: readonly ArtifactRef[]; readonly captureError?: string; readonly store?: ArtifactSink };
 
 export type Effect =
   | { readonly kind: "deliver" }
@@ -700,33 +700,77 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
 interface ProcessExitEvent {
   readonly key: string;
   readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean; readonly spawnError?: string };
+  readonly files?: readonly ArtifactRef[];
+  readonly captureError?: string;
   readonly store?: ArtifactSink;
 }
 
 const TEXT_STDOUT_BUDGET_BYTES = LIMITS.checkpointBytes - 256;
 
-function scriptStdoutValue(spec: import("../domain/workflow.ts").ScriptSpec, exit: ProcessExitEvent["exit"], key: string, store?: ArtifactSink): { value: import("../domain/json.ts").JsonValue } | { error: string } {
+function clipToByteBudget(text: string, budget: number): string {
+  let clipped = text;
+  while (clipped.length > 0 && Buffer.byteLength(clipped, "utf8") > budget) clipped = clipped.slice(0, -16);
+  return clipped;
+}
+
+/** Adds side outputs (stderr, captured files) to the stdout-derived data without losing non-object stdout values. */
+function mergeOutputSides(base: JsonValue, sides: Record<string, JsonValue>): JsonValue {
+  if (Object.keys(sides).length === 0) return base;
+  if (typeof base === "object" && base !== null && !Array.isArray(base)) return { ...base, ...sides };
+  const wrapped: Record<string, JsonValue> = base === null ? {} : { stdout: base };
+  return { ...wrapped, ...sides };
+}
+
+function capturedFilesSides(files: readonly ArtifactRef[] | undefined): Record<string, JsonValue> {
+  if (!files || files.length === 0) return {};
+  const refs: Record<string, JsonValue> = {};
+  for (const ref of files) refs[ref.output] = ref as unknown as JsonValue;
+  return { files: refs };
+}
+
+/** Applies the configured stderr mode: none keeps stderr diagnostic-only, text stores it, json parses it. */
+function scriptStderrValue(spec: import("../domain/workflow.ts").ScriptSpec, exit: ProcessExitEvent["exit"], store?: ArtifactSink): { sides: Record<string, JsonValue>; clipped?: boolean } | { error: string } {
+  if (spec.stderr === "none") return { sides: {} };
+  if (spec.stderr === "text") {
+    const text = exit.stderr;
+    if (Buffer.byteLength(text, "utf8") <= TEXT_STDOUT_BUDGET_BYTES) return { sides: { stderr: text } };
+    if (!store) return { sides: { stderr: clipToByteBudget(text, TEXT_STDOUT_BUDGET_BYTES), stderrTruncated: true }, clipped: true };
+    const ref = store.publishText("stderr", text);
+    return { sides: { stderr: utf8Preview(text, 192), stderrArtifact: ref as unknown as JsonValue }, clipped: true };
+  }
+  try {
+    const parsed = JSON.parse(exit.stderr) as unknown;
+    if (!isJsonValue(parsed)) return { error: "stderr is not a JSON value" };
+    return { sides: { stderr: parsed } };
+  } catch (error) {
+    return { error: `stderr is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+function scriptStdoutValue(spec: import("../domain/workflow.ts").ScriptSpec, exit: ProcessExitEvent["exit"], store?: ArtifactSink): { value: import("../domain/json.ts").JsonValue; clipped?: boolean } | { error: string } {
+  let base: JsonValue = {};
   if (spec.stdout === "json") {
     try {
       const parsed = JSON.parse(exit.stdout) as unknown;
       if (!isJsonValue(parsed)) return { error: "stdout is not a JSON value" };
-      return { value: parsed };
+      base = parsed;
     } catch (error) {
       return { error: `stdout is not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
     }
-  }
-  if (spec.stdout === "text") {
+  } else if (spec.stdout === "text") {
     const stdout = exit.stdout;
-    if (Buffer.byteLength(stdout, "utf8") <= TEXT_STDOUT_BUDGET_BYTES) return { value: { stdout } };
-    if (!store) {
-      let clipped = stdout;
-      while (clipped.length > 0 && Buffer.byteLength(clipped, "utf8") > TEXT_STDOUT_BUDGET_BYTES) clipped = clipped.slice(0, -16);
-      return { value: { stdout: clipped } };
+    if (Buffer.byteLength(stdout, "utf8") <= TEXT_STDOUT_BUDGET_BYTES) {
+      base = { stdout };
+    } else if (!store) {
+      base = { stdout: clipToByteBudget(stdout, TEXT_STDOUT_BUDGET_BYTES), stdoutTruncated: true };
+    } else {
+      const ref = store.publishText("output", stdout);
+      base = { stdout: utf8Preview(stdout, 192), stdoutTruncated: true, artifact: ref as unknown as JsonValue };
     }
-    const ref = store.publishText("output", stdout);
-    return { value: { stdout: utf8Preview(stdout, 192), artifact: ref as unknown as JsonValue } };
   }
-  return { value: {} };
+  const stderr = scriptStderrValue(spec, exit, store);
+  if ("error" in stderr) return stderr;
+  return { value: mergeOutputSides(base, stderr.sides), ...(stderr.clipped ? { clipped: true } : {}) };
 }
 
 function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessExitEvent, store?: ArtifactSinkProvider): EngineResult {
@@ -736,16 +780,18 @@ function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessEx
   if (block?.kind !== "script") return fail(`frame ${leaf.key} is not a script position`);
   if (leaf.key !== event.key) return fail(`process exit key ${event.key} does not match the script leaf ${leaf.key}`);
   const spec = block.script;
+  if (event.captureError !== undefined) return scriptFailure(workflow, state, leaf, block, event.captureError);
   const accepted = !event.exit.timedOut && event.exit.code !== undefined && spec.acceptedExitCodes.includes(event.exit.code);
   if (accepted) {
-    const parsed = scriptStdoutValue(spec, event.exit, leaf.key, event.store);
+    const parsed = scriptStdoutValue(spec, event.exit, event.store);
     if ("error" in parsed) return scriptFailure(workflow, state, leaf, block, parsed.error);
-    const contract = contractErrorFor(workflow, block.output, parsed.value, `script ${leaf.key} output`);
+    const value = mergeOutputSides(parsed.value, capturedFilesSides(event.files));
+    const contract = contractErrorFor(workflow, block.output, value, `script ${leaf.key} output`);
     if (contract) return scriptFailure(workflow, state, leaf, block, contract);
-    const truncated = event.exit.truncated ? " (captured output was truncated)" : "";
-    let checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}.${truncated}`), data: parsed.value };
+    const truncated = event.exit.truncated || parsed.clipped ? " (captured output was truncated)" : "";
+    let checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}.${truncated}`), data: value };
     if (event.store && canonicalJsonBytes(checkpoint as unknown as JsonValue) > LIMITS.checkpointBytes) {
-      const ref = event.store.publishJson("output", parsed.value);
+      const ref = event.store.publishJson("output", value);
       checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}; its ${ref.size}-byte output was published to the artifact store as ${ref.checksum}.${truncated}`), data: ref as unknown as JsonValue };
     }
     try {

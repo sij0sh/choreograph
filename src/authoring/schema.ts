@@ -8,7 +8,7 @@ import type { InputBinding } from "../domain/workflow.ts";
 
 export const FRONTMATTER_KEYS = ["description", "steps", "piVisibility", "legalTools", "contracts"] as const;
 export const STEP_KEYS = ["id", "run", "tools", "done", "repair", "plan", "script", "inputs", "output", "when", "for_each", "repeat_until"] as const;
-export const SCRIPT_KEYS = ["argv", "cwd", "env", "inheritEnv", "timeoutMs", "acceptedExitCodes", "stdout", "stderr", "maxCaptureBytes"] as const;
+export const SCRIPT_KEYS = ["argv", "cwd", "env", "inheritEnv", "timeoutMs", "acceptedExitCodes", "stdout", "stderr", "maxCaptureBytes", "files"] as const;
 export const OPERATOR_KEYS = ["description", "tools", "output"] as const;
 const RECOVERY_KEYS = ["max_attempts", "max_replans", "strategy", "scope"] as const;
 const RECOVERY_ACTIONS: readonly RecoveryAction[] = ["retry", "invalidate", "replan", "block"];
@@ -179,7 +179,25 @@ export function parseScriptSpec(raw: unknown, label: string): import("../domain/
   const stdout = captureModeAt(body.stdout === undefined ? "text" : body.stdout, `${label}.stdout`);
   const stderr = captureModeAt(body.stderr === undefined ? "none" : body.stderr, `${label}.stderr`);
   const maxCaptureBytes = intInRangeAt(body.maxCaptureBytes === undefined ? 65_536 : body.maxCaptureBytes, `${label}.maxCaptureBytes`, 1, LIMITS.scriptCaptureMaxBytes);
-  return { argv, cwd, ...(env !== undefined ? { env } : {}), ...(inheritEnv !== undefined ? { inheritEnv } : {}), timeoutMs, acceptedExitCodes, stdout, stderr, maxCaptureBytes };
+  let files: import("../domain/workflow.ts").ScriptFileCapture[] | undefined;
+  if (body.files !== undefined) {
+    if (!Array.isArray(body.files) || body.files.length === 0) throw new Error(`${label}.files must be a non-empty list`);
+    if (body.files.length > LIMITS.scriptCaptureFiles) throw new Error(`${label}.files must have at most ${LIMITS.scriptCaptureFiles} entries`);
+    files = body.files.map((entry: unknown, index: number) => {
+      const item = objectAt(entry, `${label}.files[${index}]`);
+      for (const key of Object.keys(item)) {
+        if (key !== "name" && key !== "path") throw new Error(`${label}.files[${index}].${key} is not an accepted capture field`);
+      }
+      const name = stringAt(item.name, `${label}.files[${index}].name`);
+      if (!ID_PATTERN.test(name)) throw new Error(`${label}.files[${index}].name must match ^[a-z][a-z0-9-]*$`);
+      const path = stringAt(item.path, `${label}.files[${index}].path`);
+      if (isAbsolute(path)) throw new Error(`${label}.files[${index}].path must be relative to the script's cwd`);
+      if (Buffer.byteLength(path, "utf8") > LIMITS.scriptArgBytes) throw new Error(`${label}.files[${index}].path exceeds ${LIMITS.scriptArgBytes} bytes`);
+      return { name, path };
+    });
+    assertUnique(files.map((capture) => capture.name), `${label}.files names`);
+  }
+  return { argv, cwd, ...(env !== undefined ? { env } : {}), ...(inheritEnv !== undefined ? { inheritEnv } : {}), timeoutMs, acceptedExitCodes, stdout, stderr, maxCaptureBytes, ...(files !== undefined ? { files } : {}) };
 }
 
 function escapesWorkflowRoot(relativePath: string): boolean {

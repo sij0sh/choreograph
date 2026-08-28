@@ -7,7 +7,8 @@ export const ABORT_TOOL_NAME = "workflow_abort";
 export const RETRY_TOOL_NAME = "workflow_retry";
 export const RUN_DEFINITION_TOOL_NAME = "workflow_run_definition";
 export const PROMOTE_TOOL_NAME = "workflow_promote";
-export const CONTROL_TOOLS: readonly string[] = [TRANSITION_TOOL_NAME, ABORT_TOOL_NAME];
+export const HANDOFF_READ_TOOL_NAME = "workflow_handoff_read";
+export const CONTROL_TOOLS: readonly string[] = [TRANSITION_TOOL_NAME, ABORT_TOOL_NAME, HANDOFF_READ_TOOL_NAME];
 
 export function effectiveTools(workflow: Workflow, state: Execution, baseline: readonly string[]): string[] {
   let tools = [...baseline];

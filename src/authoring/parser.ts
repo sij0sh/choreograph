@@ -308,6 +308,11 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
       const rel = relative(context.lexicalRoot, target);
       if (escapesWorkflowRoot(rel)) throw new Error(`${label}.script.cwd escapes the workflow directory`);
     }
+    (spec.files ?? []).forEach((capture, index) => {
+      const target = resolve(context.lexicalRoot, spec.cwd, capture.path);
+      const rel = relative(context.lexicalRoot, target);
+      if (escapesWorkflowRoot(rel)) throw new Error(`${label}.script.files[${index}].path escapes the workflow directory`);
+    });
     return {
       kind: "script",
       id,

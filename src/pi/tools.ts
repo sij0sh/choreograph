@@ -4,7 +4,7 @@ import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator, ToolResult } from "../runtime/coordinator.ts";
 import { START_TOOL_NAME, WorkflowCompileError } from "../runtime/coordinator.ts";
-import { ABORT_TOOL_NAME, PROMOTE_TOOL_NAME, RETRY_TOOL_NAME, RUN_DEFINITION_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/capabilities.ts";
+import { ABORT_TOOL_NAME, HANDOFF_READ_TOOL_NAME, PROMOTE_TOOL_NAME, RETRY_TOOL_NAME, RUN_DEFINITION_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/capabilities.ts";
 
 const NO_PARAMETERS = { type: "object", properties: {}, additionalProperties: false } as const;
 
@@ -267,6 +267,21 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
     },
     { additionalProperties: false },
   );
+
+  if (typeof pi.getAllTools === "function") {
+    pi.registerTool({
+      name: HANDOFF_READ_TOOL_NAME,
+      label: "Read workflow handoff artifact",
+      description: "Read an exact handoff source artifact by its sha256 checksum. Use this only when the bounded handoff capsule refers to detail needed at the current position.",
+      parameters: Type.Object(
+        { checksum: Type.String({ pattern: "^sha256-[0-9a-f]{64}$", description: "Artifact checksum from the workflow handoff capsule." }) },
+        { additionalProperties: false },
+      ),
+      async execute(_id, params) {
+        return runtime.readHandoff(params.checksum);
+      },
+    });
+  }
 
   pi.registerTool({
     name: TRANSITION_TOOL_NAME,

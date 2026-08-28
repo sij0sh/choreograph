@@ -2,8 +2,24 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator } from "../runtime/coordinator.ts";
 import { summarizeProjection } from "../runtime/journal.ts";
+import { ROLLOVER_COMMAND } from "../runtime/transfer.ts";
 
 export function registerRuntimeCommands(pi: ExtensionAPI, runtime: RuntimeCoordinator): void {
+  pi.registerCommand(ROLLOVER_COMMAND, {
+    description: "Internal command that moves a workflow into its next bounded context epoch.",
+    handler: async (args, ctx) => {
+      const transferId = (args ?? "").trim();
+      if (!transferId) {
+        ctx.ui.notify(`Usage: /${ROLLOVER_COMMAND} <transfer-id>`, "error");
+        return;
+      }
+      try {
+        await runtime.performRollover(transferId, ctx);
+      } catch (error) {
+        ctx.ui.notify(`Workflow rollover failed: ${error instanceof Error ? error.message : String(error)}. Run /${ROLLOVER_COMMAND} ${transferId} to retry.`, "error");
+      }
+    },
+  });
   pi.registerCommand("workflow-tui", {
     description: "Cycle the workflow TUI mode (off, compact, detailed).",
     handler: async (_args, ctx) => {

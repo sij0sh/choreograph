@@ -88,8 +88,9 @@ export class AgentRunner implements Runner {
 function stdinOf(inputs: Readonly<Record<string, JsonValue>> | undefined): { readonly ok: true; readonly payload?: string } | { readonly ok: false; readonly error: string } {
   if (!inputs || Object.keys(inputs).length === 0) return { ok: true };
   const text = `${JSON.stringify(inputs)}\n`;
-  if (text.length > LIMITS.positionInputsBytes) {
-    return { ok: false, error: `script inputs serialize to ${text.length} bytes, over the ${LIMITS.positionInputsBytes}-byte stdin budget` };
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > LIMITS.positionInputsBytes) {
+    return { ok: false, error: `script inputs serialize to ${bytes} bytes, over the ${LIMITS.positionInputsBytes}-byte stdin budget` };
   }
   return { ok: true, payload: text };
 }

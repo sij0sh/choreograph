@@ -156,7 +156,7 @@ function retainedResults(workflow: Workflow, execution: PlanExecution): string {
   return lines.length ? ["## Retained completed results", ...lines].join("\n") : "";
 }
 
-export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlock, load?: RefValueLoader, tools?: readonly string[]): string {
+export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlock, load?: RefValueLoader, tools?: readonly string[], hasHandoffCapsule = false): string {
   const position = currentPosition(workflow, state);
   if (!position) return "";
   const header = [
@@ -168,7 +168,7 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
     "",
     "You are mid-workflow. Treat the instructions below as authoritative; earlier instructions are superseded.",
   ];
-  const controls = ["## Controls", "- `workflow_transition` - conclude the current position once its criteria are met or problems are found.", "- `workflow_abort` - stop the run when the user asks or it cannot continue."];
+  const controls = ["## Controls", "- `workflow_transition` - conclude the current position once its criteria are met or problems are found.", "- `workflow_handoff_read` - retrieve exact handoff detail by checksum only when the protected capsule says it is needed.", "- `workflow_abort` - stop the run when the user asks or it cannot continue."];
   if (position.type === "task") {
     return [
       ...header,
@@ -181,7 +181,7 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
       "",
       readBody(read, workflow.overviewPath, "Workflow overview"),
       inputSection(workflow, state, position.task!.inputs, load),
-      position.task!.inputs ? "" : priorCheckpoints(workflow, state, position.key),
+      hasHandoffCapsule || position.task!.inputs ? "" : priorCheckpoints(workflow, state, position.key),
       loopContext(workflow, state, position.key),
       "## Current task instructions",
       "",
@@ -298,9 +298,13 @@ export function controlPrefix(runId: string): string {
   return `Continue workflow \`${runId}\``;
 }
 
+export function summaryPrefix(runId: string): string {
+  return `Summarize completed workflow \`${runId}\``;
+}
+
 export function summaryMessage(workflow: Workflow, state: Execution): string {
   return [
-    `${workflow.title} run \`${state.runId}\` is complete.`,
+    `${summaryPrefix(state.runId)}: ${workflow.title} run \`${state.runId}\` is complete.`,
     "Summarize what was done, the key findings and recommendations, the risks or open issues, and suggested next steps.",
   ].join("\n");
 }

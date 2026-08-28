@@ -14,6 +14,11 @@ export interface DispatchHandle {
   readonly result: Promise<NodeResult>;
 }
 
+export interface DispatchOptions {
+  /** Set by callers that deliberately re-execute an at-least-once runner, such as an approved retry or a resumed run. */
+  readonly acknowledgedRetry?: boolean;
+}
+
 function isAwaiting(runner: Runner): runner is AwaitingRunner {
   return typeof (runner as Partial<AwaitingRunner>).settle === "function";
 }
@@ -41,10 +46,14 @@ export class RunnerRegistry {
     return runner;
   }
 
-  dispatch(invocation: NodeInvocation, spec: RunnerSpec, inputs?: RunnerContext["inputs"]): DispatchHandle {
+  dispatch(invocation: NodeInvocation, spec: RunnerSpec, inputs?: RunnerContext["inputs"], options?: DispatchOptions): DispatchHandle {
     const existing = this.active.get(invocation.key);
     if (existing) return existing.handle;
     const runner = this.runnerFor(invocation.runner);
+    if (invocation.attempt > 1 && runner.retrySafety === "at-least-once" && options?.acknowledgedRetry !== true) {
+      const reason = `runner "${runner.kind}" is declared at-least-once; re-dispatching attempt ${invocation.attempt} of ${invocation.key} requires an explicit retry acknowledgment`;
+      return { invocation, runner, result: Promise.resolve({ status: "failed", reason }) };
+    }
     const abort = new AbortController();
     const result = Promise.resolve(
       runner.execute(invocation, spec, { ...(inputs ? { inputs } : {}), signal: abort.signal }),
