@@ -1,6 +1,7 @@
 import type { NodeInvocation, NodeSpec, RunnerSpec } from "../domain/node.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { ScriptSpec } from "../domain/workflow.ts";
+import type { Issue } from "../engine/interpreter.ts";
 import { LIMITS } from "../domain/limits.ts";
 import type { ProcessResult } from "./process-runner.ts";
 import { runProcess } from "./process-runner.ts";
@@ -14,6 +15,11 @@ export interface NodeResult {
   readonly status: "succeeded" | "failed" | "canceled";
   readonly reason?: string;
   readonly exit?: ProcessResult;
+  
+  readonly summary?: string;
+  readonly data?: JsonValue;
+  readonly met?: readonly string[];
+  readonly issues?: readonly Issue[];
 }
 
 export interface Runner {

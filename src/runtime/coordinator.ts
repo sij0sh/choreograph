@@ -395,14 +395,27 @@ export class RuntimeCoordinator {
     this.registry.dispatch(invocation, { runner: "agent", blockId: leaf.blockId });
   }
 
-  private settleAgent(active: ActiveState, status: "completed" | "needs-work" | "blocked"): void {
+  private settleAgent(active: ActiveState, raw: { readonly status: "completed" | "needs-work" | "blocked"; readonly met?: readonly string[]; readonly checkpoint: Checkpoint; readonly issues?: readonly Issue[] }): void {
     const key = active.execution.stack.at(-1)?.key;
-    if (key) this.registry.complete(key, this.agentResultOf(status));
-  }
-
-  private agentResultOf(status: "completed" | "needs-work" | "blocked"): NodeResult {
-    if (status === "completed") return { status: "succeeded" };
-    return { status: "failed", reason: status };
+    if (!key) return;
+    
+    
+    const data = raw.checkpoint.data;
+    const result: NodeResult = raw.status === "completed"
+      ? {
+          status: "succeeded",
+          summary: raw.checkpoint.summary,
+          ...(data !== undefined ? { data } : {}),
+          ...(raw.met !== undefined ? { met: [...raw.met] } : {}),
+        }
+      : {
+          status: "failed",
+          reason: raw.status,
+          summary: raw.checkpoint.summary,
+          ...(data !== undefined ? { data } : {}),
+          ...(raw.issues !== undefined ? { issues: [...raw.issues] } : {}),
+        };
+    this.registry.complete(key, result);
   }
 
   private adoptActive(state: ActiveState, ctx: UiContext): void {
@@ -503,7 +516,7 @@ export class RuntimeCoordinator {
     }
     this.syncInvocations(current.execution.runId, current.execution, result.state);
     if (result.effect.kind === "complete") {
-      this.settleAgent(current, raw.status);
+      this.settleAgent(current, raw);
       return this.finishRun(current, ctx, "completed", result.state);
     }
     const next: ActiveState = { ...current, execution: result.state, delivered: result.effect.kind === "stay" };
@@ -516,7 +529,7 @@ export class RuntimeCoordinator {
         isError: true,
       };
     }
-    this.settleAgent(current, raw.status);
+    this.settleAgent(current, raw);
     try {
       this.commit(this.snapshotOf(next, next.delivered), `transition of ${current.workflow.title} run ${current.execution.runId} to ${result.state.stack.at(-1)?.key ?? "completion"}`);
     } catch (error) {
@@ -572,13 +585,15 @@ export class RuntimeCoordinator {
         return execution;
       }
       const leaf = current.execution.stack[current.execution.stack.length - 1];
-      const invocation = current.execution.invocations?.[script.key] ?? {
-        blockId: script.block.id,
-        key: script.key,
-        runner: "process" as const,
-        status: "running" as const,
-        attempt: leaf && "attempt" in leaf ? leaf.attempt : 1,
-      };
+      const recorded = current.execution.invocations?.[script.key];
+      
+      
+      const reexecution = recorded !== undefined && recorded.status !== "running";
+      const attempt = reexecution ? recorded.attempt + 1 : recorded?.attempt ?? (leaf && "attempt" in leaf ? leaf.attempt : 1);
+      if (reexecution) {
+        this.record({ type: "retry-scheduled", runId: current.execution.runId, at: this.now(), key: script.key, attempt });
+      }
+      const invocation = { ...(recorded ?? { blockId: script.block.id, key: script.key, runner: "process" as const, attempt }), status: "running" as const, attempt };
       const processSpec = processSpecOf(script.block, dirname(current.workflow.overviewPath));
       const store = this.artifactStoreFor(current.workflow, current.execution.runId);
       const sink = store?.sinkFor(script.key);
@@ -628,6 +643,10 @@ export class RuntimeCoordinator {
         return execution;
       }
       const parked = applied.effect.kind === "stay";
+      if (parked && reexecution) {
+        
+        this.record({ type: "node-waiting", runId: current.execution.runId, at: this.now(), key: script.key, reason: this.clipReason(applied.state.checkpoints[script.key]?.summary) });
+      }
       const next: ActiveState = { ...current, execution: applied.state, delivered: false, ...(parked ? { parked: true } : { parked: undefined }) };
       const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: false });
       if (!withinMemoryBound(pendingSnapshot)) {

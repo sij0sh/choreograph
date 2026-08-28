@@ -232,3 +232,61 @@ test("agent lifecycle events come from recorded invocations, not delivery", asyn
   assert.ok(events.some((event) => event.type === "retry-scheduled" && event.key === "root/frame" && event.attempt === 2));
   assert.ok(events.some((event) => event.type === "node-succeeded" && event.key === "root/frame"));
 });
+
+test("an injected script failure parks the run and the projection reports waiting with the reason", async () => {
+  const h = harness();
+  const wf = workflow([
+    script("stuck", { spec: { argv: ["node", "-e", "process.exit(1)"], inheritEnv: ["PATH"] }, recovery: { maxAttempts: 1, strategy: ["block"] } }),
+    task("deliver"),
+  ]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  const eventsOf = () => h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
+  const events = eventsOf();
+  assert.ok(events.some((event) => event.type === "node-started" && event.key === "root/stuck" && event.attempt === 1), "the first attempt is journaled");
+  const waiting = events.find((event) => event.type === "node-waiting" && event.key === "root/stuck");
+  assert.ok(waiting, "the exhausted failure is journaled");
+  assert.match(waiting.reason, /code 1/);
+  const projection = project(events.map((event) => parseEvent(event)));
+  assert.equal(projection.status, "waiting", "the parked failure keeps the projection waiting");
+  assert.equal(projection.invocations["root/stuck"].status, "waiting");
+  assert.match(projection.invocations["root/stuck"].lastReason, /code 1/);
+  const snapshot = h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").at(-1);
+  assert.equal(snapshot.data.parked, true, "the park marker is persisted");
+  assert.equal(snapshot.data.execution.invocations["root/stuck"].status, "waiting");
+
+  const result = await runtime.retry(undefined, h.ctx);
+  assert.equal(result.details.status, "parked");
+  const retried = eventsOf();
+  assert.ok(retried.some((event) => event.type === "retry-scheduled" && event.key === "root/stuck" && event.attempt === 2), "the retry is journaled");
+  const starts = retried.filter((event) => event.type === "node-started" && event.key === "root/stuck");
+  assert.equal(starts.length, 2, "the retry journals a second start");
+  assert.equal(starts[1].attempt, 2);
+  const retriedProjection = project(retried.map((event) => parseEvent(event)));
+  assert.equal(retriedProjection.status, "waiting", "the second failure parks again");
+  assert.equal(retriedProjection.invocations["root/stuck"].attempts, 2, "the projection counts both attempts");
+});
+
+test("a runner-level input failure journals node-failed and fails the projection while the run stays active", async () => {
+  const h = harness();
+  const wf = workflow([
+    task("gather"),
+    script("consume", { spec: { argv: ["node", "-e", "process.exit(0)"], inheritEnv: ["PATH"] }, inputs: { x: { from: "gather", select: "/missing" } } }),
+  ]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  await runtime.transition({ status: "completed", checkpoint: cp("gathered", { files: ["a"] }) }, undefined, h.ctx);
+  await runtime.handleAgentSettled(h.ctx);
+  const events = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
+  const failed = events.find((event) => event.type === "node-failed" && event.key === "root/consume");
+  assert.ok(failed, "the unresolved input is journaled as node-failed");
+  assert.match(failed.reason, /missing/);
+  const projection = project(events.map((event) => parseEvent(event)));
+  assert.equal(projection.status, "failed", "the node failure fails the run projection");
+  assert.equal(projection.invocations["root/consume"].status, "failed");
+  assert.match(projection.invocations["root/consume"].lastReason, /missing/);
+  assert.equal(runtime.state.status, "active", "the run stays active at the failed position");
+  assert.equal(runtime.state.parked, undefined, "a runner-level failure does not park the run");
+});

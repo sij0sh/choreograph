@@ -52,7 +52,8 @@ export class RunnerRegistry {
     const handle: DispatchHandle = { invocation, runner, result };
     this.active.set(invocation.key, { handle, abort });
     const clear = (): void => {
-      this.active.delete(invocation.key);
+      
+      if (this.active.get(invocation.key)?.handle === handle) this.active.delete(invocation.key);
     };
     void result.then(clear, clear);
     return handle;

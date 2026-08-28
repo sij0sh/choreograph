@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { RuntimeCoordinator, newRunId } from "../../src/runtime/coordinator.ts";
 import { activeSnapshot, terminalSnapshot } from "../../src/persistence/snapshot.ts";
+import { AgentRunner } from "../../src/runtime/runner.ts";
 import { completed, cp, task, workflow } from "../engine/helpers.mjs";
 import { start } from "../../src/engine/interpreter.ts";
 
@@ -251,6 +252,43 @@ test("a retry re-delivers the retried position", async () => {
   assert.match(result.content[0].text, /instructions arrive in the next message/);
   assert.equal(h.sent.length, 2, "the retry sends a new control message");
   assert.ok(h.sent[1].message.includes("root/frame"));
+});
+
+test("the registry settles agent invocations with the real outcome, not a fabricated status", async () => {
+  const h = harness();
+  const wf = workflow([task("frame", { done: ["framed"] }), task("deliver")]);
+  const runtime = coordinator(h, [wf]);
+  const settled = [];
+  const real = new AgentRunner();
+  runtime.registry.register({
+    kind: "agent",
+    retrySafety: "idempotent",
+    execute: (invocation, spec, ctx) => real.execute(invocation, spec, ctx),
+    settle: (key, result) => {
+      settled.push([key, result]);
+      return real.settle(key, result);
+    },
+    cancel: (invocation) => real.cancel(invocation),
+  });
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+
+  await runtime.transition(
+    { status: "needs-work", checkpoint: cp("blocked on data", { gap: "counts" }), issues: [{ target: "frame", reason: "missing counts" }] },
+    undefined,
+    h.ctx,
+  );
+  await runtime.handleAgentSettled(h.ctx);
+  assert.deepEqual(settled[0], [
+    "root/frame",
+    { status: "failed", reason: "needs-work", summary: "blocked on data", data: { gap: "counts" }, issues: [{ target: "frame", reason: "missing counts" }] },
+  ]);
+
+  await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed the data", { rows: 3 }) }, undefined, h.ctx);
+  await runtime.handleAgentSettled(h.ctx);
+  await runtime.transition({ status: "completed", checkpoint: cp("delivered") }, undefined, h.ctx);
+  assert.deepEqual(settled[1], ["root/frame", { status: "succeeded", summary: "framed the data", data: { rows: 3 }, met: ["framed"] }]);
+  assert.deepEqual(settled[2], ["root/deliver", { status: "succeeded", summary: "delivered" }]);
 });
 
 test("a send that resolves after abort appends no active snapshot", async () => {
