@@ -1,4 +1,4 @@
-import type { NodeInvocation, NodeSpec } from "../domain/node.ts";
+import type { NodeInvocation, NodeSpec, RunnerSpec } from "../domain/node.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { ScriptSpec } from "../domain/workflow.ts";
 import { LIMITS } from "../domain/limits.ts";
@@ -19,19 +19,17 @@ export interface NodeResult {
 export interface Runner {
   readonly kind: NodeSpec["runner"];
   readonly retrySafety: "at-least-once" | "idempotent";
-  execute(invocation: NodeInvocation, spec: NodeSpec, ctx: RunnerContext): Promise<NodeResult>;
+  execute(invocation: NodeInvocation, spec: RunnerSpec, ctx: RunnerContext): Promise<NodeResult>;
   cancel?(invocation: NodeInvocation): void;
 }
-
-import type { ProcessNodeSpec } from "../domain/node.ts";
 
 export class ProcessRunner implements Runner {
   readonly kind = "process" as const;
   readonly retrySafety = "at-least-once" as const;
 
-  execute(invocation: NodeInvocation, spec: NodeSpec, ctx: RunnerContext): Promise<NodeResult> {
+  execute(invocation: NodeInvocation, spec: RunnerSpec, ctx: RunnerContext): Promise<NodeResult> {
     if (spec.runner !== "process") return Promise.resolve({ status: "failed", reason: `ProcessRunner does not run ${spec.runner} specs` });
-    const processSpec = spec as ProcessNodeSpec;
+    const processSpec = spec;
     const payload = stdinOf(ctx.inputs);
     if (!payload.ok) return Promise.resolve({ status: "failed", reason: payload.error });
     return runProcess({
@@ -47,13 +45,37 @@ export class ProcessRunner implements Runner {
   }
 }
 
+/**
+ * Runs agent positions by awaiting their external completion. An agent settles
+ * when the position transitions (workflow_transition) or the run aborts.
+ */
 export class AgentRunner implements Runner {
   readonly kind = "agent" as const;
   readonly retrySafety = "idempotent" as const;
+  private readonly awaiting = new Map<string, { readonly result: Promise<NodeResult>; readonly resolve: (result: NodeResult) => void }>();
 
-  async execute(_invocation: NodeInvocation, spec: NodeSpec, _ctx: RunnerContext): Promise<NodeResult> {
-    if (spec.runner !== "agent") return { status: "failed", reason: `AgentRunner does not run ${spec.runner} specs` };
-    return { status: "succeeded" };
+  execute(invocation: NodeInvocation, spec: RunnerSpec, _ctx: RunnerContext): Promise<NodeResult> {
+    if (spec.runner !== "agent") return Promise.resolve({ status: "failed", reason: `AgentRunner does not run ${spec.runner} specs` });
+    const existing = this.awaiting.get(invocation.key);
+    if (existing) return existing.result;
+    let resolve!: (result: NodeResult) => void;
+    const result = new Promise<NodeResult>((settle) => {
+      resolve = settle;
+    });
+    this.awaiting.set(invocation.key, { result, resolve });
+    return result;
+  }
+
+  settle(invocationKey: string, result: NodeResult): boolean {
+    const pending = this.awaiting.get(invocationKey);
+    if (!pending) return false;
+    this.awaiting.delete(invocationKey);
+    pending.resolve(result);
+    return true;
+  }
+
+  cancel(invocation: NodeInvocation): void {
+    this.settle(invocation.key, { status: "canceled" });
   }
 }
 

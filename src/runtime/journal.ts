@@ -212,6 +212,7 @@ export function fold(previous: RunProjection | undefined, event: RunEvent): RunP
       const statusByType: Partial<Record<RunEvent["type"], RunProjection["status"]>> = {
         "node-succeeded": "running",
         "node-waiting": "waiting",
+        "node-failed": "failed",
       };
       return { ...previous, ...(statusByType[event.type] ? { status: statusByType[event.type]! } : {}), updatedAt: event.at, invocations: { ...previous.invocations, [event.key]: invocation }, lastEvent: event };
     }
