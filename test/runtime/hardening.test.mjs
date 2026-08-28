@@ -249,17 +249,34 @@ test("an abort while delivery is pending suppresses the continuation message", a
   assert.equal(coordinator.sentDelivery, null, "no delivery marker is recorded");
 });
 
-test("loop aggregates over the checkpoint bound are rejected", () => {
+test("loop aggregates degrade outputs before exceeding the checkpoint bound", () => {
   const items = ["a", "b", "c", "d", "e", "f"];
   const wf = workflow([task("gather"), loop("review", "for-each", { maxIterations: 8 }), task("deliver")]);
   let state = start(wf, { runId: "r1" }).state;
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: items })) }).state;
   let result = { ok: true, state };
-  for (let i = 0; i < items.length - 1; i += 1) {
-    result = transition(wf, result.state, { type: "outcome", outcome: completed(cp(`reviewed ${items[i]} `.repeat(300))) });
+  for (let i = 0; i < items.length; i += 1) {
+    result = transition(wf, result.state, { type: "outcome", outcome: completed(cp(`reviewed ${items[i]}`, { blob: "x".repeat(2750) })) });
     assert.ok(result.ok, `iteration ${i + 1} should succeed`);
   }
-  const oversized = transition(wf, result.state, { type: "outcome", outcome: completed(cp(`reviewed ${items.at(-1)} `.repeat(300))) });
-  assert.ok(!oversized.ok);
+  const aggregate = result.state.checkpoints["root/review"];
+  assert.ok(aggregate, "the loop still writes one aggregate checkpoint");
+  assert.equal(aggregate.data.iterations, 6);
+  assert.equal(aggregate.data.results[0].iteration, 1);
+  assert.equal(aggregate.data.results[0].outputs, undefined, "oversized outputs are dropped before the record form is rejected");
+});
+
+test("loop aggregates over the checkpoint bound are rejected", () => {
+  const items = ["a".repeat(2710), "b".repeat(2710), "c".repeat(2710), "d".repeat(2710), "e".repeat(2710), "f".repeat(2710)];
+  const wf = workflow([task("gather"), loop("review", "for-each", { maxIterations: 8 }), task("deliver")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: items })) }).state;
+  let result = { ok: true, state };
+  for (let i = 0; i < items.length - 1; i += 1) {
+    result = transition(wf, result.state, { type: "outcome", outcome: completed(cp(`reviewed ${items[i]}`)) });
+    assert.ok(result.ok, `iteration ${i + 1} should succeed`);
+  }
+  const oversized = transition(wf, result.state, { type: "outcome", outcome: completed(cp(`reviewed ${items.at(-1)}`)) });
+  assert.ok(!oversized.ok, "every aggregate candidate exceeds the bound, so the last iteration cannot commit");
   assert.match(oversized.error, /exceeds 16384 bytes/);
 });

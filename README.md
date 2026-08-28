@@ -327,9 +327,14 @@ Rules:
   `text` stores it as `{ stdout }` (clipped to the checkpoint budget), `none`
   stores an empty object. `stderr` is captured for diagnostics and never parsed
   into the data.
-- Script steps accept `id`, `script`, `repair`, `when`, and `output`. They reject
-  `run`, `tools`, `done`, `plan`, `for_each`, and `repeat_until`, and cannot
-  appear inside loop bodies.
+- Script steps accept `id`, `script`, `repair`, `when`, `inputs`, and `output`.
+  They reject `run`, `tools`, `done`, `plan`, `for_each`, and `repeat_until`, and
+  cannot appear inside loop bodies.
+- Declared `inputs` are resolved from earlier artifacts like task inputs, then
+  delivered to the process as one JSON object (plus a trailing newline) on
+  stdin. There is no implicit interpolation into `argv` or `env`; a script that
+  wants the values reads its stdin. The payload shares the 24 KiB position
+  input budget; an oversized payload fails the step and applies `repair`.
 - An accepted exit with output satisfying the `output` contract completes the
   step. A timeout, a rejected exit code, invalid JSON, a contract violation, or a
   spawn failure applies the step's `repair` policy; after retries are exhausted
