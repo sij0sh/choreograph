@@ -1,5 +1,6 @@
 import { parseDocument } from "yaml";
 import { currentPosition } from "../engine/interpreter.ts";
+import { CONTROL_TOOLS, RETRY_TOOL_NAME } from "./capabilities.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import type { Execution, PlanExecution } from "../domain/execution.ts";
 import { canonicalJson, canonicalJsonBytes } from "../domain/json.ts";
@@ -8,6 +9,7 @@ import type { Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { lastSegment } from "../domain/keys.ts";
 import type { LoopFrame } from "../domain/execution.ts";
+import { type RefValueLoader } from "./artifacts.ts";
 import { inputSection } from "./prompts-inputs.ts";
 
 type ReadBlock = (path: string, label: string) => string;
@@ -51,6 +53,18 @@ function stripFrontmatter(text: string): string {
 
 function readBody(read: ReadBlock, path: string, label: string): string {
   return stripFrontmatter(read(path, label)).trim();
+}
+
+function toolsSection(tools: readonly string[] | undefined): string {
+  if (!tools) return "";
+  const granted = tools.filter((name) => !CONTROL_TOOLS.includes(name) && name !== RETRY_TOOL_NAME);
+  const lines = [
+    "## Tools",
+    `Tools granted at this position: ${granted.length ? granted.map((name) => `\`${name}\``).join(", ") : "none beyond the workflow controls above"}.`,
+    "Tools not listed are unavailable here; do not attempt to use them.",
+  ];
+  if (granted.includes("bash")) lines.push("Use bash (`ls`, `find`, `rg`) to discover files; never guess paths.");
+  return lines.join("\n");
 }
 
 const TRANSITION_CONTRACT = [
@@ -142,7 +156,7 @@ function retainedResults(workflow: Workflow, execution: PlanExecution): string {
   return lines.length ? ["## Retained completed results", ...lines].join("\n") : "";
 }
 
-export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlock): string {
+export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlock, load?: RefValueLoader, tools?: readonly string[]): string {
   const position = currentPosition(workflow, state);
   if (!position) return "";
   const header = [
@@ -161,11 +175,12 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
       "",
       ...controls,
       "",
+      toolsSection(tools),
       "",
       "## Workflow overview",
       "",
       readBody(read, workflow.overviewPath, "Workflow overview"),
-      inputSection(workflow, state, position.task!.inputs),
+      inputSection(workflow, state, position.task!.inputs, load),
       position.task!.inputs ? "" : priorCheckpoints(workflow, state, position.key),
       loopContext(workflow, state, position.key),
       "## Current task instructions",
@@ -184,13 +199,15 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
       "",
       ...controls,
       "",
+      toolsSection(tools),
+      "",
       "## Task: create a bounded plan",
       "",
       `Compose a plan of ${position.plan!.operators.length === 1 ? "2 to 8" : "2 to 8"} nodes using only the trusted operators below.`,
       "## Workflow overview",
       "",
       readBody(read, workflow.overviewPath, "Workflow overview"),
-      inputSection(workflow, state, position.plan!.inputs),
+      inputSection(workflow, state, position.plan!.inputs, load),
       operatorRoster(workflow, position.plan!.operators),
       PLAN_SCHEMA_SECTION,
     ];
@@ -241,6 +258,8 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
     `Node ${nodeIndex + 1}/${execution.plan.nodes.length}: \`${node.id}\` (plan revision ${execution.revision})`,
     "",
     ...controls,
+    "",
+    toolsSection(tools),
     "",
     `## Operator: ${operator.id}`,
     "",
