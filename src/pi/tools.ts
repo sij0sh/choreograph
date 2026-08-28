@@ -4,7 +4,7 @@ import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator, ToolResult } from "../runtime/coordinator.ts";
 import { START_TOOL_NAME, WorkflowCompileError } from "../runtime/coordinator.ts";
-import { ABORT_TOOL_NAME, RETRY_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/capabilities.ts";
+import { ABORT_TOOL_NAME, PROMOTE_TOOL_NAME, RETRY_TOOL_NAME, RUN_DEFINITION_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/capabilities.ts";
 
 const NO_PARAMETERS = { type: "object", properties: {}, additionalProperties: false } as const;
 
@@ -104,7 +104,7 @@ export function normalizeTransitionArguments(args: unknown): Record<string, unkn
   return out;
 }
 
-export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordinator, workflows: readonly Workflow[]): void {
+export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordinator, workflows: readonly Workflow[], workflowsRoot: string): void {
   const visible = workflows.filter((workflow) => workflow.piVisibility);
   const byName = new Map(visible.map((workflow) => [workflow.name, workflow]));
 
@@ -154,6 +154,80 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
       },
     });
   }
+
+  pi.registerTool({
+    name: RUN_DEFINITION_TOOL_NAME,
+    label: "Run workflow definition",
+    description: [
+      "Start a runtime-generated workflow from a bounded inline definition.",
+      "Exact shape: { name, title?, description, steps: [{ id, instruction, done? }] }.",
+      "Ids are kebab-case; steps carry their full instruction text; `done` lists that step's completion criteria.",
+      `The definition is validated strictly and started immediately; its first message arrives next. At most ${LIMITS.generatedSteps} steps and ${LIMITS.generatedDefinitionBytes / 1000} KB total.`,
+      "Use it only when the user asks for a workflow that does not exist on disk; prefer `workflow_start` for known workflows.",
+    ].join(" "),
+    parameters: Type.Object(
+      {
+        definition: Type.Any({ description: "The definition object: { name, title?, description, steps: [{ id, instruction, done? }] }." }),
+        target: Type.Optional(Type.String({ maxLength: 4096, description: "Optional subject or arguments the workflow should focus on; at most 4,096 bytes." })),
+      },
+      { additionalProperties: false },
+    ),
+    async execute(_id, params, signal, _update, ctx) {
+      let run;
+      try {
+        run = await runtime.startGenerated(params.definition, params.target ?? "", ctx, signal);
+      } catch (error) {
+        if (error instanceof Error && error.name === "WorkflowStorageError") {
+          return {
+            content: [{ type: "text", text: `${error.message}. The session stays idle.` }],
+            details: { status: "storage-failed" },
+            isError: true,
+          } satisfies ToolResult;
+        }
+        return {
+          content: [{ type: "text", text: `${error instanceof Error ? error.message : String(error)}. The definition was not started; fix it and call again.` }],
+          details: { status: "definition-invalid" },
+          isError: true,
+        } satisfies ToolResult;
+      }
+      if (!run) {
+        return { content: [{ type: "text", text: "A workflow is already active." }], details: { status: "busy" }, isError: true } satisfies ToolResult;
+      }
+      return {
+        content: [{ type: "text", text: `Generated workflow ${run.workflow.name} run ${run.execution.runId} started. Its first message arrives next. Call workflow_promote to persist it on disk.` }],
+        details: { workflow: run.workflow.name, runId: run.execution.runId, position: run.execution.stack[run.execution.stack.length - 1]?.key, status: "active" },
+        terminate: true,
+      } satisfies ToolResult;
+    },
+  });
+
+  pi.registerTool({
+    name: PROMOTE_TOOL_NAME,
+    label: "Promote generated workflow",
+    description: [
+      "Persist a workflow started this session through workflow_run_definition into the workflows directory as a normal file-backed workflow.",
+      "Promotion is an explicit action; it never happens automatically, refuses existing directories, and the written workflow is discovered when workflows load next.",
+    ].join(" "),
+    parameters: Type.Object(
+      { name: Type.String({ minLength: 1, description: "The generated workflow name to promote." }) },
+      { additionalProperties: false },
+    ),
+    async execute(_id, params, _signal, _update, _ctx) {
+      try {
+        const { directory } = runtime.promoteDefinition(params.name, workflowsRoot);
+        return {
+          content: [{ type: "text", text: `Promoted ${params.name} to ${directory}. It becomes discoverable as a file-backed workflow when workflows load next.` }],
+          details: { workflow: params.name, directory, status: "promoted" },
+        } satisfies ToolResult;
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `${error instanceof Error ? error.message : String(error)}. Nothing was written.` }],
+          details: { workflow: params.name, status: "promote-failed" },
+          isError: true,
+        } satisfies ToolResult;
+      }
+    },
+  });
 
   const transitionParameters = Type.Object(
     {

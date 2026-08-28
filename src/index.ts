@@ -13,7 +13,7 @@ const WORKFLOWS_ROOT = join(AGENT_ROOT, "workflows");
 export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WORKFLOWS_ROOT): void {
   const { workflows, diagnostics } = discoverWorkflows(workflowsRoot);
   const runtime = new RuntimeCoordinator(pi, workflows);
-  registerWorkflowTools(pi, runtime, workflows);
+  registerWorkflowTools(pi, runtime, workflows, workflowsRoot);
   registerWorkflowCommands(pi, runtime, workflows);
   registerRuntimeCommands(pi, runtime);
   registerLifecycleHandlers(pi, runtime, diagnostics);
