@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { MANIFEST_CACHE_FILENAME } from "./authoring/manifest-cache.ts";
 import { discoverWorkflows } from "./authoring/parser.ts";
 import { RuntimeCoordinator } from "./runtime/coordinator.ts";
 import { registerRuntimeCommands, registerWorkflowCommands } from "./pi/commands.ts";
@@ -11,7 +12,7 @@ const AGENT_ROOT = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "ag
 const WORKFLOWS_ROOT = join(AGENT_ROOT, "workflows");
 
 export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WORKFLOWS_ROOT): void {
-  const { workflows, diagnostics } = discoverWorkflows(workflowsRoot);
+  const { workflows, diagnostics } = discoverWorkflows(workflowsRoot, join(workflowsRoot, MANIFEST_CACHE_FILENAME));
   const runtime = new RuntimeCoordinator(pi, workflows);
   registerWorkflowTools(pi, runtime, workflows, workflowsRoot);
   registerWorkflowCommands(pi, runtime, workflows);
