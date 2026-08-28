@@ -26,8 +26,8 @@ function invocationsAt(value: unknown, label: string): Record<string, NodeInvoca
     if (!RUNNER_KINDS.includes(item.runner as RunnerKind)) throw new Error(`${label}.${key}.runner must be one of: ${RUNNER_KINDS.join(", ")}`);
     if (!NODE_STATUSES.includes(item.status as NodeStatus)) throw new Error(`${label}.${key}.status must be one of: ${NODE_STATUSES.join(", ")}`);
     const attempt = item.attempt;
-    if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 1 || attempt > LIMITS.nodeAttempts + 1) {
-      throw new Error(`${label}.${key}.attempt must be an integer between 1 and ${LIMITS.nodeAttempts + 1}`);
+    if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 1 || attempt > PLAN_CREATE_ATTEMPT_MAX) {
+      throw new Error(`${label}.${key}.attempt must be an integer between 1 and ${PLAN_CREATE_ATTEMPT_MAX}`);
     }
     invocations[key] = { blockId, key: invocationKey, runner: item.runner as RunnerKind, status: item.status as NodeStatus, attempt };
   }

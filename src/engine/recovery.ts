@@ -7,7 +7,7 @@ import { bindingConsumers, blockOf, workflowBlocks } from "../domain/workflow.ts
 import { lastSegment, planKeyOf } from "../domain/keys.ts";
 import { invalidateResults } from "../planning/graph.ts";
 import type { Effect, EngineResult, Issue } from "./interpreter.ts";
-import { advance } from "./interpreter.ts";
+import { advance, enterInvocation } from "./interpreter.ts";
 
 
 type Outcome = { readonly checkpoint: Checkpoint; readonly issues?: readonly Issue[] };
@@ -97,6 +97,10 @@ function resume(workflow: Workflow, state: Execution, stack: readonly Frame[]): 
   const advanced = advance(workflow, { ...pruned, stack });
   if (!advanced.ok) return undefined;
   if (advanced.state.stack.length === 0) return fail("recovery rewound past every runnable block");
+  const leaf = advanced.state.stack[advanced.state.stack.length - 1];
+  if (leaf && (leaf.kind === "task" || leaf.kind === "plan" || leaf.kind === "node")) {
+    return deliver(enterInvocation(workflow, advanced.state, leaf));
+  }
   return deliver(advanced.state);
 }
 
@@ -272,7 +276,7 @@ export function applyNeedsWork(workflow: Workflow, state: Execution, outcome: Ou
       case "retry": {
         if (nextAttempt <= policy.maxAttempts) {
           stack[stack.length - 1] = withAttempt(leaf, nextAttempt);
-          return deliver({ ...state, stack });
+          return deliver(enterInvocation(workflow, { ...state, stack }, leaf, "running", nextAttempt));
         }
         continue;
       }
@@ -287,14 +291,15 @@ export function applyNeedsWork(workflow: Workflow, state: Execution, outcome: Ou
         continue;
       }
       case "block":
-        return stayWithCheckpoint(state, leaf.key, outcome.checkpoint);
+        return stayWithCheckpoint(workflow, state, leaf, outcome.checkpoint);
     }
   }
-  return stayWithCheckpoint(state, leaf.key, outcome.checkpoint);
+  return stayWithCheckpoint(workflow, state, leaf, outcome.checkpoint);
 }
 
-function stayWithCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): EngineResult {
-  const checkpoints = { ...state.checkpoints, [key]: checkpoint };
-  const checkpointOrder = state.checkpointOrder.includes(key) ? state.checkpointOrder : [...state.checkpointOrder, key];
-  return { ok: true, state: { ...state, checkpoints, checkpointOrder }, effect: { kind: "stay" } as Effect };
+function stayWithCheckpoint(workflow: Workflow, state: Execution, leaf: Frame, checkpoint: Checkpoint): EngineResult {
+  const waiting = enterInvocation(workflow, state, leaf, "waiting");
+  const checkpoints = { ...waiting.checkpoints, [leaf.key]: checkpoint };
+  const checkpointOrder = waiting.checkpointOrder.includes(leaf.key) ? waiting.checkpointOrder : [...waiting.checkpointOrder, leaf.key];
+  return { ok: true, state: { ...waiting, checkpoints, checkpointOrder }, effect: { kind: "stay" } as Effect };
 }

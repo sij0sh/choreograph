@@ -8,9 +8,9 @@ import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
 import { evaluateGuard, skipReason, type GuardClause } from "../domain/guard.ts";
 import type { LoopBlock, PlanBlock, ScriptBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
-import { processSpecOf } from "../domain/node.ts";
+import { processSpecOf, type NodeInvocation, type NodeStatus, type RunnerKind } from "../domain/node.ts";
 import { upsertInvocation } from "../domain/execution.ts";
-import { resolveBinding } from "../domain/artifacts.ts";
+import { resolveBinding, type ArtifactSink, type ArtifactSinkProvider } from "../domain/artifacts.ts";
 import { canonicalJson, canonicalJsonBytes, isJsonValue, type JsonValue } from "../domain/json.ts";
 import { firstIncompleteNode } from "../planning/graph.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
@@ -28,7 +28,7 @@ export type TaskOutcome =
 type WorkflowEvent =
   | { readonly type: "outcome"; readonly outcome: TaskOutcome }
   | { readonly type: "abort" }
-  | { readonly type: "process-exit"; readonly key: string; readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean } };
+  | { readonly type: "process-exit"; readonly key: string; readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean }; readonly store?: ArtifactSink };
 
 export type Effect =
   | { readonly kind: "deliver" }
@@ -141,12 +141,15 @@ function pushBlock(workflow: Workflow, state: Execution, stack: Frame[], parentK
 
 type AdvanceResult = { ok: true; state: Execution } | { ok: false; error: string };
 
-function clipSummary(value: string): string {
-  const max = LIMITS.checkpointSummaryBytes - 64;
+function utf8Preview(value: string, max: number): string {
   if (Buffer.byteLength(value, "utf8") <= max) return value;
   let clipped = value;
-  while (Buffer.byteLength(clipped, "utf8") > max - 3) clipped = clipped.slice(0, Math.max(0, clipped.length - 16));
+  while (clipped.length > 0 && Buffer.byteLength(clipped, "utf8") > max - 3) clipped = clipped.slice(0, Math.max(0, clipped.length - 16));
   return `${clipped}...`;
+}
+
+function clipSummary(value: string): string {
+  return utf8Preview(value, LIMITS.checkpointSummaryBytes - 64);
 }
 
 function skipBlock(state: Execution, parentKey: string, guard: GuardClause, blockId: string, isPlan: boolean): Execution {
@@ -160,73 +163,49 @@ function skipBlock(state: Execution, parentKey: string, guard: GuardClause, bloc
   return { ...withCp, plans };
 }
 
-function iterationSummaries(state: Execution, loopKey: string, iterations: number): readonly string[] {
-  const summaries: string[] = [];
-  for (let iteration = 1; iteration <= iterations; iteration += 1) {
-    const scoped = scopeKey(loopKey, iteration);
-    for (const [key, checkpoint] of Object.entries(state.checkpoints)) {
-      if (key.startsWith(`${scoped}/`)) summaries.push(clipSummary(checkpoint.summary));
-    }
-  }
-  return summaries.slice(0, LIMITS.checkpointListItems);
-}
-
-function iterationRecords(state: Execution, block: LoopBlock, loopKey: string, iterations: number, withOutputs: boolean): readonly JsonValue[] {
-  const items = state.loops[loopKey]?.items;
-  const records: JsonValue[] = [];
-  for (let iteration = 1; iteration <= iterations; iteration += 1) {
-    const scoped = `${scopeKey(loopKey, iteration)}/`;
-    const record: Record<string, JsonValue> = { iteration };
-    if (block.mode === "for-each" && items?.[iteration - 1] !== undefined) record.item = items[iteration - 1];
-    if (withOutputs) {
-      const outputs: Record<string, JsonValue> = {};
-      for (const key of state.checkpointOrder) {
-        if (!key.startsWith(scoped)) continue;
-        const data = state.checkpoints[key]?.data;
-        if (data !== undefined) outputs[lastSegment(key)] = data;
-      }
-      if (Object.keys(outputs).length > 0) record.outputs = outputs;
-    }
-    records.push(record as JsonValue);
-  }
-  return records;
-}
-
-function finishLoop(state: Execution, loopKey: string, block: LoopBlock): { state: Execution } | { error: string } {
+/**
+ * The loop aggregate has one fixed shape: mode, iteration count, and per-iteration records
+ * whose outputs are artifact references into the run's store. The schema never varies with
+ * output size, so downstream consumers always know what a binding resolves to.
+ */
+function finishLoop(state: Execution, loopKey: string, block: LoopBlock, store: ArtifactSinkProvider): { state: Execution } | { error: string } {
   const loopState = state.loops[loopKey];
   if (!loopState) return { error: `loop frame ${loopKey} has no loop state` };
   const iterations = block.mode === "for-each" ? loopState.items?.length ?? 0 : loopState.iteration;
-  const base: Record<string, JsonValue> = { mode: block.mode, iterations };
-  if (loopState.exhausted) base.exhausted = true;
-  const summaries = iterationSummaries(state, loopKey, iterations);
-  const fullRecords = iterationRecords(state, block, loopKey, iterations, true);
-  const itemRecords = fullRecords.map((record) => {
-    const copy = { ...(record as Record<string, JsonValue>) };
-    delete copy.outputs;
-    return copy as JsonValue;
-  });
-  const candidates: readonly JsonValue[] = [
-    ...(fullRecords.length ? [{ ...base, results: [...fullRecords] } as JsonValue] : []),
-    ...(block.mode === "for-each" && fullRecords.length ? [{ ...base, results: [...itemRecords] } as JsonValue] : []),
-    ...(summaries.length ? [{ ...base, results: [...summaries] } as JsonValue] : []),
-    ...(iterations === 0 ? [base as JsonValue] : []),
-  ];
-  const label = `loop ${loopKey}`;
+  const sink = store.sinkFor(loopKey);
+  const results: JsonValue[] = [];
+  for (let iteration = 1; iteration <= iterations; iteration += 1) {
+    const record: Record<string, JsonValue> = { iteration };
+    const item = loopState.items?.[iteration - 1];
+    if (block.mode === "for-each" && item !== undefined) record.item = item;
+    const outputs: Record<string, JsonValue> = {};
+    const scoped = `${scopeKey(loopKey, iteration)}/`;
+    for (const key of state.checkpointOrder) {
+      if (!key.startsWith(scoped)) continue;
+      const data = state.checkpoints[key]?.data;
+      if (data === undefined) continue;
+      const stepId = lastSegment(key);
+      try {
+        outputs[stepId] = sink.publishJson(`${iteration}/${stepId}`, data) as unknown as JsonValue;
+      } catch (error) {
+        return { error: `loop ${block.id} could not store the iteration ${iteration} output of ${stepId}: ${error instanceof Error ? error.message : String(error)}` };
+      }
+    }
+    record.outputs = outputs;
+    results.push(record as JsonValue);
+  }
+  const data: Record<string, JsonValue> = { mode: block.mode, iterations };
+  if (loopState.exhausted) data.exhausted = true;
+  data.results = results as JsonValue;
   const summaryText = loopState.exhausted
     ? `Loop ${block.id} reached its cap of ${block.maxIterations} iterations without the condition holding.`
     : `Loop ${block.id} completed ${iterations} iteration${iterations === 1 ? "" : "s"}.`;
-  const problems: string[] = [];
-  for (const candidate of candidates) {
-    const checkpoint: Checkpoint = { summary: clipSummary(summaryText), data: candidate };
-    const errors = checkpointErrors(checkpoint, label);
-    if (errors.length === 0) {
-      const loops = { ...state.loops };
-      delete loops[loopKey];
-      return { state: withCheckpoint({ ...state, loops }, loopKey, checkpoint) };
-    }
-    problems.push(...errors);
-  }
-  return { error: joined(problems) ?? `${label} aggregate exceeded its checkpoint budget` };
+  const checkpoint: Checkpoint = { summary: clipSummary(summaryText), data: data as JsonValue };
+  const errors = checkpointErrors(checkpoint, `loop ${loopKey}`);
+  if (errors.length > 0) return { error: joined(errors) ?? `loop ${loopKey} aggregate exceeded its checkpoint budget` };
+  const loops = { ...state.loops };
+  delete loops[loopKey];
+  return { state: withCheckpoint({ ...state, loops }, loopKey, checkpoint) };
 }
 
 function afterBodyComplete(workflow: Workflow, state: Execution, loopFrame: LoopFrame): { state: Execution } | { error: string } {
@@ -250,7 +229,7 @@ function afterBodyComplete(workflow: Workflow, state: Execution, loopFrame: Loop
   return { state: { ...state, loops: { ...state.loops, [loopKey]: { ...loopState, iteration: completed + 1 } } } };
 }
 
-export function advance(workflow: Workflow, state: Execution): AdvanceResult {
+export function advance(workflow: Workflow, state: Execution, store?: ArtifactSinkProvider): AdvanceResult {
   const stack = [...state.stack];
   let working: Execution = state;
   let steps = 0;
@@ -301,7 +280,8 @@ export function advance(workflow: Workflow, state: Execution): AdvanceResult {
           return { ok: false, error: `loop ${block.id} exceeded its iteration cap of ${block.maxIterations}` };
         }
         if (loopState.done || (block.mode === "for-each" && loopState.iteration > (loopState.items?.length ?? 0))) {
-          const finished = finishLoop(working, top.key, block);
+          if (!store) return { ok: false, error: `loop ${block.id} cannot record its aggregate: the run has no artifact store` };
+          const finished = finishLoop(working, top.key, block, store);
           if ("error" in finished) return { ok: false, error: finished.error };
           stack.pop();
           working = finished.state;
@@ -484,8 +464,8 @@ function outputContractFor(workflow: Workflow, state: Execution, leaf: Frame): s
   return node ? workflow.operators.get(node.operator)?.output : undefined;
 }
 
-function finishAdvance(workflow: Workflow, state: Execution, stack: readonly Frame[]): EngineResult {
-  const advanced = advance(workflow, { ...state, stack });
+function finishAdvance(workflow: Workflow, state: Execution, stack: readonly Frame[], store?: ArtifactSinkProvider): EngineResult {
+  const advanced = advance(workflow, { ...state, stack }, store);
   if (!advanced.ok) return fail(advanced.error);
   if (advanced.state.stack.length === 0) {
     return { ok: true, state: { ...advanced.state, stack: [], status: "completed" }, effect: { kind: "complete" } };
@@ -493,21 +473,33 @@ function finishAdvance(workflow: Workflow, state: Execution, stack: readonly Fra
   return leafEffect(workflow, advanced.state, { kind: "deliver" });
 }
 
+function runnerOfLeaf(workflow: Workflow, leaf: Frame): RunnerKind {
+  if (leaf.kind === "task") return blockOf(workflow, leaf.blockId)?.kind === "script" ? "process" : "agent";
+  return "agent";
+}
+
+export function enterInvocation(workflow: Workflow, state: Execution, leaf: Frame, status: NodeStatus = "running", attempt?: number): Execution {
+  const invocation: NodeInvocation = {
+    blockId: leaf.blockId,
+    key: leaf.key,
+    runner: runnerOfLeaf(workflow, leaf),
+    status,
+    attempt: attempt ?? ("attempt" in leaf ? leaf.attempt : 1),
+  };
+  const invocations = upsertInvocation(state, leaf.key, invocation);
+  return invocations === state.invocations ? state : { ...state, invocations };
+}
+
 function leafEffect(workflow: Workflow, state: Execution, fallback: Effect): EngineResult {
   const leaf = state.stack[state.stack.length - 1];
   if (leaf?.kind === "task") {
     const block = blockOf(workflow, leaf.blockId);
     if (block?.kind === "script") {
-      const invocations = upsertInvocation(state, leaf.key, {
-        blockId: leaf.blockId,
-        key: leaf.key,
-        runner: "process",
-        status: "running",
-        attempt: leaf.attempt,
-      });
-      const withInvocation: Execution = invocations === state.invocations ? state : { ...state, invocations };
-      return { ok: true, state: withInvocation, effect: { kind: "run-process", key: leaf.key, node: processSpecOf(block) } };
+      return { ok: true, state: enterInvocation(workflow, state, leaf), effect: { kind: "run-process", key: leaf.key, node: processSpecOf(block) } };
     }
+  }
+  if (leaf && (leaf.kind === "task" || leaf.kind === "plan" || leaf.kind === "node")) {
+    return { ok: true, state: enterInvocation(workflow, state, leaf), effect: fallback };
   }
   return { ok: true, state, effect: fallback };
 }
@@ -589,7 +581,7 @@ function completePlanCreation(workflow: Workflow, state: Execution, leaf: Extrac
   const planKeyed = withCheckpoint(state, leaf.key, stripPlanPayload(outcome.checkpoint));
   const plans = { ...planKeyed.plans, [leaf.key]: execution };
   const stack: Frame[] = [...state.stack.slice(0, -1), { kind: "plan", blockId: block.id, key: leaf.key, mode: "execute" as const, attempt: 1 }];
-  return finishAdvance(workflow, { ...planKeyed, plans }, stack);
+  return finishAdvance(workflow, enterInvocation(workflow, { ...planKeyed, plans }, leaf, "succeeded"), stack);
 }
 
 function stripPlanPayload(checkpoint: Checkpoint): Checkpoint {
@@ -631,10 +623,10 @@ function completeNode(workflow: Workflow, state: Execution, leaf: NodeFrame, out
       resultOperators: { ...(execution.resultOperators ?? {}), [node.id]: node.operator },
     },
   };
-  return finishAdvance(workflow, { ...state, plans }, state.stack.slice(0, -1));
+  return finishAdvance(workflow, enterInvocation(workflow, { ...state, plans }, leaf, "succeeded"), state.stack.slice(0, -1));
 }
 
-export function start(workflow: Workflow, input: StartInput): EngineResult {
+export function start(workflow: Workflow, input: StartInput, store?: ArtifactSinkProvider): EngineResult {
   if (workflow.root.children.length === 0) return fail("workflow has no steps");
   if (Buffer.byteLength(input.target ?? "", "utf8") > LIMITS.targetBytes) {
     return fail(`target exceeds ${LIMITS.targetBytes} bytes; narrow it and start again`);
@@ -652,19 +644,19 @@ export function start(workflow: Workflow, input: StartInput): EngineResult {
     loops: {},
   };
   const entered: Execution = { ...base, stack: [{ kind: "sequence", blockId: workflow.root.id, key: workflow.root.id, index: 0 }] };
-  const advanced = advance(workflow, entered);
+  const advanced = advance(workflow, entered, store);
   if (!advanced.ok) return fail(advanced.error);
   if (advanced.state.stack.length === 0) return fail("workflow has no runnable steps");
   return leafEffect(workflow, advanced.state, { kind: "deliver" });
 }
 
-export function transition(workflow: Workflow, state: Execution, event: WorkflowEvent): EngineResult {
+export function transition(workflow: Workflow, state: Execution, event: WorkflowEvent, store?: ArtifactSinkProvider): EngineResult {
   if (state.status !== "active") return fail("execution is not active");
   if (event.type === "abort") {
     return { ok: true, state: { ...state, status: "aborted" }, effect: { kind: "aborted" } };
   }
   if (event.type === "process-exit") {
-    return applyProcessExit(workflow, state, event);
+    return applyProcessExit(workflow, state, event, store);
   }
   const outcome = event.outcome;
   const leaf = state.stack[state.stack.length - 1];
@@ -686,16 +678,17 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
   switch (outcome.status) {
     case "blocked": {
       const checkpoint = leaf.kind === "plan" ? stripPlanPayload(outcome.checkpoint) : outcome.checkpoint;
-      return { ok: true, state: withCheckpoint(state, leaf.key, checkpoint), effect: { kind: "stay" } };
+      const waiting = enterInvocation(workflow, state, leaf, "waiting");
+      return { ok: true, state: withCheckpoint(waiting, leaf.key, checkpoint), effect: { kind: "stay" } };
     }
     case "needs-work":
       return applyNeedsWork(workflow, state, outcome);
     case "completed": {
       if (leaf.kind === "plan") return completePlanCreation(workflow, state, leaf, outcome);
       if (leaf.kind === "node") return completeNode(workflow, state, leaf, outcome);
-      const committed = withCheckpoint(state, leaf.key, outcome.checkpoint);
+      const committed = withCheckpoint(enterInvocation(workflow, state, leaf, "succeeded"), leaf.key, outcome.checkpoint);
       const popped: Execution = { ...committed, stack: state.stack.slice(0, -1) };
-      return finishAdvance(workflow, popped, popped.stack);
+      return finishAdvance(workflow, popped, popped.stack, store);
     }
   }
 }
@@ -703,11 +696,12 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
 interface ProcessExitEvent {
   readonly key: string;
   readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean; readonly spawnError?: string };
+  readonly store?: ArtifactSink;
 }
 
 const TEXT_STDOUT_BUDGET_BYTES = LIMITS.checkpointBytes - 256;
 
-function scriptStdoutValue(spec: import("../domain/workflow.ts").ScriptSpec, exit: ProcessExitEvent["exit"], key: string): { value: import("../domain/json.ts").JsonValue } | { error: string } {
+function scriptStdoutValue(spec: import("../domain/workflow.ts").ScriptSpec, exit: ProcessExitEvent["exit"], key: string, store?: ArtifactSink): { value: import("../domain/json.ts").JsonValue } | { error: string } {
   if (spec.stdout === "json") {
     try {
       const parsed = JSON.parse(exit.stdout) as unknown;
@@ -718,16 +712,20 @@ function scriptStdoutValue(spec: import("../domain/workflow.ts").ScriptSpec, exi
     }
   }
   if (spec.stdout === "text") {
-    let stdout = exit.stdout;
-    if (Buffer.byteLength(stdout, "utf8") > TEXT_STDOUT_BUDGET_BYTES) {
-      while (stdout.length > 0 && Buffer.byteLength(stdout, "utf8") > TEXT_STDOUT_BUDGET_BYTES) stdout = stdout.slice(0, -16);
+    const stdout = exit.stdout;
+    if (Buffer.byteLength(stdout, "utf8") <= TEXT_STDOUT_BUDGET_BYTES) return { value: { stdout } };
+    if (!store) {
+      let clipped = stdout;
+      while (clipped.length > 0 && Buffer.byteLength(clipped, "utf8") > TEXT_STDOUT_BUDGET_BYTES) clipped = clipped.slice(0, -16);
+      return { value: { stdout: clipped } };
     }
-    return { value: { stdout } };
+    const ref = store.publishText("output", stdout);
+    return { value: { stdout: utf8Preview(stdout, 192), artifact: ref as unknown as JsonValue } };
   }
   return { value: {} };
 }
 
-function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessExitEvent): EngineResult {
+function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessExitEvent, store?: ArtifactSinkProvider): EngineResult {
   const leaf = state.stack[state.stack.length - 1];
   if (!leaf || leaf.kind !== "task") return fail(`process exit ${event.key} has no script leaf`);
   const block = blockOf(workflow, leaf.blockId);
@@ -736,12 +734,16 @@ function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessEx
   const spec = block.script;
   const accepted = !event.exit.timedOut && event.exit.code !== undefined && spec.acceptedExitCodes.includes(event.exit.code);
   if (accepted) {
-    const parsed = scriptStdoutValue(spec, event.exit, leaf.key);
+    const parsed = scriptStdoutValue(spec, event.exit, leaf.key, event.store);
     if ("error" in parsed) return scriptFailure(workflow, state, leaf, block, parsed.error);
     const contract = contractErrorFor(workflow, block.output, parsed.value, `script ${leaf.key} output`);
     if (contract) return scriptFailure(workflow, state, leaf, block, contract);
     const truncated = event.exit.truncated ? " (captured output was truncated)" : "";
-    const checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}.${truncated}`), data: parsed.value };
+    let checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}.${truncated}`), data: parsed.value };
+    if (event.store && canonicalJsonBytes(checkpoint as unknown as JsonValue) > LIMITS.checkpointBytes) {
+      const ref = event.store.publishJson("output", parsed.value);
+      checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}; its ${ref.size}-byte output was published to the artifact store as ${ref.checksum}.${truncated}`), data: ref as unknown as JsonValue };
+    }
     try {
       validateCheckpoint(checkpoint, `script ${leaf.key}`);
     } catch (error) {
@@ -749,7 +751,7 @@ function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessEx
     }
     const succeeded = scriptInvocation(withCheckpoint(state, leaf.key, checkpoint), leaf, "succeeded");
     const popped: Execution = { ...succeeded, stack: state.stack.slice(0, -1) };
-    return finishAdvance(workflow, popped, popped.stack);
+    return finishAdvance(workflow, popped, popped.stack, store);
   }
   const reason = event.exit.timedOut
     ? `timed out after ${spec.timeoutMs}ms`
