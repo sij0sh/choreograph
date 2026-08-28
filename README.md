@@ -237,8 +237,18 @@ There are two kinds.
 
 Each iteration writes its body checkpoint under a scoped key such as
 `root/review-files/loop[2]/review-one`. On completion the loop writes one
-aggregate checkpoint at its own key with the mode, iteration count, and
-per-iteration summaries. Invalidating a producer rewinds the whole loop.
+aggregate checkpoint at its own key. The aggregate always has the same shape:
+the mode, the iteration count, an `exhausted` flag when a cap was hit, and one
+record per iteration carrying the item (for `for_each`) and an `outputs` map of
+artifact references into the run's artifact store. The shape never varies with
+output size, so a downstream consumer always knows what a binding resolves to.
+
+Downstream bindings resolve those references transparently: script inputs are
+materialized into the workspace as files, and task inputs are rendered with the
+stored value inlined. This includes references reached through `$item`. A loop
+requires the run's artifact store to record its aggregate; runs without one
+(definitions that exist only in memory) cannot finish a loop. Invalidating a
+producer rewinds the whole loop.
 
 ### Plan blocks
 
@@ -566,6 +576,28 @@ run's full tool set instead of the narrowed active one.
 
 `workflow_transition` and `workflow_abort` remain available during a run. An
 unknown tool name has no effect and produces a warning at session start.
+
+### Generated workflows
+
+The model can also run workflows that are not on disk. Two tools are always
+available while the session is idle:
+
+- `workflow_run_definition` starts a workflow from a bounded inline
+  definition. The object has the exact shape
+  `{ name, title?, description, steps: [{ id, instruction, done? }] }`; ids
+  are kebab-case, each step carries its full instruction text, and `done`
+  lists that step's completion criteria. choreograph validates the
+  definition strictly (at most 16 steps, 128,000 bytes total), compiles it in
+  memory, and starts the run immediately. The definition is appended to the
+  session branch, so the run survives reloads and resumes like any other.
+- `workflow_promote` persists a workflow started this session into the
+  workflows directory as a normal file-backed workflow. Promotion is an
+  explicit action, refuses existing directories, and the written workflow is
+  discovered when workflows load next.
+
+Both tools are dropped while a run is active and return once the session is
+idle again. Starting a run whose name collides with a discovered workflow is
+refused.
 
 ## Limits
 
