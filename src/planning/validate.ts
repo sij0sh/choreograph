@@ -58,7 +58,8 @@ export function validateDynamicPlan(value: unknown, input: PlanValidationInput):
     if (seen.has(node.id)) errors.push(`${label}.id duplicates ${node.id}`);
     if (input.retainedResultIds.has(node.id)) errors.push(`${label}.id ${node.id} is already a retained result; new revisions must use new ids for new work`);
     seen.add(node.id);
-    if (typeof node.operator !== "string" || !input.operators.get(node.operator) || !allowed.has(node.operator)) {
+    const operator = typeof node.operator === "string" ? input.operators.get(node.operator) : undefined;
+    if (!operator || !allowed.has(node.operator as string)) {
       errors.push(`${label}.operator must name one of the block's trusted operators`);
       return;
     }
@@ -67,6 +68,7 @@ export function validateDynamicPlan(value: unknown, input: PlanValidationInput):
     } else if (Buffer.byteLength(node.objective, "utf8") > LIMITS.planNodeObjectiveBytes) {
       errors.push(`${label}.objective exceeds ${LIMITS.planNodeObjectiveBytes} bytes`);
     }
+    const processOperator = operator.script !== undefined;
     let dependsOn: string[] | undefined;
     let evidence: string[] | undefined;
     let done: string[] | undefined;
@@ -78,7 +80,10 @@ export function validateDynamicPlan(value: unknown, input: PlanValidationInput):
       errors.push(error instanceof Error ? error.message : String(error));
       return;
     }
-    if (!done || done.length === 0) errors.push(`${label}.done must be a non-empty list`);
+    if (processOperator && ((done?.length ?? 0) > 0 || (evidence?.length ?? 0) > 0)) {
+      errors.push(`${label} runs process operator "${node.operator}"; process nodes take neither "done" nor "evidence"`);
+    }
+    if (!processOperator && (!done || done.length === 0)) errors.push(`${label}.done must be a non-empty list`);
     if (dependsOn?.includes(node.id as string)) errors.push(`${label}.dependsOn must not include its own node`);
     if (dependsOn) {
       const earlier = new Set(nodes.map((known) => known.id));
@@ -101,7 +106,7 @@ export function validateDynamicPlan(value: unknown, input: PlanValidationInput):
       objective: node.objective as string,
       ...(dependsOn ? { dependsOn } : {}),
       ...(evidence ? { evidence } : {}),
-      ...(done ? { done: done! } : {}),
+      done: done ?? [],
     } as PlanNode);
   });
   if (errors.length > 0) return { errors };

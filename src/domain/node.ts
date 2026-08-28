@@ -55,14 +55,20 @@ export interface ArtifactRef {
   readonly mediaType: string;
 }
 
-export function processSpecOf(block: import("./workflow.ts").ScriptBlock, workflowDir?: string): ProcessNodeSpec {
-  const cwd = workflowDir === undefined ? block.script.cwd : resolve(workflowDir, block.script.cwd);
+export function processSpecFor(script: ScriptSpec, blockId: string, workflowDir?: string): ProcessNodeSpec {
+  const cwd = workflowDir === undefined ? script.cwd : resolve(workflowDir, script.cwd);
   return {
     runner: "process",
-    blockId: block.id,
-    spec: block.script,
+    blockId,
+    spec: script,
     cwd,
     ...(workflowDir === undefined ? {} : { containmentRoot: workflowDir }),
+  };
+}
+
+export function processSpecOf(block: import("./workflow.ts").ScriptBlock, workflowDir?: string): ProcessNodeSpec {
+  return {
+    ...processSpecFor(block.script, block.id, workflowDir),
     ...(block.inputs ? { inputs: block.inputs } : {}),
   };
 }

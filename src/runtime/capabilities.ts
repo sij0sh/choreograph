@@ -1,4 +1,4 @@
-import { currentPosition, scriptLeafAt } from "../engine/interpreter.ts";
+import { currentPosition, processLeafAt } from "../engine/interpreter.ts";
 import type { Execution } from "../domain/execution.ts";
 import type { Workflow } from "../domain/workflow.ts";
 
@@ -29,6 +29,6 @@ export function effectiveTools(workflow: Workflow, state: Execution, baseline: r
     }
   }
   const names = [...new Set([...tools, ...CONTROL_TOOLS])];
-  if (scriptLeafAt(workflow, state)) names.push(RETRY_TOOL_NAME);
+  if (processLeafAt(workflow, state)) names.push(RETRY_TOOL_NAME);
   return names;
 }

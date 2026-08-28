@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { start, transition } from "../../src/engine/interpreter.ts";
+import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
 import { blocked, completed, cp, loop, memoryStore, needsWork, script, sequence, task, workflow } from "./helpers.mjs";
 
 function recordingStore() {
@@ -160,6 +161,8 @@ test("output contract violation applies repair", () => {
   assert.ok(result.ok, result.ok ? "" : result.error);
   assert.equal(result.effect.kind, "stay", "with retries exhausted it blocks");
   assert.match(result.state.checkpoints["root/emit"].summary, /violates|invalid|missing/i);
+  const restored = validateAgainstWorkflow(wf, result.state);
+  assert.ok(restored.ok, restored.ok ? "" : restored.error);
 });
 
 test("output contract satisfaction completes with the contract data", () => {
@@ -196,7 +199,7 @@ test("process exit for a foreign key is rejected", () => {
     exit: { code: 0, timedOut: false, stdout: "", stderr: "", truncated: false },
   });
   assert.ok(!next.ok);
-  assert.match(next.error, /does not match the script leaf/);
+  assert.match(next.error, /does not match the process leaf/);
 });
 
 test("guarded script steps are skipped like tasks", () => {
@@ -328,4 +331,66 @@ test("a loop with a script body records its aggregate through the process-exit s
   const ref = aggregate.data.results[0].outputs["apply-fix"];
   assert.equal(ref.output, "1/apply-fix");
   assert.deepEqual(store.published.at(-1).value, { exitCode: 0 });
+});
+
+test("the configured stderr mode is honored in the checkpoint data", () => {
+  const exit = (stderr) => ({ type: "process-exit", key: "root/emit", exit: { code: 0, timedOut: false, stdout: "ok", stderr, truncated: false } });
+  const runOnce = (options, event) => {
+    const wf = workflow([script("emit", options)]);
+    return transition(wf, start(wf, { runId: "r1" }).state, event);
+  };
+  const none = runOnce(undefined, exit("boom"));
+  assert.ok(none.ok, none.ok ? "" : none.error);
+  assert.deepEqual(none.state.checkpoints["root/emit"].data, { stdout: "ok" }, "the default none mode keeps stderr out of the data");
+  const text = runOnce({ spec: { stderr: "text" } }, exit("boom"));
+  assert.ok(text.ok, text.ok ? "" : text.error);
+  assert.deepEqual(text.state.checkpoints["root/emit"].data, { stdout: "ok", stderr: "boom" }, "text mode adds the captured stderr");
+  const json = runOnce({ spec: { stderr: "json" } }, exit('{"level":"warn"}'));
+  assert.ok(json.ok, json.ok ? "" : json.error);
+  assert.deepEqual(json.state.checkpoints["root/emit"].data, { stdout: "ok", stderr: { level: "warn" } }, "json mode parses stderr into the data");
+});
+
+test("stderr that is not valid json in json mode fails the step", () => {
+  const wf = workflow([script("emit", { spec: { stderr: "json" }, recovery: { max_attempts: 1, strategy: ["block"] } })]);
+  const started = start(wf, { runId: "r1" });
+  const next = transition(wf, started.state, {
+    type: "process-exit",
+    key: "root/emit",
+    exit: { code: 0, timedOut: false, stdout: "ok", stderr: "not json", truncated: false },
+  });
+  assert.ok(next.ok, next.ok ? "" : next.error);
+  assert.equal(next.effect.kind, "stay");
+  assert.match(next.state.checkpoints["root/emit"].summary, /stderr is not valid JSON/);
+});
+
+test("text stdout clipped to the checkpoint budget sets the truncation flag", () => {
+  const wf = workflow([script("emit")]);
+  const started = start(wf, { runId: "r1" });
+  const next = transition(wf, started.state, {
+    type: "process-exit",
+    key: "root/emit",
+    exit: { code: 0, timedOut: false, stdout: "x".repeat(20_000), stderr: "", truncated: false },
+  });
+  assert.ok(next.ok, next.ok ? "" : next.error);
+  const checkpoint = next.state.checkpoints["root/emit"];
+  assert.equal(checkpoint.data.stdoutTruncated, true, "the silent clip is flagged in the data");
+  assert.ok(Buffer.byteLength(checkpoint.data.stdout, "utf8") <= 16_128, "the clip stays within the text budget");
+  assert.match(checkpoint.summary, /captured output was truncated/);
+});
+
+test("previewed text stdout with a store also sets the truncation flag", () => {
+  const wf = workflow([script("chatter")]);
+  const started = start(wf, { runId: "r1" });
+  const store = recordingStore();
+  const next = transition(wf, started.state, {
+    type: "process-exit",
+    key: "root/chatter",
+    exit: { code: 0, timedOut: false, stdout: "y".repeat(20_000), stderr: "", truncated: false },
+    store,
+  });
+  assert.ok(next.ok, next.ok ? "" : next.error);
+  const data = next.state.checkpoints["root/chatter"].data;
+  assert.equal(data.stdoutTruncated, true, "the preview is flagged in the data");
+  assert.match(data.artifact.checksum, /^sha256-[0-9a-f]{64}$/);
+  assert.equal(store.published[0].text, "y".repeat(20_000), "the full text is still preserved in the store");
 });

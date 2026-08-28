@@ -289,3 +289,23 @@ test("a persisted run restores through the script position", async () => {
   const prompt = revived.handlers.get("before_agent_start")({ systemPrompt: "base" });
   assert.match(prompt.systemPrompt, /# steps\/deliver\.md/, "the restored run re-drives the script and continues at the next task");
 });
+
+test("workflow-inspect shows completed history by run id", async () => {
+  const ext = buildExtension(LEGACY);
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "inspect history" }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+  const transition = ext.tools.get("workflow_transition");
+  await transition.execute("id", { status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+  await transition.execute("id", { status: "completed", checkpoint: { summary: "delivered" } }, undefined, () => {}, ctx);
+  const runId = ext.entries.find((entry) => entry.customType === "choreograph-events" && entry.data.type === "run-started").data.runId;
+
+  await ext.commands.get("workflow-inspect").handler(runId, ctx);
+  const history = ext.notices.at(-1);
+  assert.equal(history.level, "info");
+  assert.match(history.message, new RegExp(`Run: ${runId}`));
+  assert.match(history.message, /status=succeeded/);
+  assert.match(history.message, /history:[\s\S]*run .* completed/);
+});

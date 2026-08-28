@@ -66,3 +66,14 @@ test("AgentRunner awaits external completion instead of resolving immediately", 
   assert.equal(bad.status, "failed");
   assert.match(bad.reason, /AgentRunner does not run process specs/);
 });
+
+test("the stdin budget counts UTF-8 bytes, not characters", async () => {
+  const runner = new ProcessRunner();
+  const inputs = { note: "é".repeat(13_000) };
+  const text = `${JSON.stringify(inputs)}\n`;
+  assert.ok(text.length < 24_576, "precondition: the character count stays under the budget");
+  assert.ok(Buffer.byteLength(text, "utf8") > 24_576, "precondition: the byte count exceeds the budget");
+  const result = await runner.execute(invocation, processSpecOf(scriptBlock), { inputs });
+  assert.equal(result.status, "failed", "the oversized byte payload is refused before spawn");
+  assert.match(result.reason, /bytes, over the 24576-byte stdin budget/);
+});

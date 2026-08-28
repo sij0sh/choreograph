@@ -75,6 +75,7 @@ export interface CompiledOperator {
   readonly description: string;
   readonly tools?: readonly string[];
   readonly output?: string;
+  readonly script?: ScriptSpec;
   readonly content: ContentRef;
 }
 

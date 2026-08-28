@@ -209,14 +209,22 @@ Every block id must be unique within the workflow and match
 
 ### Loop blocks
 
-A loop block runs a single `run` step body repeatedly, under a hard cap.
-There are two kinds.
+A loop block runs its body repeatedly, under a hard cap. There are two kinds.
 
 ```yaml
 - id: review-files
   for_each:
     items: { from: gather, select: /data/files }
-    body: { run: steps/review-one.md }
+    body:
+      steps:
+        - id: read-one
+          run: steps/review-one.md
+          inputs: { item: { from: "$item" } }
+        - id: check-one
+          script:
+            argv: [node, check-one.mjs]
+            stdout: json
+          inputs: { report: { from: read-one } }
     maxItems: 8
 
 - id: fix-until-green
@@ -230,7 +238,7 @@ There are two kinds.
 |---|---:|---|
 | `for_each` or `repeat_until` | Yes | Chooses the loop kind; a step declares at most one. |
 | `items` | `for_each` | Input binding that must resolve to a list of at most `maxItems` JSON values. Materialized once at loop start. |
-| `body` | Yes | One step entry with `run` only. |
+| `body` | Yes | Either one `run` step (single-step form) or a `steps:` list of 1 to 8 task, script, or process-operator entries. Each entry uses its normal per-kind fields and may bind `$item` or any earlier step. Nested loops and `plan:` blocks are not accepted inside a body. |
 | `maxItems` / `maxIterations` | Yes | Integer 1 to 8. The loop finishes when items run out or the cap is reached. |
 | `when` (inside `repeat_until`) | `repeat_until` | Guard evaluated after each iteration, do-while style. Cap exhaustion finishes the loop and marks the aggregate `exhausted: true`. |
 | `id`, `inputs`, `repair`, `when` (step-level) | No | Same meaning as for tasks; step-level `when` guards skip the whole loop. |
@@ -247,8 +255,12 @@ Downstream bindings resolve those references transparently: script inputs are
 materialized into the workspace as files, and task inputs are rendered with the
 stored value inlined. This includes references reached through `$item`. A loop
 requires the run's artifact store to record its aggregate; runs without one
-(definitions that exist only in memory) cannot finish a loop. Invalidating a
-producer rewinds the whole loop.
+(definitions that exist only in memory) cannot finish a loop. Recovery is
+per iteration: a `retry` re-runs the failed body step in place, and an
+`invalidate` targeting body steps re-runs only the affected steps of the
+current iteration, leaving earlier iterations untouched. An invalidation that
+reaches outside the loop body (or is consumed outside it) rewinds the whole
+loop so every consumer re-runs against the new outputs.
 
 ### Plan blocks
 
@@ -356,8 +368,7 @@ Rules:
   the data, so downstream steps can bind them like any artifact reference. A
   capture file that cannot be read fails the step through its repair policy.
 - Script steps accept `id`, `script`, `repair`, `when`, `inputs`, and `output`.
-  They reject `run`, `tools`, `done`, `plan`, `for_each`, and `repeat_until`, and
-  cannot appear inside loop bodies.
+  They reject `run`, `tools`, `done`, `plan`, `for_each`, and `repeat_until`.
 - Declared `inputs` are resolved from earlier artifacts like task inputs, then
   delivered to the process as one JSON object (plus a trailing newline) on
   stdin. There is no implicit interpolation into `argv` or `env`; a script that
@@ -370,9 +381,10 @@ Rules:
 
 ### Operators
 
-Operators are trusted instruction files under `operators/`. The file stem is
+Operators are trusted definitions under `operators/`. The file stem is
 the operator id. Plan creation sees only each operator's id and description.
-Node execution also receives that operator's Markdown body.
+A model operator's node execution also receives that operator's Markdown body;
+a process operator's node runs as a bounded local process with no model turn.
 
 ```markdown
 ---
@@ -383,10 +395,45 @@ tools: [read, grep]
 Follow the relevant call path. Record direct evidence for each conclusion.
 ```
 
-Operator frontmatter accepts `description`, optional `tools`, and optional
-`output`. The operator tool list further limits the tools available while its
-nodes run. `output` names the contract that each node's `checkpoint.data`
-must satisfy.
+Model operator frontmatter accepts `description`, optional `tools`, and
+optional `output`. The operator tool list further limits the tools available
+while its nodes run. `output` names the contract that each node's
+`checkpoint.data` must satisfy.
+
+A process operator replaces the instruction body with a `script:` block that
+takes the same fields as a script step:
+
+```markdown
+---
+description: Fetch the deployment status from the local service.
+output: deploy-status
+script:
+  argv: [node, scripts/deploy-status.mjs]
+  stdout: json
+  timeoutMs: 30000
+---
+
+Deployment status probe. The Markdown body is never rendered.
+```
+
+Rules for process operators:
+
+- `description` is required (plan creation needs it) and `output` is optional.
+  `tools` is rejected: processes have no tool access.
+- Any step list, including a loop body's `steps:`, may invoke one as
+  `{ id: fetch-status, operator: deploy-status }`. The operator desugars to a
+  script step; it accepts `inputs`, `repair`, and `when`, and inherits the
+  operator's `output` contract. Model operators cannot use this step form.
+- A plan node using a process operator takes neither `done` nor `evidence`. It
+  runs when its `dependsOn` nodes are done, and its acceptance is the script's
+  exit code plus the `output` contract.
+- The node's dependency results are delivered as one JSON object (plus a
+  trailing newline) on stdin, keyed by dependency node id. The payload shares
+  the 24 KiB position input budget; an oversized payload applies the plan's
+  repair policy.
+- File captures (`files`) and durable stdout/stderr logs work exactly as for
+  script steps. A failure applies the plan block's `repair` policy, including
+  `replan`; after the policy is exhausted the run parks at the node.
 
 ## Artifacts and contracts
 
@@ -567,6 +614,23 @@ write any JSON value.
 moving between positions and resumes active runs from the current session
 branch. Snapshot format changes can make older active runs non-resumable; Pi
 shows a warning and leaves the session idle in that case.
+
+### Journal and progress view
+
+choreograph appends a bounded lifecycle journal to the session branch. Events
+cover run state, node readiness and outcomes, skipped nodes, retries, loop
+iterations, artifact publication, and bounded process logs. The run projection
+is rebuilt from those events, so the progress display and inspection output do
+not read interpreter frames.
+
+The progress view has `off`, `compact`, and `detailed` modes. Set the initial
+mode with `CHOREOGRAPH_TUI`, or run `/workflow-tui` to cycle modes. Detailed
+mode adds a hierarchy widget with node and loop states, attempts, current loop
+iteration, elapsed time, recent logs, artifacts, and failure reasons.
+
+Run `/workflow-inspect` to inspect the active run or the latest completed run in
+the current session branch. Pass a run id to `/workflow-inspect <run-id>` to
+select retained history for a specific run.
 
 ### Context epochs
 

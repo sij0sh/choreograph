@@ -105,6 +105,7 @@ export function compileWorkflow(workflow: Workflow, read: InstructionReader, wor
       description: operator.description,
       ...(operator.tools ? { tools: [...operator.tools] } : {}),
       ...(operator.output !== undefined ? { output: operator.output } : {}),
+      ...(operator.script ? { script: structuredClone(operator.script) } : {}),
       content: contentRef(operator.path, `operator ${id} file`),
     });
   }

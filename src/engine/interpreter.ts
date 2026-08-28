@@ -6,12 +6,12 @@ import { contractError as contractErrorFor } from "../domain/contract.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
 import { evaluateGuard, skipReason, type GuardClause } from "../domain/guard.ts";
-import type { LoopBlock, PlanBlock, ScriptBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
+import type { LoopBlock, OperatorDescriptor, PlanBlock, ScriptBlock, ScriptSpec, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { processSpecOf, type NodeInvocation, type NodeStatus, type RunnerKind } from "../domain/node.ts";
 import { upsertInvocation } from "../domain/execution.ts";
 import { isArtifactRef, resolveBinding, type ArtifactRef, type ArtifactSink, type ArtifactSinkProvider } from "../domain/artifacts.ts";
-import { canonicalJson, canonicalJsonBytes, isJsonValue, type JsonValue } from "../domain/json.ts";
+import { canonicalJsonBytes, isJsonValue, type JsonValue } from "../domain/json.ts";
 import { firstIncompleteNode } from "../planning/graph.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
 
@@ -28,7 +28,7 @@ export type TaskOutcome =
 type WorkflowEvent =
   | { readonly type: "outcome"; readonly outcome: TaskOutcome }
   | { readonly type: "abort" }
-  | { readonly type: "process-exit"; readonly key: string; readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean }; readonly files?: readonly ArtifactRef[]; readonly captureError?: string; readonly store?: ArtifactSink };
+  | ProcessExitEvent;
 
 export type Effect =
   | { readonly kind: "deliver" }
@@ -54,17 +54,21 @@ function isLeafFrame(frame: Frame): boolean {
   return frame.kind === "task" || frame.kind === "node" || (frame.kind === "plan" && frame.mode === "create");
 }
 
+export interface ProcessLeaf {
+  readonly key: string;
+  readonly blockId: string;
+  readonly script: ScriptSpec;
+  readonly inputs?: ScriptBlock["inputs"];
+  readonly planKey?: string;
+  readonly dependsOn?: readonly string[];
+}
+
 export function scriptLeafAt(workflow: Workflow, state: Execution): { key: string; block: ScriptBlock } | undefined {
   if (state.status !== "active") return undefined;
   const leaf = state.stack[state.stack.length - 1];
   if (!leaf || leaf.kind !== "task") return undefined;
   const block = blockOf(workflow, leaf.blockId);
   return block?.kind === "script" ? { key: leaf.key, block } : undefined;
-}
-
-function scriptBlockAt(workflow: Workflow, blockId: string): ScriptBlock | undefined {
-  const block = blockOf(workflow, blockId);
-  return block?.kind === "script" ? block : undefined;
 }
 
 function sequenceAt(workflow: Workflow, frame: SequenceFrame): SequenceBlock | undefined {
@@ -280,9 +284,6 @@ export function advance(workflow: Workflow, state: Execution, store?: ArtifactSi
         if (!block) return { ok: false, error: `frame ${top.key} does not name a loop` };
         const loopState = working.loops[top.key];
         if (!loopState) return { ok: false, error: `loop frame ${top.key} has no loop state` };
-        if (loopState.iteration > block.maxIterations) {
-          return { ok: false, error: `loop ${block.id} exceeded its iteration cap of ${block.maxIterations}` };
-        }
         if (loopState.done || (block.mode === "for-each" && loopState.iteration > (loopState.items?.length ?? 0))) {
           if (!store) return { ok: false, error: `loop ${block.id} cannot record its aggregate: the run has no artifact store` };
           const finished = finishLoop(working, top.key, block, store);
@@ -290,6 +291,9 @@ export function advance(workflow: Workflow, state: Execution, store?: ArtifactSi
           stack.pop();
           working = finished.state;
           continue;
+        }
+        if (loopState.iteration > block.maxIterations) {
+          return { ok: false, error: `loop ${block.id} exceeded its iteration cap of ${block.maxIterations}` };
         }
         const scoped = scopeKey(top.key, loopState.iteration);
         stack.push({ kind: "sequence", blockId: block.body.id, key: scoped, index: 0 });
@@ -477,8 +481,30 @@ function finishAdvance(workflow: Workflow, state: Execution, stack: readonly Fra
   return leafEffect(workflow, advanced.state, { kind: "deliver" });
 }
 
-function runnerOfLeaf(workflow: Workflow, leaf: Frame): RunnerKind {
+/** The script body of a plan node's operator, when that operator is process-backed. */
+function operatorScriptOf(workflow: Workflow, state: Execution, leaf: NodeFrame): { nodeId: string; operator: string; script: ScriptSpec; dependsOn?: readonly string[] } | undefined {
+  const execution = state.plans[planKeyOfNode(leaf)];
+  if (!execution || execution.blockId !== leaf.blockId) return undefined;
+  const node = execution.plan.nodes.find((entry) => entry.id === leaf.nodeId);
+  const script = node ? workflow.operators.get(node.operator)?.script : undefined;
+  return node && script ? { nodeId: node.id, operator: node.operator, script, ...(node.dependsOn ? { dependsOn: node.dependsOn } : {}) } : undefined;
+}
+
+export function processLeafAt(workflow: Workflow, state: Execution): ProcessLeaf | undefined {
+  const staticLeaf = scriptLeafAt(workflow, state);
+  if (staticLeaf) {
+    return { key: staticLeaf.key, blockId: staticLeaf.block.id, script: staticLeaf.block.script, ...(staticLeaf.block.inputs ? { inputs: staticLeaf.block.inputs } : {}) };
+  }
+  if (state.status !== "active") return undefined;
+  const leaf = state.stack[state.stack.length - 1];
+  if (!leaf || leaf.kind !== "node") return undefined;
+  const resolved = operatorScriptOf(workflow, state, leaf);
+  return resolved ? { key: leaf.key, planKey: planKeyOfNode(leaf), blockId: leaf.blockId, script: resolved.script, ...(resolved.dependsOn ? { dependsOn: resolved.dependsOn } : {}) } : undefined;
+}
+
+function runnerOfLeaf(workflow: Workflow, state: Execution, leaf: Frame): RunnerKind {
   if (leaf.kind === "task") return blockOf(workflow, leaf.blockId)?.kind === "script" ? "process" : "agent";
+  if (leaf.kind === "node") return operatorScriptOf(workflow, state, leaf) ? "process" : "agent";
   return "agent";
 }
 
@@ -486,7 +512,7 @@ export function enterInvocation(workflow: Workflow, state: Execution, leaf: Fram
   const invocation: NodeInvocation = {
     blockId: leaf.blockId,
     key: leaf.key,
-    runner: runnerOfLeaf(workflow, leaf),
+    runner: runnerOfLeaf(workflow, state, leaf),
     status,
     attempt: attempt ?? ("attempt" in leaf ? leaf.attempt : 1),
   };
@@ -506,17 +532,6 @@ function leafEffect(workflow: Workflow, state: Execution, fallback: Effect): Eng
     return { ok: true, state: enterInvocation(workflow, state, leaf), effect: fallback };
   }
   return { ok: true, state, effect: fallback };
-}
-
-function scriptInvocation(state: Execution, leaf: Extract<Frame, TaskFrame>, status: "waiting" | "succeeded" | "canceled"): Execution {
-  const invocations = upsertInvocation(state, leaf.key, {
-    blockId: leaf.blockId,
-    key: leaf.key,
-    runner: "process",
-    status,
-    attempt: leaf.attempt,
-  });
-  return invocations === state.invocations ? state : { ...state, invocations };
 }
 
 function resultOperatorsFor(previous: PlanExecution | undefined): { readonly operators: Record<string, string>; readonly error?: string } {
@@ -540,6 +555,10 @@ function hasContractBearingOperator(workflow: Workflow, operators: readonly stri
   return operators.some((id) => workflow.operators.get(id)?.output !== undefined);
 }
 
+function operatorResultContractError(workflow: Workflow, operator: OperatorDescriptor | undefined, data: JsonValue | undefined, label: string): string | undefined {
+  return operator?.script && isArtifactRef(data) ? undefined : contractErrorFor(workflow, operator?.output, data, label);
+}
+
 function retainedResultError(workflow: Workflow, block: PlanBlock, previous: PlanExecution | undefined, resultOperators: Readonly<Record<string, string>>): string | undefined {
   if (!previous) return undefined;
   const requiresMetadata = hasContractBearingOperator(workflow, block.operators);
@@ -555,7 +574,7 @@ function retainedResultError(workflow: Workflow, block: PlanBlock, previous: Pla
       continue;
     }
     if (!block.operators.includes(operatorId)) return `retained result ${id} uses operator ${operatorId}, which is not trusted by ${block.id}`;
-    const problem = contractErrorFor(workflow, operator.output, result.data, `retained result ${id}`);
+    const problem = operatorResultContractError(workflow, operator, result.data, `retained result ${id}`);
     if (problem) return problem;
   }
   return undefined;
@@ -611,7 +630,7 @@ function completeNode(workflow: Workflow, state: Execution, leaf: NodeFrame, out
   const criteriaError = checkCriteria(node.done, outcome.met ?? []);
   if (criteriaError) return fail(criteriaError);
   const operator = workflow.operators.get(node.operator);
-  const contractError = contractErrorFor(workflow, operator?.output, outcome.checkpoint.data, `node result ${node.id}`);
+  const contractError = operatorResultContractError(workflow, operator, outcome.checkpoint.data, `node result ${node.id}`);
   if (contractError) return fail(contractError);
   let result: Checkpoint;
   try {
@@ -619,15 +638,20 @@ function completeNode(workflow: Workflow, state: Execution, leaf: NodeFrame, out
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
   }
+  const checkpoints = { ...state.checkpoints };
+  delete checkpoints[leaf.key];
+  const completedState = state.checkpoints[leaf.key] === undefined
+    ? state
+    : { ...state, checkpoints, checkpointOrder: state.checkpointOrder.filter((key) => key !== leaf.key) };
   const plans = {
-    ...state.plans,
+    ...completedState.plans,
     [planKey]: {
       ...execution,
       results: { ...execution.results, [node.id]: result },
       resultOperators: { ...(execution.resultOperators ?? {}), [node.id]: node.operator },
     },
   };
-  return finishAdvance(workflow, enterInvocation(workflow, { ...state, plans }, leaf, "succeeded"), state.stack.slice(0, -1));
+  return finishAdvance(workflow, enterInvocation(workflow, { ...completedState, plans }, leaf, "succeeded"), state.stack.slice(0, -1));
 }
 
 export function start(workflow: Workflow, input: StartInput, store?: ArtifactSinkProvider): EngineResult {
@@ -668,6 +692,9 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
   if (leaf?.kind === "task" && blockOf(workflow, leaf.blockId)?.kind === "script") {
     return fail(`position ${leaf.key} is a script step; the runtime executes it and it does not accept transitions`);
   }
+  if (leaf?.kind === "node" && operatorScriptOf(workflow, state, leaf)) {
+    return fail(`position ${leaf.key} is a process operator node; the runtime executes it and it does not accept transitions`);
+  }
   if (!leaf || !isLeafFrame(leaf)) {
     const error = joined([...outcomeShapeErrors(outcome), ...checkpointErrors(outcome.checkpoint, "checkpoint", false)]);
     return fail(error ?? "execution has no current leaf task");
@@ -698,6 +725,7 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
 }
 
 interface ProcessExitEvent {
+  readonly type: "process-exit";
   readonly key: string;
   readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean; readonly spawnError?: string };
   readonly files?: readonly ArtifactRef[];
@@ -729,7 +757,7 @@ function capturedFilesSides(files: readonly ArtifactRef[] | undefined): Record<s
 }
 
 /** Applies the configured stderr mode: none keeps stderr diagnostic-only, text stores it, json parses it. */
-function scriptStderrValue(spec: import("../domain/workflow.ts").ScriptSpec, exit: ProcessExitEvent["exit"], store?: ArtifactSink): { sides: Record<string, JsonValue>; clipped?: boolean } | { error: string } {
+function scriptStderrValue(spec: ScriptSpec, exit: ProcessExitEvent["exit"], store?: ArtifactSink): { sides: Record<string, JsonValue>; clipped?: boolean } | { error: string } {
   if (spec.stderr === "none") return { sides: {} };
   if (spec.stderr === "text") {
     const text = exit.stderr;
@@ -747,8 +775,9 @@ function scriptStderrValue(spec: import("../domain/workflow.ts").ScriptSpec, exi
   }
 }
 
-function scriptStdoutValue(spec: import("../domain/workflow.ts").ScriptSpec, exit: ProcessExitEvent["exit"], store?: ArtifactSink): { value: import("../domain/json.ts").JsonValue; clipped?: boolean } | { error: string } {
+function scriptStdoutValue(spec: ScriptSpec, exit: ProcessExitEvent["exit"], store?: ArtifactSink): { value: JsonValue; clipped?: boolean } | { error: string } {
   let base: JsonValue = {};
+  let stdoutClipped = false;
   if (spec.stdout === "json") {
     try {
       const parsed = JSON.parse(exit.stdout) as unknown;
@@ -763,61 +792,101 @@ function scriptStdoutValue(spec: import("../domain/workflow.ts").ScriptSpec, exi
       base = { stdout };
     } else if (!store) {
       base = { stdout: clipToByteBudget(stdout, TEXT_STDOUT_BUDGET_BYTES), stdoutTruncated: true };
+      stdoutClipped = true;
     } else {
       const ref = store.publishText("output", stdout);
       base = { stdout: utf8Preview(stdout, 192), stdoutTruncated: true, artifact: ref as unknown as JsonValue };
+      stdoutClipped = true;
     }
   }
   const stderr = scriptStderrValue(spec, exit, store);
   if ("error" in stderr) return stderr;
-  return { value: mergeOutputSides(base, stderr.sides), ...(stderr.clipped ? { clipped: true } : {}) };
+  return { value: mergeOutputSides(base, stderr.sides), ...(stdoutClipped || stderr.clipped ? { clipped: true } : {}) };
+}
+
+function processOutput(spec: ScriptSpec, event: ProcessExitEvent): { value: JsonValue; truncation: string } | { error: string } {
+  if (event.captureError !== undefined) return { error: event.captureError };
+  const accepted = !event.exit.timedOut && event.exit.code !== undefined && spec.acceptedExitCodes.includes(event.exit.code);
+  if (!accepted) return { error: exitFailureReason(spec, event.exit) };
+  const parsed = scriptStdoutValue(spec, event.exit, event.store);
+  if ("error" in parsed) return parsed;
+  return {
+    value: mergeOutputSides(parsed.value, capturedFilesSides(event.files)),
+    truncation: event.exit.truncated || parsed.clipped ? " (captured output was truncated)" : "",
+  };
 }
 
 function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessExitEvent, store?: ArtifactSinkProvider): EngineResult {
   const leaf = state.stack[state.stack.length - 1];
-  if (!leaf || leaf.kind !== "task") return fail(`process exit ${event.key} has no script leaf`);
+  if (!leaf || (leaf.kind !== "task" && leaf.kind !== "node")) return fail(`process exit ${event.key} has no process leaf`);
+  if (leaf.key !== event.key) return fail(`process exit key ${event.key} does not match the process leaf ${leaf.key}`);
+  if (leaf.kind === "node") return applyOperatorExit(workflow, state, leaf, event);
   const block = blockOf(workflow, leaf.blockId);
   if (block?.kind !== "script") return fail(`frame ${leaf.key} is not a script position`);
-  if (leaf.key !== event.key) return fail(`process exit key ${event.key} does not match the script leaf ${leaf.key}`);
   const spec = block.script;
-  if (event.captureError !== undefined) return scriptFailure(workflow, state, leaf, block, event.captureError);
-  const accepted = !event.exit.timedOut && event.exit.code !== undefined && spec.acceptedExitCodes.includes(event.exit.code);
-  if (accepted) {
-    const parsed = scriptStdoutValue(spec, event.exit, event.store);
-    if ("error" in parsed) return scriptFailure(workflow, state, leaf, block, parsed.error);
-    const value = mergeOutputSides(parsed.value, capturedFilesSides(event.files));
-    const contract = contractErrorFor(workflow, block.output, value, `script ${leaf.key} output`);
-    if (contract) return scriptFailure(workflow, state, leaf, block, contract);
-    const truncated = event.exit.truncated || parsed.clipped ? " (captured output was truncated)" : "";
-    let checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}.${truncated}`), data: value };
-    if (event.store && canonicalJsonBytes(checkpoint as unknown as JsonValue) > LIMITS.checkpointBytes) {
-      const ref = event.store.publishJson("output", value);
-      checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}; its ${ref.size}-byte output was published to the artifact store as ${ref.checksum}.${truncated}`), data: ref as unknown as JsonValue };
-    }
-    try {
-      validateCheckpoint(checkpoint, `script ${leaf.key}`);
-    } catch (error) {
-      return scriptFailure(workflow, state, leaf, block, error instanceof Error ? error.message : String(error));
-    }
-    const succeeded = scriptInvocation(withCheckpoint(state, leaf.key, checkpoint), leaf, "succeeded");
-    const popped: Execution = { ...succeeded, stack: state.stack.slice(0, -1) };
-    return finishAdvance(workflow, popped, popped.stack, store);
+  const output = processOutput(spec, event);
+  if ("error" in output) return scriptFailure(workflow, state, leaf, block, output.error);
+  const contract = contractErrorFor(workflow, block.output, output.value, `script ${leaf.key} output`);
+  if (contract) return scriptFailure(workflow, state, leaf, block, contract);
+  let checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}.${output.truncation}`), data: output.value };
+  if (event.store && canonicalJsonBytes(checkpoint as unknown as JsonValue) > LIMITS.checkpointBytes) {
+    const ref = event.store.publishJson("output", output.value);
+    checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}; its ${ref.size}-byte output was published to the artifact store as ${ref.checksum}.${output.truncation}`), data: ref as unknown as JsonValue };
   }
-  const reason = event.exit.timedOut
+  try {
+    validateCheckpoint(checkpoint, `script ${leaf.key}`);
+  } catch (error) {
+    return scriptFailure(workflow, state, leaf, block, error instanceof Error ? error.message : String(error));
+  }
+  const succeeded = enterInvocation(workflow, withCheckpoint(state, leaf.key, checkpoint), leaf, "succeeded");
+  const popped: Execution = { ...succeeded, stack: state.stack.slice(0, -1) };
+  return finishAdvance(workflow, popped, popped.stack, store);
+}
+
+/** Applies a process operator's exit to its plan node: success completes the node, failure applies the plan's recovery policy. */
+function applyOperatorExit(workflow: Workflow, state: Execution, leaf: NodeFrame, event: ProcessExitEvent): EngineResult {
+  const resolved = operatorScriptOf(workflow, state, leaf);
+  if (!resolved) return fail(`frame ${leaf.key} is not a process operator node`);
+  const { nodeId, operator, script: spec } = resolved;
+  const failNode = (reason: string): EngineResult => {
+    const checkpoint: Checkpoint = { summary: clipSummary(`Operator ${operator} node ${nodeId} ${reason}.`) };
+    return applyNeedsWork(workflow, state, { checkpoint, issues: [{ target: nodeId, reason }] });
+  };
+  const output = processOutput(spec, event);
+  if ("error" in output) return failNode(output.error);
+  let checkpoint: Checkpoint = { summary: clipSummary(`Operator ${operator} exited ${event.exit.code} at node ${nodeId}.${output.truncation}`), data: output.value };
+  if (event.store && canonicalJsonBytes(checkpoint as unknown as JsonValue) > LIMITS.nodeResultBytes) {
+    const ref = event.store.publishJson("output", output.value);
+    checkpoint = { summary: clipSummary(`Operator ${operator} exited ${event.exit.code} at node ${nodeId}; its ${ref.size}-byte output was published to the artifact store as ${ref.checksum}.${output.truncation}`), data: ref as unknown as JsonValue };
+  }
+  const execution = state.plans[planKeyOfNode(leaf)];
+  if (!execution || execution.blockId !== leaf.blockId) return fail(`node frame ${leaf.key} has no plan execution`);
+  const node = execution.plan.nodes.find((entry) => entry.id === nodeId);
+  const contract = contractErrorFor(workflow, node && workflow.operators.get(node.operator)?.output, output.value, `node result ${nodeId}`);
+  if (contract) return failNode(`violated its output contract: ${contract}`);
+  try {
+    validateCheckpoint(checkpoint, `node result ${leaf.key}`);
+  } catch (error) {
+    return failNode(`produced an invalid checkpoint: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return completeNode(workflow, state, leaf, { status: "completed", met: [], checkpoint });
+}
+
+function exitFailureReason(spec: ScriptSpec, exit: ProcessExitEvent["exit"]): string {
+  return exit.timedOut
     ? `timed out after ${spec.timeoutMs}ms`
-    : event.exit.spawnError !== undefined
-      ? `failed to start: ${event.exit.spawnError}`
-      : event.exit.code === undefined
-        ? `was terminated by signal ${event.exit.signal ?? "unknown"}`
-        : `exited with code ${event.exit.code}, which is not in acceptedExitCodes [${spec.acceptedExitCodes.join(", ")}]`;
-  return scriptFailure(workflow, state, leaf, block, reason);
+    : exit.spawnError !== undefined
+      ? `failed to start: ${exit.spawnError}`
+      : exit.code === undefined
+        ? `was terminated by signal ${exit.signal ?? "unknown"}`
+        : `exited with code ${exit.code}, which is not in acceptedExitCodes [${spec.acceptedExitCodes.join(", ")}]`;
 }
 
 function scriptFailure(workflow: Workflow, state: Execution, leaf: Extract<Frame, TaskFrame>, block: ScriptBlock, reason: string): EngineResult {
   const checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} ${reason}.`) };
   const result = applyNeedsWork(workflow, state, { checkpoint, issues: [{ target: block.id, reason }] });
   if (!result.ok || result.effect.kind !== "stay") return result;
-  return { ...result, state: scriptInvocation(result.state, leaf, "waiting") };
+  return { ...result, state: enterInvocation(workflow, result.state, leaf, "waiting") };
 }
 
 interface PositionInfo {

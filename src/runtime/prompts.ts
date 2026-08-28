@@ -110,7 +110,7 @@ function operatorRoster(workflow: Workflow, allowed: readonly string[]): string 
   const lines = allowed
     .map((id) => workflow.operators.get(id))
     .filter((operator): operator is NonNullable<typeof operator> => Boolean(operator))
-    .map((operator) => `- \`${operator.id}\`: ${operator.description}`);
+    .map((operator) => `- \`${operator.id}\`${operator.script ? " (process)" : ""}: ${operator.description}`);
   return ["## Operator registry", ...lines].join("\n");
 }
 
@@ -139,6 +139,7 @@ const PLAN_SCHEMA_SECTION = [
   `- 2 to ${LIMITS.planNodes} nodes; unique ids matching ${ID_PATTERN}; each operator must appear in the registry above.`,
   "- `dependsOn` names only earlier nodes in declaration order or retained completed node ids.",
   "- `done` lists 1 to " + LIMITS.planNodeListItems + " criterion ids for this node's completion; each entry must match " + ID_PATTERN + " (lowercase ids like `paths-mapped`, never prose sentences).",
+  '- Nodes whose operator is marked "(process)" run as a local process with no model turn: they take neither `done` nor `evidence`, and receive their `dependsOn` results as JSON on stdin.',
   `- Unknown keys and plans above ${LIMITS.planBytes / 1024} KiB are rejected.`,
 ].join("\n");
 

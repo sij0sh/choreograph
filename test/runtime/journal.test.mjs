@@ -1,9 +1,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { RunJournal, parseEvent, project, fold, summarizeProjection, describeEvent } from "../../src/runtime/journal.ts";
-import { renderStatus, renderEventLog, nextTuiMode, tuiModeFromEnv } from "../../src/runtime/tui.ts";
+import { renderStatus, renderDetailed, renderEventLog, nextTuiMode, tuiModeFromEnv } from "../../src/runtime/tui.ts";
 import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
-import { completed, cp, script, task, workflow } from "../engine/helpers.mjs";
+import { completed, cp, loop, script, task, workflow } from "../engine/helpers.mjs";
+
+const roots = [];
+test.after(() => {
+  for (const root of roots) rmSync(root, { recursive: true, force: true });
+});
+
+function tempDir() {
+  const root = mkdtempSync(join(tmpdir(), "pwf-journal-"));
+  roots.push(root);
+  return root;
+}
 
 function harness(options = {}) {
   const sent = [];
@@ -27,6 +41,10 @@ function harness(options = {}) {
       notices: [],
       setStatus: (id, value) => {
         ctx.ui.status = value;
+      },
+      widget: undefined,
+      setWidget: (id, value) => {
+        ctx.ui.widget = value;
       },
       notify: (message, level) => ctx.ui.notices.push({ message, level }),
     },
@@ -104,6 +122,13 @@ test("a node failure fails the projection until a retry or park follows", () => 
     [started, begin, { type: "node-waiting", runId: "r", at: 3, key: "root/a", reason: "retries exhausted" }].map((event) => parseEvent(event)),
   );
   assert.equal(parkedView.status, "waiting", "a parked node keeps the projection waiting");
+
+  const missingStart = project([started, { type: "node-failed", runId: "r", at: 4, key: "root/missing", reason: "dispatch failed" }].map((event) => parseEvent(event)));
+  assert.equal(missingStart.status, "failed", "a failure remains authoritative when its start event is unavailable");
+  assert.equal(missingStart.invocations["root/missing"].status, "failed");
+
+  const resumed = fold(parkedView, parseEvent({ type: "run-resumed", runId: "r", at: 5 }));
+  assert.equal(resumed.status, "running", "resuming a parked run returns the projection to running");
 });
 
 test("a run appends lifecycle events for start, agent nodes, and completion", async () => {
@@ -148,7 +173,7 @@ test("a script-only run journals started through completed", async () => {
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const types = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data.type);
-  assert.deepEqual(types, ["run-started", "node-started", "node-succeeded", "run-completed"]);
+  assert.deepEqual(types, ["run-started", "node-ready", "node-started", "node-log", "node-succeeded", "run-completed"]);
 });
 
 test("restore replays persisted events into the projection", async () => {
@@ -289,4 +314,151 @@ test("a runner-level input failure journals node-failed and fails the projection
   assert.match(projection.invocations["root/consume"].lastReason, /missing/);
   assert.equal(runtime.state.status, "active", "the run stays active at the failed position");
   assert.equal(runtime.state.parked, undefined, "a runner-level failure does not park the run");
+});
+
+test("new lifecycle events parse, fold, and stay bounded", () => {
+  const longLog = "é".repeat(600);
+  const raw = [
+    { type: "run-started", runId: "rich", at: 100, workflow: "demo", target: "observe" },
+    { type: "loop-iteration-started", runId: "rich", at: 110, key: "root/review", mode: "for-each", iteration: 2, total: 3 },
+    { type: "node-ready", runId: "rich", at: 111, key: "root/review/loop[2]/check", runner: "agent", attempt: 1 },
+    { type: "node-started", runId: "rich", at: 112, key: "root/review/loop[2]/check", runner: "agent", attempt: 1 },
+    { type: "artifact-published", runId: "rich", at: 113, key: "root/review/loop[2]/check", output: "report", checksum: `sha256-${"a".repeat(64)}`, size: 42, mediaType: "application/json" },
+    { type: "node-log", runId: "rich", at: 114, key: "root/review/loop[2]/check", stream: "stdout", message: longLog, truncated: false },
+    { type: "node-failed", runId: "rich", at: 115, key: "root/review/loop[2]/check", reason: "exit 2" },
+    { type: "retry-scheduled", runId: "rich", at: 116, key: "root/review/loop[2]/check", attempt: 2 },
+    { type: "node-started", runId: "rich", at: 117, key: "root/review/loop[2]/check", runner: "agent", attempt: 2 },
+    { type: "node-waiting", runId: "rich", at: 118, key: "root/review/loop[2]/check", reason: "manual repair" },
+    { type: "node-skipped", runId: "rich", at: 119, key: "root/optional", runner: "agent", reason: "guard did not hold" },
+  ];
+  const events = raw.map((event) => parseEvent(event));
+  assert.ok(events.every(Boolean), "every new event shape parses");
+  const log = events.find((event) => event.type === "node-log");
+  assert.ok(Buffer.byteLength(log.message, "utf8") <= 512, "log payloads are byte bounded");
+  assert.equal(log.truncated, true, "parser records truncation when it clips a persisted log");
+  assert.equal(parseEvent({ ...raw[1], iteration: 4 }), undefined, "loop iteration cannot exceed its total");
+  const emptyLoop = project([
+    parseEvent(raw[0]),
+    parseEvent({ type: "loop-completed", runId: "rich", at: 120, key: "root/empty", mode: "for-each", iterations: 0, total: 0, exhausted: false }),
+  ]);
+  assert.equal(emptyLoop.loops["root/empty"].mode, "for-each", "zero-item loops retain their mode in the projection");
+
+  const view = project(events);
+  assert.equal(view.status, "waiting");
+  assert.equal(view.invocations["root/review/loop[2]/check"].attempts, 2);
+  assert.equal(view.invocations["root/review/loop[2]/check"].status, "waiting");
+  assert.equal(view.invocations["root/optional"].status, "skipped");
+  assert.equal(view.loops["root/review"].iteration, 2);
+  assert.equal(view.artifacts[0].output, "report");
+  assert.equal(view.logs[0].truncated, true);
+});
+
+test("the detailed projection renders hierarchy, iterations, attempts, logs, artifacts, and failures", () => {
+  const events = [
+    { type: "run-started", runId: "detail", at: 1_000, workflow: "demo", target: "ship" },
+    { type: "loop-iteration-started", runId: "detail", at: 1_100, key: "root/review", mode: "for-each", iteration: 2, total: 4 },
+    { type: "node-ready", runId: "detail", at: 1_110, key: "root/review/loop[2]/verify", runner: "process", attempt: 2 },
+    { type: "node-started", runId: "detail", at: 1_120, key: "root/review/loop[2]/verify", runner: "process", attempt: 2 },
+    { type: "node-log", runId: "detail", at: 1_130, key: "root/review/loop[2]/verify", stream: "stderr", message: "check failed", truncated: false },
+    { type: "artifact-published", runId: "detail", at: 1_140, key: "root/review/loop[2]/verify", output: "stderr", checksum: `sha256-${"b".repeat(64)}`, size: 12, mediaType: "text/plain" },
+    { type: "node-waiting", runId: "detail", at: 1_150, key: "root/review/loop[2]/verify", reason: "retry approval required" },
+  ].map((event) => parseEvent(event));
+  const projection = project(events);
+  const details = renderDetailed(projection, "demo: review").join("\n");
+  assert.match(details, /root\/review \[loop for-each\] iteration=2\/4/);
+  assert.match(details, /root\/review\/loop\[2\]\/verify \[process\] attempt=2 state=waiting/);
+  assert.match(details, /reason=retry approval required/);
+  assert.match(details, /logs:[\s\S]*stderr: check failed/);
+  assert.match(details, /artifacts:[\s\S]*verify\/stderr 12B/);
+});
+
+test("runtime emits ready, skipped, loop iteration, loop completion, and artifact events", async () => {
+  const h = harness();
+  const wf = workflow([
+    task("gather"),
+    task("optional", { guard: { from: "gather", select: "/data/runOptional", op: "equals", value: true } }),
+    loop("review", "for-each"),
+    task("deliver"),
+  ], { overviewPath: join(tempDir(), "WORKFLOW.md") });
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  await runtime.transition({ status: "completed", checkpoint: cp("gathered", { files: ["a"], runOptional: false }) }, undefined, h.ctx);
+  await runtime.handleAgentSettled(h.ctx);
+  let events = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
+  assert.ok(events.some((event) => event.type === "node-ready" && event.key === "root/gather"));
+  assert.ok(events.some((event) => event.type === "node-skipped" && event.key === "root/optional"));
+  assert.ok(events.some((event) => event.type === "loop-iteration-started" && event.key === "root/review" && event.iteration === 1 && event.total === 1));
+
+  await runtime.transition({ status: "completed", checkpoint: cp("reviewed", { ok: true }) }, undefined, h.ctx);
+  await runtime.handleAgentSettled(h.ctx);
+  events = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
+  assert.ok(events.some((event) => event.type === "artifact-published" && event.key === "root/review" && event.output === "1/review-step"));
+  assert.ok(events.some((event) => event.type === "loop-completed" && event.key === "root/review" && event.iterations === 1));
+
+  runtime.cycleTuiMode(h.ctx);
+  assert.ok(h.ctx.ui.widget.some((line) => line === "tree:"), "detailed mode uses the projected hierarchy widget");
+  assert.ok(h.ctx.ui.widget.some((line) => /root\/review/.test(line)), "the widget includes the loop and its body");
+});
+
+test("process logs and their durable artifacts are emitted into the projection", async () => {
+  const h = harness();
+  const wf = workflow([
+    script("probe", { spec: { argv: ["node", "-e", "process.stdout.write('hello journal')"], inheritEnv: ["PATH"] } }),
+  ], { overviewPath: join(tempDir(), "WORKFLOW.md") });
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  const events = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
+  assert.ok(events.some((event) => event.type === "node-log" && event.key === "root/probe" && event.message === "hello journal"));
+  assert.ok(events.some((event) => event.type === "artifact-published" && event.key === "root/probe" && event.output === "stdout"));
+  const report = runtime.inspect();
+  assert.equal(report.projection.logs.at(-1).message, "hello journal");
+  assert.ok(report.projection.artifacts.some((artifact) => artifact.key === "root/probe" && artifact.output === "stdout"));
+});
+
+test("inspect keeps completed run history and restores it without an active run", async () => {
+  const h = harness();
+  const wf = simpleWorkflow();
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  const started = await runtime.startWorkflow(h.ctx, wf, "history target");
+  const runId = started.execution.runId;
+  await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  await runtime.handleAgentSettled(h.ctx);
+  await runtime.transition({ status: "completed", checkpoint: cp("delivered") }, undefined, h.ctx);
+  const completedReport = runtime.inspect();
+  assert.equal(completedReport.runId, runId);
+  assert.equal(completedReport.projection.status, "succeeded");
+  assert.ok(completedReport.events.some((line) => /completed/.test(line)));
+
+  const restored = harness();
+  restored.entries.push(...h.entries);
+  const runtime2 = new RuntimeCoordinator(restored.pi, [wf], restored.read);
+  runtime2.handleSessionStart(restored.ctx);
+  const restoredReport = runtime2.inspect(runId);
+  assert.equal(restoredReport.projection.status, "succeeded");
+  assert.equal(restoredReport.projection.target, "history target");
+  assert.equal(runtime2.inspect("missing-run"), undefined);
+});
+
+test("loop events include iterations traversed entirely through skipped body steps", async () => {
+  const h = harness();
+  const wf = workflow([
+    task("gather"),
+    loop("review", "for-each", {
+      body: { guard: { from: "gather", select: "/data/runBody", op: "equals", value: true } },
+    }),
+    task("deliver"),
+  ], { overviewPath: join(tempDir(), "WORKFLOW.md") });
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  await runtime.transition({ status: "completed", checkpoint: cp("gathered", { files: ["a", "b"], runBody: false }) }, undefined, h.ctx);
+  const events = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
+  const iterations = events.filter((event) => event.type === "loop-iteration-started" && event.key === "root/review");
+  assert.deepEqual(iterations.map((event) => [event.iteration, event.total]), [[1, 2], [2, 2]]);
+  assert.ok(events.some((event) => event.type === "node-skipped" && event.key === "root/review/loop[1]/review-step"));
+  assert.ok(events.some((event) => event.type === "node-skipped" && event.key === "root/review/loop[2]/review-step"));
+  assert.ok(events.some((event) => event.type === "loop-completed" && event.iterations === 2));
 });

@@ -33,15 +33,17 @@ function checksumOf(content: Buffer | string): string {
  */
 export class ArtifactStore {
   readonly rootDir: string;
+  private readonly onPublish?: (ref: ArtifactRef) => void;
 
-  private constructor(rootDir: string) {
+  private constructor(rootDir: string, onPublish?: (ref: ArtifactRef) => void) {
     this.rootDir = rootDir;
+    this.onPublish = onPublish;
   }
 
   /** Roots the store under `<workflowDir>/.choreograph/runs/<runId>/artifacts`. */
-  static forRun(workflowDir: string, runId: string): ArtifactStore | undefined {
+  static forRun(workflowDir: string, runId: string, onPublish?: (ref: ArtifactRef) => void): ArtifactStore | undefined {
     if (!isAbsolute(workflowDir)) return undefined;
-    return new ArtifactStore(join(workflowDir, ".choreograph", "runs", runId, "artifacts"));
+    return new ArtifactStore(join(workflowDir, ".choreograph", "runs", runId, "artifacts"), onPublish);
   }
 
   pathOf(ref: ArtifactRef): string {
@@ -112,7 +114,13 @@ export class ArtifactStore {
     } catch (error) {
       throw new Error(`artifact "${name}" could not be stored: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return { invocationKey, output: name, checksum, size: content.length, mediaType };
+    const ref = { invocationKey, output: name, checksum, size: content.length, mediaType };
+    try {
+      this.onPublish?.(ref);
+    } catch {
+      // Observability must not turn a successful artifact write into a node failure.
+    }
+    return ref;
   }
 }
 

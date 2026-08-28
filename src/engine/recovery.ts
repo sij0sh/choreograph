@@ -2,9 +2,9 @@ import type { Checkpoint } from "../domain/checkpoint.ts";
 import { contractError as contractErrorFor } from "../domain/contract.ts";
 import type { Execution, Frame, PlanExecution, SequenceFrame } from "../domain/execution.ts";
 import { DEFAULT_PLAN_RECOVERY, DEFAULT_TASK_RECOVERY, resolveRecovery, type RecoveryPolicy } from "../domain/policy.ts";
-import type { Workflow } from "../domain/workflow.ts";
+import type { LoopBlock, Workflow } from "../domain/workflow.ts";
 import { bindingConsumers, blockOf, workflowBlocks } from "../domain/workflow.ts";
-import { lastSegment, planKeyOf } from "../domain/keys.ts";
+import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
 import { invalidateResults } from "../planning/graph.ts";
 import type { Effect, EngineResult, Issue } from "./interpreter.ts";
 import { advance, enterInvocation } from "./interpreter.ts";
@@ -50,7 +50,10 @@ function checkpointContractError(workflow: Workflow, state: Execution, leaf: Fra
   if (leaf.kind !== "node") return undefined;
   const execution = state.plans[planKeyOf(leaf.key)];
   const node = execution?.plan.nodes.find((entry) => entry.id === leaf.nodeId);
-  return node ? contractErrorFor(workflow, workflow.operators.get(node.operator)?.output, checkpoint.data, `checkpoint ${leaf.key}`) : undefined;
+  if (!node) return undefined;
+  const operator = workflow.operators.get(node.operator);
+  if (!operator || operator.script) return undefined; // a process node's failure checkpoint carries no agent-authored data
+  return contractErrorFor(workflow, operator.output, checkpoint.data, `checkpoint ${leaf.key}`);
 }
 
 function rewindToChild(workflow: Workflow, stack: readonly Frame[], blockId: string): readonly Frame[] | undefined {
@@ -74,7 +77,7 @@ function loopOwningBody(workflow: Workflow, blockId: string): string | undefined
   return undefined;
 }
 
-function pruneLoops(workflow: Workflow, state: Execution, stack: readonly Frame[]): Execution {
+function pruneLoops(state: Execution, stack: readonly Frame[]): Execution {
   const active = new Set(stack.filter((frame) => frame.kind === "loop").map((frame) => (frame as { key: string }).key));
   const loops = { ...state.loops };
   const checkpoints = { ...state.checkpoints };
@@ -93,7 +96,7 @@ function pruneLoops(workflow: Workflow, state: Execution, stack: readonly Frame[
 }
 
 function resume(workflow: Workflow, state: Execution, stack: readonly Frame[]): EngineResult | undefined {
-  const pruned = pruneLoops(workflow, state, stack);
+  const pruned = pruneLoops(state, stack);
   const advanced = advance(workflow, { ...pruned, stack });
   if (!advanced.ok) return undefined;
   if (advanced.state.stack.length === 0) return fail("recovery rewound past every runnable block");
@@ -108,16 +111,46 @@ function blockOrder(workflow: Workflow): ReadonlyMap<string, number> {
   return new Map(workflowBlocks(workflow).map((block, index) => [block.id, index]));
 }
 
-function rewindToEarliest(workflow: Workflow, stack: readonly Frame[], candidates: ReadonlySet<string>): readonly Frame[] | undefined {
+function rewindToEarliest(workflow: Workflow, stack: readonly Frame[], candidates: ReadonlySet<string>, perIteration: boolean): readonly Frame[] | undefined {
   const order = blockOrder(workflow);
+  const remap = (blockId: string): string => {
+    const loopId = loopOwningBody(workflow, blockId);
+    if (loopId === undefined) return blockId;
+    if (!perIteration) return loopId;
+    const loop = blockOf(workflow, loopId);
+    if (loop?.kind === "loop" && stack.some((frame) => frame.kind === "sequence" && frame.blockId === loop.body.id)) return blockId;
+    return loopId;
+  };
   const targets = new Set<string>();
   for (const candidate of candidates) {
-    targets.add(loopOwningBody(workflow, candidate) ?? candidate);
+    targets.add(remap(candidate));
   }
   const ordered = [...targets].sort((left, right) => (order.get(left) ?? Number.MAX_SAFE_INTEGER) - (order.get(right) ?? Number.MAX_SAFE_INTEGER));
   for (const blockId of ordered) {
     const rewound = rewindToChild(workflow, stack, blockId);
     if (rewound) return rewound;
+  }
+  return undefined;
+}
+
+/**
+ * The active loop-body scope when the invalidation targets body steps of a loop whose body is
+ * currently executing. Recovery under this prefix re-runs one iteration instead of restarting
+ * the whole loop.
+ */
+function activeBodyScope(workflow: Workflow, state: Execution, targets: readonly string[]): { loop: LoopBlock; prefix: string } | undefined {
+  for (let i = state.stack.length - 1; i >= 0; i -= 1) {
+    const frame = state.stack[i];
+    if (frame.kind !== "loop") continue;
+    const block = blockOf(workflow, frame.blockId);
+    if (!block || block.kind !== "loop") continue;
+    const inBody = block.body.children.some((child) => targets.includes(child.id));
+    if (!inBody) continue;
+    const bodyLive = state.stack.slice(i + 1).some((above) => above.kind === "sequence" && above.blockId === block.body.id);
+    if (!bodyLive) continue;
+    const loopState = state.loops[frame.key];
+    if (!loopState) continue;
+    return { loop: block, prefix: `${scopeKey(frame.key, loopState.iteration)}/` };
   }
   return undefined;
 }
@@ -142,14 +175,18 @@ function resetConsumerPlans(workflow: Workflow, state: Execution, planIds: Reado
   return { ...state, plans };
 }
 
-function removeConsumerCheckpoints(state: Execution, consumers: ReadonlySet<string>): Execution {
-  if (consumers.size === 0) return state;
+function removeCheckpoints(state: Execution, blockIds: ReadonlySet<string>, scopePrefix?: string): { state: Execution; removed: boolean } {
+  if (blockIds.size === 0) return { state, removed: false };
   const checkpoints = { ...state.checkpoints };
+  let removed = false;
   for (const key of Object.keys(checkpoints)) {
-    if (consumers.has(lastSegment(key))) delete checkpoints[key];
+    if (!blockIds.has(lastSegment(key)) || (scopePrefix !== undefined && !key.startsWith(scopePrefix))) continue;
+    delete checkpoints[key];
+    removed = true;
   }
+  if (!removed) return { state, removed: false };
   const checkpointOrder = state.checkpointOrder.filter((key) => checkpoints[key] !== undefined);
-  return { ...state, checkpoints, checkpointOrder };
+  return { state: { ...state, checkpoints, checkpointOrder }, removed: true };
 }
 
 function tryInvalidate(workflow: Workflow, state: Execution, outcome: Outcome, policy: RecoveryPolicy): EngineResult | undefined {
@@ -184,24 +221,19 @@ function tryInvalidate(workflow: Workflow, state: Execution, outcome: Outcome, p
     }
   }
   if (matched && matched.execution.invalidations + 1 > policy.maxReplans) return undefined;
-  const checkpoints = { ...state.checkpoints };
-  let checkpointsRemoved = false;
-  for (const key of Object.keys(checkpoints)) {
-    if (targets.includes(lastSegment(key))) {
-      delete checkpoints[key];
-      checkpointsRemoved = true;
-    }
-  }
-  const checkpointOrder = state.checkpointOrder.filter((key) => checkpoints[key] !== undefined);
-  const withoutInvalid: Execution = { ...state, checkpoints, checkpointOrder };
+  const activeScope = activeBodyScope(workflow, state, targets);
   const producers = new Set<string>();
   for (const target of targets) {
     const block = blockOf(workflow, target);
-    if (block?.kind === "task" || block?.kind === "plan") producers.add(block.id);
+    if (block?.kind === "task" || block?.kind === "script" || block?.kind === "plan") producers.add(block.id);
   }
   if (matched) producers.add(matched.execution.blockId);
-
   const consumers = bindingConsumers(workflow, producers);
+  const contained = activeScope !== undefined
+    && [...new Set([...targets, ...consumers])].every((affected) => activeScope.loop.body.children.some((child) => child.id === affected));
+  const scopePrefix = activeScope && contained ? activeScope.prefix : undefined;
+  const targetRemoval = removeCheckpoints(state, new Set(targets), scopePrefix);
+  const withoutInvalid = targetRemoval.state;
   const planConsumers = new Set<string>(consumers);
   if (!matched) {
     for (const producer of producers) {
@@ -210,7 +242,7 @@ function tryInvalidate(workflow: Workflow, state: Execution, outcome: Outcome, p
   }
   const reset = resetConsumerPlans(workflow, withoutInvalid, planConsumers);
   if (!reset) return undefined;
-  const invalidatedState = removeConsumerCheckpoints(reset, consumers);
+  const invalidatedState = removeCheckpoints(reset, consumers, scopePrefix).state;
   const candidates = new Set<string>([...producers, ...consumers]);
   if (matched) {
     const plans = {
@@ -218,12 +250,12 @@ function tryInvalidate(workflow: Workflow, state: Execution, outcome: Outcome, p
       [matched.key]: { ...matched.execution, invalidations: matched.execution.invalidations + 1 },
     };
     candidates.add(matched.execution.blockId);
-    const rewound = rewindToEarliest(workflow, state.stack, candidates);
+    const rewound = rewindToEarliest(workflow, state.stack, candidates, false);
     if (!rewound) return undefined;
     return resume(workflow, { ...invalidatedState, plans }, rewound);
   }
-  if (checkpointsRemoved || consumers.size > 0) {
-    const rewound = rewindToEarliest(workflow, state.stack, candidates);
+  if (targetRemoval.removed || consumers.size > 0) {
+    const rewound = rewindToEarliest(workflow, state.stack, candidates, contained);
     if (rewound) return resume(workflow, invalidatedState, rewound);
   }
   return undefined;

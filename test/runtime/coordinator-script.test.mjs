@@ -179,6 +179,7 @@ test("restore re-executes a script whose persisted invocation is still running",
   const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read);
   revived.handleSessionStart(revivedHarness.ctx);
   await settle(revived, revivedHarness);
+  await waitFor(() => readLines(marker) === 2 && revived.state.parked);
   assert.equal(readLines(marker), 2, "a running script leaf is re-executed instead of inferred as parked");
   assert.equal(revived.state.parked, true, "the re-executed failure parks again from persisted state");
   const reparked = revivedHarness.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").at(-1);
@@ -556,4 +557,56 @@ test("an oversized script output is stored and materialized into the next script
   assert.deepEqual(JSON.parse(loaded.content.toString("utf8")), JSON.parse(big));
   assert.equal(run.execution.checkpoints["root/consume"].data.stdout, "42", "the consumer read the materialized artifact");
   assert.ok(existsSync(join(root, ".choreograph", "artifacts", emitted.checksum.slice("sha256-".length))), "the artifact was materialized into the consumer's workspace");
+});
+
+test("declared capture files are published to the artifact store and referenced in the data", async () => {
+  const root = tempDir();
+  const wf = {
+    ...workflow([
+      script("build", {
+        spec: {
+          argv: ["node", "-e", "require('node:fs').writeFileSync('out.txt', 'captured bytes');"],
+          inheritEnv: ["PATH"],
+          files: [{ name: "report", path: "out.txt" }],
+        },
+      }),
+      task("deliver"),
+    ]),
+    overviewPath: join(root, "WORKFLOW.md"),
+  };
+  const h = harness();
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  const run = await runtime.startWorkflow(h.ctx, wf, "");
+  assert.ok(run);
+  assert.equal(run.execution.stack.at(-1).blockId, "deliver", "the script completed and advanced");
+  const ref = run.execution.checkpoints["root/build"].data.files.report;
+  assert.equal(ref.output, "report");
+  assert.equal(ref.mediaType, "application/octet-stream");
+  assert.match(ref.checksum, /^sha256-[0-9a-f]{64}$/);
+  const store = ArtifactStore.forRun(root, run.execution.runId);
+  const loaded = store.load(ref);
+  assert.ok(loaded.ok, loaded.ok ? "" : loaded.error);
+  assert.equal(loaded.content.toString("utf8"), "captured bytes");
+});
+
+test("a capture file that cannot be read fails the step through its repair policy", async () => {
+  const root = tempDir();
+  const wf = {
+    ...workflow([
+      script("build", {
+        recovery: { max_attempts: 1, strategy: ["block"] },
+        spec: { inheritEnv: ["PATH"], files: [{ name: "report", path: "missing.txt" }] },
+      }),
+      task("deliver"),
+    ]),
+    overviewPath: join(root, "WORKFLOW.md"),
+  };
+  const h = harness();
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  const run = await runtime.startWorkflow(h.ctx, wf, "");
+  assert.ok(run);
+  assert.equal(run.execution.stack.at(-1).blockId, "build", "the run parks at the failed script");
+  assert.match(run.execution.checkpoints["root/build"].summary, /capture file could not be published/);
 });

@@ -109,3 +109,15 @@ test("materialize writes the artifact into the workspace and returns a relative 
   const failed = store.materialize({ ...ref, checksum: `sha256-${"e".repeat(64)}` }, workspace);
   assert.equal(failed.ok, false);
 });
+
+test("publication observers receive refs without affecting successful writes", () => {
+  const root = mkdtempSync(join(tmpdir(), "pwf-store-"));
+  roots.push(root);
+  const published = [];
+  const store = ArtifactStore.forRun(root, "observed", (ref) => published.push(ref));
+  const ref = store.publishText("log", "root/probe", "hello");
+  assert.deepEqual(published, [ref]);
+
+  const nonBlocking = ArtifactStore.forRun(root, "non-blocking", () => { throw new Error("observer failed"); });
+  assert.doesNotThrow(() => nonBlocking.publishText("log", "root/probe", "still stored"));
+});

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
 import { HANDOFF_MANIFEST_TYPE } from "../../src/runtime/handoff-store.ts";
+import { EVENT_ENTRY_TYPE } from "../../src/runtime/journal.ts";
 import { EPOCH_MESSAGE_TYPE, HANDOFF_MESSAGE_TYPE, isolateWorkflowContext } from "../../src/runtime/isolation.ts";
 import { TRANSFER_ENTRY_TYPE } from "../../src/runtime/transfer.ts";
 import { cp, task, workflow } from "../engine/helpers.mjs";
@@ -73,6 +74,7 @@ test("an accepted position prepares a bounded child-session transfer", async () 
     const child = SessionManager.open(switched.path);
     const childEntries = child.getEntries();
     assert.ok(childEntries.some((entry) => entry.type === "custom" && entry.customType === HANDOFF_MANIFEST_TYPE));
+    assert.ok(childEntries.some((entry) => entry.type === "custom" && entry.customType === EVENT_ENTRY_TYPE), "the child retains bounded run history");
     assert.ok(childEntries.some((entry) => entry.type === "custom_message" && entry.customType === HANDOFF_MESSAGE_TYPE));
     assert.ok(childEntries.some((entry) => entry.type === "custom_message" && entry.customType === EPOCH_MESSAGE_TYPE));
     const snapshot = childEntries.findLast((entry) => entry.type === "custom" && entry.customType === "choreograph")?.data;

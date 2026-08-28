@@ -83,3 +83,20 @@ test("invalidateResults removes transitive dependents in declaration order", () 
   assert.deepEqual(Object.keys(next.results), ["d"], "independent results survive");
   assert.deepEqual(invalidateResults(execution, ["ghost"]).removed, []);
 });
+
+test("process operator nodes take neither done nor evidence", () => {
+  const operators = new Map([
+    ...OPERATORS,
+    ["fetch", { id: "fetch", path: "operators/fetch.md", description: "Fetch.", script: { argv: ["node", "fetch.mjs"], cwd: ".", timeoutMs: 1_000, acceptedExitCodes: [0], stdout: "json", stderr: "none", maxCaptureBytes: 1_024 } }],
+  ]);
+  const validateWith = (value) =>
+    validateDynamicPlan(value, { operators, allowedOperators: ["inspect", "trace", "fetch"], retainedResultIds: new Set() });
+  const good = validateWith({ version: 1, nodes: [node("probe"), { id: "fetch-data", operator: "fetch", objective: "Fetch.", dependsOn: ["probe"] }] });
+  assert.ok("plan" in good);
+  assert.deepEqual(good.plan.nodes[1].done, []);
+  const withDone = validateWith({ version: 1, nodes: [node("probe"), { id: "fetch-data", operator: "fetch", objective: "Fetch.", done: ["fetched"] }] });
+  assert.ok("errors" in withDone);
+  assert.ok(withDone.errors.some((error) => /neither "done" nor "evidence"/.test(error)));
+  const withEvidence = validateWith({ version: 1, nodes: [node("probe"), { id: "fetch-data", operator: "fetch", objective: "Fetch.", evidence: ["logs"] }] });
+  assert.ok("errors" in withEvidence);
+});

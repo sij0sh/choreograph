@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator } from "../runtime/coordinator.ts";
-import { summarizeProjection } from "../runtime/journal.ts";
+import { renderDetailed } from "../runtime/tui.ts";
 import { ROLLOVER_COMMAND } from "../runtime/transfer.ts";
 
 export function registerRuntimeCommands(pi: ExtensionAPI, runtime: RuntimeCoordinator): void {
@@ -28,15 +28,18 @@ export function registerRuntimeCommands(pi: ExtensionAPI, runtime: RuntimeCoordi
     },
   });
   pi.registerCommand("workflow-inspect", {
-    description: "Show the current run projection and recent lifecycle events.",
-    handler: async (_args, ctx) => {
-      const report = runtime.inspect();
+    description: "Show an active or completed run projection and its recent lifecycle events. Pass a run id to select history.",
+    handler: async (args, ctx) => {
+      const requestedRunId = (args ?? "").trim() || undefined;
+      const report = runtime.inspect(requestedRunId);
       if (!report) {
-        ctx.ui.notify("No active workflow run.", "info");
+        ctx.ui.notify(requestedRunId ? `No lifecycle history found for run ${requestedRunId}.` : "No workflow run history.", "info");
         return;
       }
-      const summary = report.projection ? `${summarizeProjection(report.projection)}\n${report.events.join("\n")}` : "No lifecycle events recorded for this run.";
-      ctx.ui.notify(`TUI mode: ${report.mode}.\n${summary}`, "info");
+      const summary = report.projection
+        ? [...renderDetailed(report.projection), "history:", ...report.events].join("\n")
+        : "No lifecycle events could be projected for this run.";
+      ctx.ui.notify(`Run: ${report.runId}. TUI mode: ${report.mode}.\n${summary}`, "info");
     },
   });
 }

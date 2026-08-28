@@ -281,6 +281,28 @@ test("a mid-loop snapshot round-trips and resumes the exact iteration", () => {
   assert.equal(next.state.stack.at(-1).key, "root/review/loop[3]/review-step");
 });
 
+test("a mid-loop multi-step body snapshot round-trips and resumes inside the body", () => {
+  const wf = workflow([
+    task("gather"),
+    { kind: "loop", id: "review", mode: "for-each", body: sequence("review-body", [task("read-one"), task("check-one")]), itemsBinding: { from: "gather", select: "/data/files" }, maxIterations: 8 },
+    task("deliver"),
+  ]);
+  let state = start(wf, { runId: "run-10", target: "repo" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("gathered", { files: ["a", "b"] })) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("read a")) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("check a")) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("read b")) }).state;
+  assert.equal(state.stack.at(-1).key, "root/review/loop[2]/check-one");
+  const parsed = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: false }))));
+  assert.deepEqual(parsed.execution, state);
+  assert.deepEqual(parsed.execution.stack.map((frame) => frame.key ?? frame.blockId), ["root", "root/review", "root/review/loop[2]", "root/review/loop[2]/check-one"]);
+  const migrated = validateAgainstWorkflow(wf, parsed.execution);
+  assert.ok(migrated.ok, migrated.ok ? "" : migrated.error);
+  const next = transition(wf, parsed.execution, { type: "outcome", outcome: completed(cp("check b")) }, { sinkFor: () => ({ publishJson: (name, value) => ({ invocationKey: "root/review", output: name, checksum: "sha256-x", size: 1, mediaType: "application/json" }) }) });
+  assert.ok(next.ok, next.ok ? "" : next.error);
+  assert.equal(next.state.checkpoints["root/review"].data.iterations, 2, "the resumed run finishes the loop");
+});
+
 test("loop snapshots reject out-of-range iterations and orphan loop state", () => {
   const wf = workflow([task("gather"), loop("review", "for-each", { maxIterations: 2 }), task("deliver")]);
   let state = start(wf, { runId: "r1" }).state;

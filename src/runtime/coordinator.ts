@@ -10,15 +10,16 @@ import { refLoaderFor, resolveScriptInputs } from "./artifacts.ts";
 import { ArtifactStore } from "./artifact-store.ts";
 import type { ArtifactRef, ArtifactSink } from "../domain/artifacts.ts";
 import type { ProcessResult } from "./process-runner.ts";
-import { processSpecOf } from "../domain/node.ts";
+import { processSpecFor } from "../domain/node.ts";
 import { dirname, isAbsolute, resolve } from "node:path";
-import { start as engineStart, currentPosition, scriptLeafAt, transition as engineTransition } from "../engine/interpreter.ts";
+import { start as engineStart, processLeafAt, transition as engineTransition } from "../engine/interpreter.ts";
 import { upsertInvocation, type Execution } from "../domain/execution.ts";
-import { deepEqual } from "../domain/json.ts";
+import { deepEqual, type JsonValue } from "../domain/json.ts";
+import { lastSegment } from "../domain/keys.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { LIMITS } from "../domain/limits.ts";
 import type { Issue, TaskOutcome } from "../engine/interpreter.ts";
-import type { ScriptBlock, ScriptSpec, Workflow } from "../domain/workflow.ts";
+import type { ScriptSpec, Workflow } from "../domain/workflow.ts";
 import { blockOf, workflowBlocks } from "../domain/workflow.ts";
 import type { NodeResult } from "./runner.ts";
 import { latestSnapshot, withinMemoryBound, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
@@ -33,8 +34,8 @@ import { compactEpochMessages, estimateMessageTokens, projectEpoch } from "./epo
 import { createTransfer, preparedTransfer, ROLLOVER_COMMAND, TRANSFER_ENTRY_TYPE, validTransferDigest, type RolloverCompletedV1, type RolloverTransferV1 } from "./transfer.ts";
 import { statusValue } from "./status.ts";
 import { DeliveryCoordinator } from "./delivery.ts";
-import { EVENT_ENTRY_TYPE, RunJournal, project, summarizeProjection, type RunEvent, type RunProjection } from "./journal.ts";
-import { nextTuiMode, renderEventLog, renderStatus, tuiModeFromEnv, type TuiMode } from "./tui.ts";
+import { EVENT_ENTRY_TYPE, RunJournal, parseEvent, project, type EventRunner, type RunEvent, type RunProjection } from "./journal.ts";
+import { nextTuiMode, renderDetailed, renderEventLog, renderStatus, tuiModeFromEnv, type TuiMode } from "./tui.ts";
 
 
 export const START_TOOL_NAME = "workflow_start";
@@ -57,7 +58,11 @@ export interface ToolResult {
 }
 
 type UiContext = {
-  ui: { setStatus(id: string, value: string | undefined): void; notify(message: string, level: "info" | "error" | "warning"): void };
+  ui: {
+    setStatus(id: string, value: string | undefined): void;
+    setWidget?(id: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
+    notify(message: string, level: "info" | "error" | "warning"): void;
+  };
   cwd?: string;
   model?: { contextWindow?: number; maxTokens?: number };
   getSystemPrompt?(): string;
@@ -215,30 +220,27 @@ export class RuntimeCoordinator {
     return compiled;
   }
 
-  private clipReason(value: string | undefined): string {
-    let clipped = value ?? "unknown";
-    while (clipped.length > 0 && Buffer.byteLength(clipped, "utf8") > 256) clipped = clipped.slice(0, -16);
-    return clipped;
-  }
-
   /**
    * Append one lifecycle event to the bounded journal and persist it
    * best-effort. Observability must never fail the run itself.
    */
   private record(event: RunEvent): void {
-    this.journal.append(event);
+    const normalized = parseEvent(event);
+    if (!normalized) return;
+    this.journal.append(normalized);
     try {
-      this.pi.appendEntry(EVENT_ENTRY_TYPE, event);
+      this.pi.appendEntry(EVENT_ENTRY_TYPE, normalized);
     } catch (error) {
       if (!this.eventsPersistWarned) {
         this.eventsPersistWarned = true;
         this.notifyCtx.current?.ui.notify(`Run-event persistence failed; the TUI falls back to in-memory events: ${error instanceof Error ? error.message : String(error)}.`, "warning");
       }
     }
+    const ctx = this.notifyCtx.current;
+    if (ctx?.ui) this.showStatus(ctx);
   }
 
-  /** Record an agent node start at most once per position/attempt, even if delivery retries. */
-  private syncInvocations(runId: string, previous: Execution | undefined, next: Execution): void {
+  private syncInvocations(workflow: Workflow, runId: string, previous: Execution | undefined, next: Execution): void {
     const before = previous?.invocations ?? {};
     const after = next.invocations ?? {};
     const settled: string[] = [];
@@ -255,12 +257,47 @@ export class RuntimeCoordinator {
     for (const key of settled) {
       const current = after[key]!;
       if (current.status === "succeeded") this.record({ type: "node-succeeded", runId, at: this.now(), key });
-      else if (current.status === "waiting") {
-        const reason = next.checkpoints[key]?.summary ?? previous?.checkpoints[key]?.summary;
-        this.record({ type: "node-waiting", runId, at: this.now(), key, reason: this.clipReason(reason) });
+      else if (current.status === "failed" || current.status === "waiting") {
+        const reason = next.checkpoints[key]?.summary ?? previous?.checkpoints[key]?.summary ?? "unknown";
+        this.record({ type: current.status === "failed" ? "node-failed" : "node-waiting", runId, at: this.now(), key, reason });
       } else if (current.status === "canceled") {
         this.record({ type: "node-canceled", runId, at: this.now(), key });
       }
+    }
+    for (const key of next.checkpointOrder) {
+      if (next.checkpoints[key]?.skipped !== true || previous?.checkpoints[key]?.skipped === true) continue;
+      const block = blockOf(workflow, lastSegment(key));
+      const runner: EventRunner = block?.kind === "script" ? "process" : block?.kind === "loop" ? "control" : "agent";
+      this.record({ type: "node-skipped", runId, at: this.now(), key, runner, reason: next.checkpoints[key]?.summary ?? "unknown" });
+    }
+    for (const [key, loopState] of Object.entries(next.loops)) {
+      const prior = previous?.loops[key];
+      if (prior?.iteration === loopState.iteration) continue;
+      const block = blockOf(workflow, lastSegment(key));
+      if (!block || block.kind !== "loop") continue;
+      const total = block.mode === "for-each" ? loopState.items?.length ?? block.maxIterations : block.maxIterations;
+      const first = prior === undefined ? 1 : loopState.iteration > prior.iteration ? prior.iteration + 1 : loopState.iteration;
+      for (let iteration = first; iteration <= loopState.iteration; iteration += 1) {
+        this.record({ type: "loop-iteration-started", runId, at: this.now(), key, mode: block.mode, iteration, total: Math.max(iteration, total) });
+      }
+    }
+    for (const key of next.checkpointOrder) {
+      if (next.loops[key] !== undefined) continue;
+      const block = blockOf(workflow, lastSegment(key));
+      const data = next.checkpoints[key]?.data;
+      if (!block || block.kind !== "loop" || !data || typeof data !== "object" || Array.isArray(data)) continue;
+      if (previous?.checkpoints[key] === next.checkpoints[key]) continue;
+      if (typeof data.iterations !== "number" || !Number.isInteger(data.iterations) || data.iterations < 0) continue;
+      const iterations = data.iterations;
+      const total = block.mode === "for-each" ? iterations : block.maxIterations;
+      const loopEvents = this.journal.all.filter((event) => event.runId === runId && "key" in event && event.key === key);
+      const lastCompletion = loopEvents.findLastIndex((event) => event.type === "loop-completed");
+      const currentCycle = loopEvents.slice(lastCompletion + 1);
+      for (let iteration = 1; iteration <= iterations; iteration += 1) {
+        const recorded = currentCycle.some((event) => event.type === "loop-iteration-started" && event.iteration === iteration);
+        if (!recorded) this.record({ type: "loop-iteration-started", runId, at: this.now(), key, mode: block.mode, iteration, total: Math.max(iteration, total) });
+      }
+      this.record({ type: "loop-completed", runId, at: this.now(), key, mode: block.mode, iterations, total: block.mode === "for-each" ? iterations : block.maxIterations, exhausted: data.exhausted === true });
     }
     for (const key of started) {
       const current = after[key]!;
@@ -268,24 +305,24 @@ export class RuntimeCoordinator {
       if (prior && current.attempt > prior.attempt) {
         this.record({ type: "retry-scheduled", runId, at: this.now(), key, attempt: current.attempt });
       }
+      this.record({ type: "node-ready", runId, at: this.now(), key, runner: current.runner, attempt: current.attempt });
       this.record({ type: "node-started", runId, at: this.now(), key, runner: current.runner, attempt: current.attempt });
     }
   }
 
-  /** Best-effort stdout/stderr log artifacts; failures never block the run. */
-  private publishLogs(sink: ArtifactSink, exit: { readonly stdout: string; readonly stderr: string }): void {
-    try {
-      if (exit.stdout) sink.publishText("stdout", exit.stdout);
-      if (exit.stderr) sink.publishText("stderr", exit.stderr);
-    } catch {
-      // The store is diagnostic; a storage failure must not fail the script.
+  private publishLogs(runId: string, key: string, sink: ArtifactSink | undefined, exit: { readonly stdout: string; readonly stderr: string; readonly truncated: boolean }): void {
+    for (const stream of ["stdout", "stderr"] as const) {
+      const text = exit[stream];
+      if (!text) continue;
+      this.record({ type: "node-log", runId, at: this.now(), key, stream, message: text, truncated: exit.truncated });
+      try {
+        sink?.publishText(stream, text);
+      } catch {
+        // Log artifacts are best effort. The bounded journal event remains available.
+      }
     }
   }
 
-  /**
-   * Publishes the script's declared capture files into the run's artifact store on an
-   * accepted exit; a capture failure fails the step through its repair policy.
-   */
   private captureScriptFiles(key: string, spec: ScriptSpec, cwd: string, store: ArtifactStore | undefined, exit: ProcessResult): { readonly files?: readonly ArtifactRef[]; readonly captureError?: string } {
     const accepted = !exit.timedOut && !exit.cancelled && exit.spawnError === undefined && exit.code !== undefined && spec.acceptedExitCodes.includes(exit.code);
     if (!accepted || !store || !spec.files?.length) return {};
@@ -317,7 +354,9 @@ export class RuntimeCoordinator {
         ? this.runtimeArtifactRoot
         : undefined;
     if (!dir) return undefined;
-    const store = ArtifactStore.forRun(dir, runId);
+    const store = ArtifactStore.forRun(dir, runId, ({ invocationKey: key, ...artifact }) => {
+      this.record({ type: "artifact-published", runId, at: this.now(), key, ...artifact });
+    });
     if (!store) return undefined;
     this.artifactStores.set(runId, store);
     return store;
@@ -364,13 +403,18 @@ export class RuntimeCoordinator {
     return this.tuiMode;
   }
 
-  inspect(): { mode: TuiMode; projection: RunProjection | undefined; events: readonly string[] } | undefined {
-    if (this.state.status !== "active") return undefined;
-    const active: ActiveState = this.state;
-    const events = this.journal.all.filter((event) => event.runId === active.execution.runId);
+  inspect(runId?: string): { runId: string; mode: TuiMode; projection: RunProjection | undefined; events: readonly string[] } | undefined {
+    const requested = runId?.trim();
+    const activeRunId = this.state.status === "active" ? this.state.execution.runId : undefined;
+    const selectedRunId = requested || activeRunId || this.journal.all.at(-1)?.runId;
+    if (!selectedRunId) return undefined;
+    const events = this.journal.all.filter((event) => event.runId === selectedRunId);
+    if (events.length === 0) return undefined;
+    const projection = project(events);
     return {
+      runId: selectedRunId,
       mode: this.tuiMode,
-      projection: project(events),
+      projection,
       events: renderEventLog(events, 8),
     };
   }
@@ -411,7 +455,14 @@ export class RuntimeCoordinator {
   private showStatus(ctx: UiContext): void {
     const active = this.state.status === "active" ? this.state : undefined;
     const projection = active ? this.projectionFor(active.execution.runId) : undefined;
-    ctx.ui.setStatus("choreograph", renderStatus({ mode: this.tuiMode, compact: active ? statusValue(active.workflow, active.execution) : undefined, projection }));
+    const compact = active ? statusValue(active.workflow, active.execution) : undefined;
+    if (this.tuiMode === "detailed" && projection && ctx.ui.setWidget) {
+      ctx.ui.setStatus("choreograph", renderStatus({ mode: "compact", compact, projection }));
+      ctx.ui.setWidget("choreograph-details", [...renderDetailed(projection, compact)], { placement: "aboveEditor" });
+      return;
+    }
+    ctx.ui.setWidget?.("choreograph-details", undefined);
+    ctx.ui.setStatus("choreograph", renderStatus({ mode: this.tuiMode, compact, projection }));
   }
 
   private requireActive(): ActiveState {
@@ -419,19 +470,19 @@ export class RuntimeCoordinator {
     return this.state;
   }
 
-  private async deliverPending(ctx: UiContext): Promise<void> {
+  private async deliverPending(): Promise<void> {
     if (this.suppressDelivery || this.state.status !== "active" || this.state.delivered) return;
-    if (scriptLeafAt(this.state.workflow, this.state.execution) && !this.state.parked) return;
     const pending = this.state;
+    const process = processLeafAt(pending.workflow, pending.execution);
+    if (process && !pending.parked) return;
     const leaf = pending.execution.stack[pending.execution.stack.length - 1];
-    const parkedScript = scriptLeafAt(pending.workflow, pending.execution);
-    const message = parkedScript && pending.parked
+    const message = process && pending.parked
       ? [
           controlMessage(pending.execution),
           "",
-          "The script at this position failed and its retries are exhausted. The run stays parked here.",
-          `Last failure: ${pending.execution.checkpoints[parkedScript.key]?.summary ?? "unavailable"}.`,
-          "Fix the cause if needed, then call `workflow_retry` to re-run the script, or `workflow_abort` to stop the run.",
+          "The process at this position failed and its retries are exhausted. The run stays parked here.",
+          `Last failure: ${pending.execution.checkpoints[process.key]?.summary ?? "unavailable"}.`,
+          "Fix the cause if needed, then call `workflow_retry` to re-run the process, or `workflow_abort` to stop the run.",
         ].join("\n")
       : controlMessage(pending.execution);
     const delivered = await this.delivery.deliver({
@@ -521,7 +572,7 @@ export class RuntimeCoordinator {
     });
   }
 
-  private scriptHandoffManifest(state: ActiveState, previous: Execution, next: Execution): HandoffManifestV1 {
+  private processHandoffManifest(state: ActiveState, previous: Execution, next: Execution): HandoffManifestV1 {
     let manifest = this.manifestFor(state, this.notifyCtx.current ?? { ui: { setStatus: () => {}, notify: () => {} } });
     for (const key of next.checkpointOrder) {
       const checkpoint = next.checkpoints[key];
@@ -595,8 +646,8 @@ export class RuntimeCoordinator {
     this.commit(this.snapshotOf(next, false, manifest), `start of ${workflow.title} run ${next.execution.runId}`);
     this.handoffs.set(next.execution.runId, manifest);
     this.isolationRunId = next.execution.runId;
-    this.record({ type: "run-started", runId: next.execution.runId, at: this.now(), workflow: workflow.name, target: this.clipReason(target.trim()) });
-    this.syncInvocations(next.execution.runId, undefined, execution);
+    this.record({ type: "run-started", runId: next.execution.runId, at: this.now(), workflow: workflow.name, target: target.trim() });
+    this.syncInvocations(workflow, next.execution.runId, undefined, execution);
     this.adoptActive(next, ctx);
     ctx.ui.notify(`${workflow.title} started.`, "info");
     return next;
@@ -682,7 +733,7 @@ export class RuntimeCoordinator {
         isError: true,
       };
     }
-    this.syncInvocations(current.execution.runId, current.execution, result.state);
+    this.syncInvocations(current.workflow, current.execution.runId, current.execution, result.state);
     const positionKey = current.execution.stack.at(-1)?.key ?? "unknown";
     const nextManifest = this.addHandoff(current, raw.checkpoint, positionKey, raw.status, result.state, raw.issues?.map((issue) => issue.target));
     if (result.effect.kind === "complete") {
@@ -751,8 +802,8 @@ export class RuntimeCoordinator {
   }
 
   private async drive(active: ActiveState, ctx: UiContext): Promise<Execution> {
-    if (scriptLeafAt(active.workflow, active.execution) && active.parked) {
-      await this.deliverPending(ctx);
+    if (processLeafAt(active.workflow, active.execution) && active.parked) {
+      await this.deliverPending();
       return active.execution;
     }
     return await this.driveLoop(active, ctx);
@@ -762,99 +813,100 @@ export class RuntimeCoordinator {
     let current = active;
     let execution = active.execution;
     while (this.state === current) {
-      const script = scriptLeafAt(current.workflow, current.execution);
-      if (!script) {
+      const process = processLeafAt(current.workflow, current.execution);
+      if (!process) {
         const agentLeaf = current.execution.stack[current.execution.stack.length - 1];
         if (agentLeaf && (agentLeaf.kind === "task" || agentLeaf.kind === "plan" || agentLeaf.kind === "node")) {
           this.dispatchAgent(current, agentLeaf);
         }
-        await this.deliverPending(ctx);
+        await this.deliverPending();
         return execution;
       }
+      const processKey = process.key;
       const leaf = current.execution.stack[current.execution.stack.length - 1];
-      const recorded = current.execution.invocations?.[script.key];
-      
-      
+      const recorded = current.execution.invocations?.[processKey];
       const reexecution = recorded !== undefined && recorded.status !== "running";
       const attempt = reexecution ? recorded.attempt + 1 : recorded?.attempt ?? (leaf && "attempt" in leaf ? leaf.attempt : 1);
       if (reexecution) {
-        this.record({ type: "retry-scheduled", runId: current.execution.runId, at: this.now(), key: script.key, attempt });
+        this.record({ type: "retry-scheduled", runId: current.execution.runId, at: this.now(), key: processKey, attempt });
       }
-      const invocation = { ...(recorded ?? { blockId: script.block.id, key: script.key, runner: "process" as const, attempt }), status: "running" as const, attempt };
-      const processSpec = processSpecOf(script.block, dirname(current.workflow.overviewPath));
+      const invocation = { ...(recorded ?? { blockId: process.blockId, key: processKey, runner: "process" as const, attempt }), status: "running" as const, attempt };
+      const processSpec = processSpecFor(process.script, process.blockId, dirname(current.workflow.overviewPath));
       const store = this.artifactStoreFor(current.workflow, current.execution.runId);
-      const sink = store?.sinkFor(script.key);
-      const resolved = resolveScriptInputs(
-        current.workflow,
-        current.execution,
-        script.block.inputs,
-        store ? (ref) => store.materialize(ref, processSpec.cwd) : undefined,
-      );
+      const sink = store?.sinkFor(processKey);
+      const resolved = process.planKey === undefined
+        ? resolveScriptInputs(
+            current.workflow,
+            current.execution,
+            process.inputs,
+            store ? (ref) => store.materialize(ref, processSpec.cwd) : undefined,
+          )
+        : dependencyInputs(current.execution, process.planKey, process.dependsOn);
       if (!resolved.ok) {
-        this.record({ type: "node-failed", runId: current.execution.runId, at: this.now(), key: script.key, reason: this.clipReason(resolved.error) });
-        ctx.ui.notify(`Script ${script.key} could not run: ${resolved.error}. The run stays at ${script.key}.`, "error");
+        this.record({ type: "node-failed", runId: current.execution.runId, at: this.now(), key: processKey, reason: resolved.error });
+        ctx.ui.notify(`${process.planKey === undefined ? "Script" : "Process operator node"} ${processKey} could not run: ${resolved.error}. The run stays at ${processKey}.`, "error");
         return execution;
       }
-      if (!this.journal.all.some((event) => event.type === "node-started" && event.runId === current.execution.runId && event.key === script.key && event.attempt === invocation.attempt)) {
-        this.record({ type: "node-started", runId: current.execution.runId, at: this.now(), key: script.key, runner: "process", attempt: invocation.attempt });
+      if (!this.journal.all.some((event) => event.type === "node-started" && event.runId === current.execution.runId && event.key === processKey && event.attempt === invocation.attempt)) {
+        this.record({ type: "node-started", runId: current.execution.runId, at: this.now(), key: processKey, runner: "process", attempt: invocation.attempt });
       }
       const result = await this.registry
-        .dispatch(invocation, processSpecOf(script.block, dirname(current.workflow.overviewPath)), resolved.inputs, invocation.attempt > 1 ? { acknowledgedRetry: true } : undefined)
+        .dispatch(invocation, processSpec, resolved.inputs, invocation.attempt > 1 ? { acknowledgedRetry: true } : undefined)
         .result;
       if (this.state !== current) return execution;
       if (result.status === "canceled") {
-        this.record({ type: "node-canceled", runId: current.execution.runId, at: this.now(), key: script.key });
+        this.record({ type: "node-canceled", runId: current.execution.runId, at: this.now(), key: processKey });
         return execution;
       }
       if (!result.exit) {
-        this.record({ type: "node-failed", runId: current.execution.runId, at: this.now(), key: script.key, reason: this.clipReason(result.reason) });
-        ctx.ui.notify(`Script ${script.key} could not run: ${result.reason ?? "unknown runner error"}. The run stays at ${script.key}.`, "error");
+        this.record({ type: "node-failed", runId: current.execution.runId, at: this.now(), key: processKey, reason: result.reason ?? "unknown runner error" });
+        ctx.ui.notify(`${process.planKey === undefined ? "Script" : "Process operator node"} ${processKey} could not run: ${result.reason ?? "unknown runner error"}. The run stays at ${processKey}.`, "error");
         return execution;
       }
       const exit = result.exit;
       if (exit.cancelled) {
-        this.record({ type: "node-canceled", runId: current.execution.runId, at: this.now(), key: script.key });
+        this.record({ type: "node-canceled", runId: current.execution.runId, at: this.now(), key: processKey });
         return execution;
       }
-      const captured = this.captureScriptFiles(script.key, script.block.script, processSpec.cwd, store, exit);
-      if (sink) this.publishLogs(sink, exit);
-      const applied = engineTransition(current.workflow, current.execution, { type: "process-exit", key: script.key, exit, ...captured, ...(sink ? { store: sink } : {}) }, store);
+      const captured = this.captureScriptFiles(processKey, processSpec.spec, processSpec.cwd, store, exit);
+      this.publishLogs(current.execution.runId, processKey, sink, exit);
+      const applied = engineTransition(current.workflow, current.execution, { type: "process-exit", key: processKey, exit, ...captured, ...(sink ? { store: sink } : {}) }, store);
       if (!applied.ok) {
-        this.record({ type: "node-failed", runId: current.execution.runId, at: this.now(), key: script.key, reason: this.clipReason(applied.error) });
-        ctx.ui.notify(`Script result for ${script.key} could not be applied: ${applied.error}. The run stays at ${script.key}.`, "error");
+        this.record({ type: "node-failed", runId: current.execution.runId, at: this.now(), key: processKey, reason: applied.error });
+        ctx.ui.notify(`Result for ${processKey} could not be applied: ${applied.error}. The run stays at ${processKey}.`, "error");
         return execution;
       }
       execution = applied.state;
-      this.syncInvocations(current.execution.runId, current.execution, applied.state);
-      const scriptManifest = this.scriptHandoffManifest(current, current.execution, applied.state);
+      this.syncInvocations(current.workflow, current.execution.runId, current.execution, applied.state);
+      const processManifest = this.processHandoffManifest(current, current.execution, applied.state);
       if (applied.effect.kind === "complete") {
-        this.persistManifest(scriptManifest);
+        this.persistManifest(processManifest);
         await this.finishRun(current, ctx, "completed", applied.state);
         return execution;
       }
       const parked = applied.effect.kind === "stay";
       if (parked && reexecution) {
         
-        this.record({ type: "node-waiting", runId: current.execution.runId, at: this.now(), key: script.key, reason: this.clipReason(applied.state.checkpoints[script.key]?.summary) });
+        this.record({ type: "node-waiting", runId: current.execution.runId, at: this.now(), key: processKey, reason: applied.state.checkpoints[processKey]?.summary ?? "unknown" });
       }
       const next: ActiveState = { ...current, execution: applied.state, delivered: false, ...(parked ? { parked: true } : { parked: undefined }) };
       const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: false });
       if (!withinMemoryBound(pendingSnapshot)) {
         this.record({ type: "run-paused", runId: current.execution.runId, at: this.now(), reason: "memory bound" });
-        ctx.ui.notify(`The run's persisted state would exceed ${LIMITS.memoryBytes / 1024} KiB after script ${script.key}; the run is paused. Abort the run or narrow the workflow outputs.`, "error");
+        ctx.ui.notify(`The run's persisted state would exceed ${LIMITS.memoryBytes / 1024} KiB after process ${processKey}; the run is paused. Abort the run or narrow the workflow outputs.`, "error");
         return execution;
       }
       try {
-        this.commit(this.snapshotOf(next, false, scriptManifest), `script ${script.key} in ${current.workflow.title} run ${current.execution.runId}`);
+        this.commit(this.snapshotOf(next, false, processManifest), `process ${processKey} in ${current.workflow.title} run ${current.execution.runId}`);
       } catch (error) {
         if (!(error instanceof WorkflowStorageError)) throw error;
-        ctx.ui.notify(`${error.message}. The run stays at ${script.key}.`, "error");
+        ctx.ui.notify(`${error.message}. The run stays at ${processKey}.`, "error");
         return execution;
       }
-      this.persistManifest(scriptManifest);
+      this.persistManifest(processManifest);
       this.adoptActive(next, ctx);
       if (parked) {
-        await this.deliverPending(ctx);
+        await this.deliverPending();
         return execution;
       }
       current = next;
@@ -862,10 +914,6 @@ export class RuntimeCoordinator {
     return execution;
   }
 
-  /**
-   * Project one agent outcome onto the journal: success, an accepted retry,
-   * or a wait at the same position.
-   */
   private async finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Execution): Promise<ToolResult> {
     this.record({ type: status === "completed" ? "run-completed" : "run-aborted", runId: current.execution.runId, at: this.now() });
     const manifest = this.handoffs.get(current.execution.runId);
@@ -922,13 +970,13 @@ export class RuntimeCoordinator {
     const current = this.requireActive();
     assertNotCancelled(signal);
     await this.registry.cancelAll();
-    const script = scriptLeafAt(current.workflow, current.execution);
+    const process = processLeafAt(current.workflow, current.execution);
     const leaf = current.execution.stack[current.execution.stack.length - 1];
     const execution = leaf && (leaf.kind === "task" || leaf.kind === "plan" || leaf.kind === "node")
       ? { ...current.execution, status: "aborted" as const, invocations: upsertInvocation(current.execution, leaf.key, {
           blockId: leaf.blockId,
           key: leaf.key,
-          runner: script ? "process" : "agent",
+          runner: process ? "process" : "agent",
           status: "canceled",
           attempt: "attempt" in leaf ? leaf.attempt : 1,
         }) }
@@ -939,21 +987,21 @@ export class RuntimeCoordinator {
   async retry(signal: AbortSignal | undefined, ctx: UiContext): Promise<ToolResult> {
     const current = this.requireActive();
     assertNotCancelled(signal);
-    const script = scriptLeafAt(current.workflow, current.execution);
-    if (!script) {
+    const process = processLeafAt(current.workflow, current.execution);
+    if (!process) {
       return {
-        content: [{ type: "text", text: `workflow_retry applies only when the run is parked at a failed script; the run is at ${current.execution.stack.at(-1)?.key}.` }],
+        content: [{ type: "text", text: `workflow_retry applies only when the run is parked at a failed script or process operator node; the run is at ${current.execution.stack.at(-1)?.key}.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, position: current.execution.stack.at(-1)?.key, status: "not-script" },
         isError: true,
       };
     }
     const next: ActiveState = { ...current, delivered: false, parked: undefined };
     try {
-      this.commit(this.snapshotOf(next, false), `retry of script ${script.key} in ${current.workflow.title} run ${current.execution.runId}`);
+      this.commit(this.snapshotOf(next, false), `retry of process ${process.key} in ${current.workflow.title} run ${current.execution.runId}`);
     } catch (error) {
       if (!(error instanceof WorkflowStorageError)) throw error;
       return {
-        content: [{ type: "text", text: `${error.message}. The run stays parked at ${script.key}.` }],
+        content: [{ type: "text", text: `${error.message}. The run stays parked at ${process.key}.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, status: "storage-failed" },
         isError: true,
       };
@@ -961,15 +1009,14 @@ export class RuntimeCoordinator {
     this.adoptActive(next, ctx);
     const rollover = this.supportsSessionRollover(ctx);
     this.suppressDelivery = rollover;
-    let finalExecution: Execution;
     try {
-      finalExecution = await this.drive(next, ctx);
+      await this.drive(next, ctx);
     } finally {
       this.suppressDelivery = false;
     }
     if (this.state.status !== "active") {
       return {
-        content: [{ type: "text", text: `Retried script ${script.key}; ${current.workflow.title} run ${current.execution.runId} completed. A summary request arrives in the next message.` }],
+        content: [{ type: "text", text: `Retried process ${process.key}; ${current.workflow.title} run ${current.execution.runId} completed. A summary request arrives in the next message.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, status: "completed" },
         terminate: true,
       };
@@ -979,7 +1026,7 @@ export class RuntimeCoordinator {
       const active = this.state;
       this.prepareRollover(active.workflow, active.execution, this.snapshotOf(active, false), false, ctx);
       return {
-        content: [{ type: "text", text: `Retried script ${script.key}. The workflow will continue at ${leafKey} in a fresh session.` }],
+        content: [{ type: "text", text: `Retried process ${process.key}. The workflow will continue at ${leafKey} in a fresh session.` }],
         details: { workflow: active.workflow.name, runId: active.execution.runId, position: leafKey, status: "rollover-pending" },
         terminate: true,
       };
@@ -988,8 +1035,8 @@ export class RuntimeCoordinator {
     const failureSummary = parkedNow ? this.state.execution.checkpoints[this.state.execution.stack.at(-1)!.key]?.summary : undefined;
     return {
       content: [{ type: "text", text: parkedNow
-        ? `Retried script ${script.key}; it failed again: ${failureSummary ?? "see the checkpoint"}. The run stays parked at ${leafKey}. Fix the cause, call workflow_retry again, or workflow_abort.`
-        : `Retried script ${script.key}. The run stopped at ${leafKey}.` }],
+        ? `Retried process ${process.key}; it failed again: ${failureSummary ?? "see the checkpoint"}. The run stays parked at ${leafKey}. Fix the cause, call workflow_retry again, or workflow_abort.`
+        : `Retried process ${process.key}. The run stopped at ${leafKey}.` }],
       details: { workflow: this.state.workflow.name, runId: this.state.execution.runId, position: leafKey, status: parkedNow ? "parked" : "active" },
     };
   }
@@ -1028,6 +1075,9 @@ export class RuntimeCoordinator {
         ...(transfer.parentSession ? { parentSession: transfer.parentSession } : {}),
       });
       if (transfer.generatedDefinition) child.appendCustomEntry(DEFINITIONS_ENTRY_TYPE, transfer.generatedDefinition);
+      for (const event of this.journal.all) {
+        if (event.runId === transfer.runId) child.appendCustomEntry(EVENT_ENTRY_TYPE, event);
+      }
       child.appendCustomEntry(HANDOFF_MANIFEST_TYPE, transfer.manifest);
       child.appendCustomMessageEntry(HANDOFF_MESSAGE_TYPE, renderHandoffCapsule(transfer.manifest), false, {
         runId: transfer.runId,
@@ -1182,6 +1232,8 @@ export class RuntimeCoordinator {
   restoreRun(ctx: UiContext): void {
     const branch = ctx.sessionManager?.getBranch() ?? [];
     this.restoreDefinitions(branch);
+    this.journal.clear();
+    this.replayJournal(branch);
     const pendingTransfer = preparedTransfer(branch);
     if (pendingTransfer) {
       this.state = { status: "rollover-pending", transfer: pendingTransfer.transfer };
@@ -1229,9 +1281,9 @@ export class RuntimeCoordinator {
       return;
     }
     this.freezePromptSources(workflow);
-    const leafScript = scriptLeafAt(workflow, migrated.execution);
+    const leafProcess = processLeafAt(workflow, migrated.execution);
     const leafKey = migrated.execution.stack[migrated.execution.stack.length - 1]?.key;
-    const leafWaiting = leafScript !== undefined && leafKey !== undefined && migrated.execution.invocations?.[leafKey]?.status === "waiting";
+    const leafWaiting = leafProcess !== undefined && leafKey !== undefined && migrated.execution.invocations?.[leafKey]?.status === "waiting";
     const state: ActiveState = {
       status: "active",
       workflow,
@@ -1242,7 +1294,6 @@ export class RuntimeCoordinator {
     this.baselineTools = snapshot.baselineTools
       ? [...snapshot.baselineTools]
       : this.knownTools().filter((name) => !this.isWorkflowTool(name));
-    this.replayJournal(branch);
     const manifest = snapshot.handoff ?? latestHandoffManifest(branch, state.execution.runId);
     if (manifest) this.handoffs.set(state.execution.runId, manifest);
     else this.persistManifest(this.manifestFor(state, ctx));
@@ -1286,7 +1337,7 @@ export class RuntimeCoordinator {
 
   async handleAgentSettled(ctx: UiContext): Promise<void> {
     this.notifyCtx.current = ctx;
-    await this.deliverPending(ctx);
+    await this.deliverPending();
     if (this.state.status === "idle") this.isolationRunId = undefined;
   }
 
@@ -1315,6 +1366,17 @@ export class RuntimeCoordinator {
     const budget = Math.max(1_024, Math.floor((contextWindow - reserve) * 0.9) - systemTokens - 4_096);
     return { messages: capWorkflowContext(isolated, budget) };
   }
+}
+
+/** Dependency results of a process operator node, delivered as its JSON stdin payload. */
+function dependencyInputs(execution: Execution, planKey: string, dependsOn: readonly string[] | undefined): { readonly ok: true; readonly inputs?: Readonly<Record<string, JsonValue>> } {
+  const results = execution.plans[planKey]?.results ?? {};
+  const payload: Record<string, JsonValue> = {};
+  for (const dependency of dependsOn ?? []) {
+    const data = results[dependency]?.data;
+    if (data !== undefined) payload[dependency] = data;
+  }
+  return Object.keys(payload).length > 0 ? { ok: true, inputs: payload } : { ok: true };
 }
 
 function blocksWithTools(workflow: Workflow): readonly (readonly string[])[] {

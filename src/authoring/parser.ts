@@ -9,6 +9,7 @@ import type {
   OperatorDescriptor,
   PlanBlock,
   ScriptBlock,
+  ScriptSpec,
   SequenceBlock,
   TaskBlock,
   Workflow,
@@ -198,12 +199,18 @@ function loadOperators(directory: string, contracts: ReadonlyMap<string, Contrac
     if (output !== undefined && !contracts.has(output)) {
       throw new Error(`${label} output names contract "${output}", which has no contracts/ file`);
     }
+    if (frontmatter.script !== undefined && frontmatter.tools !== undefined) {
+      throw new Error(`${label} declares both "script" and "tools"; a process operator takes no tools`);
+    }
+    const script = frontmatter.script === undefined ? undefined : parseScriptSpec(frontmatter.script, `${label}.script`);
+    if (script) assertScriptPaths(script, `${label}.script`, lexicalRoot);
     operators.set(id, {
       id,
       path,
       description: stringAt(frontmatter.description, `${label} description`),
       ...(frontmatter.tools !== undefined ? { tools: parseToolList(frontmatter.tools, `${label} tools`)! } : {}),
       ...(output !== undefined ? { output } : {}),
+      ...(script ? { script } : {}),
     });
   }
   return operators;
@@ -216,6 +223,7 @@ interface CompileContext {
   readonly contracts: ReadonlyMap<string, ContractDescriptor>;
   readonly ids: Set<string>;
   readonly inputEdges: Map<string, string[]>;
+  allowItemInputs?: boolean;
 }
 
 function registerId(context: CompileContext, id: string, label: string): void {
@@ -228,7 +236,10 @@ function recordInputEdges(context: CompileContext, consumerId: string, inputs: R
   if (!inputs) return;
   const producers = context.inputEdges.get(consumerId) ?? [];
   for (const [name, binding] of Object.entries(inputs)) {
-    if (binding.from === "$item") throw new Error(`${label}.${name}.from "$item" is only available inside a loop body`);
+    if (binding.from === "$item") {
+      if (!context.allowItemInputs) throw new Error(`${label}.${name}.from "$item" is only available inside a loop body`);
+      continue;
+    }
     if (binding.from === "root" || binding.from === consumerId || !context.ids.has(binding.from)) {
       throw new Error(`${label}.${name}.from names "${binding.from}", which is not an earlier step`);
     }
@@ -258,6 +269,23 @@ function bodySequence(context: CompileContext, parentId: string, suffix: string,
   return { kind: "sequence", id, children };
 }
 
+function scriptStep(entry: ObjectValue, id: string, label: string, context: CompileContext, script: ScriptSpec, output?: string): ScriptBlock {
+  const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
+  recordInputEdges(context, id, inputs, label);
+  const guard = parseGuard(entry.when, `${label}.when`);
+  recordGuardEdge(context, id, guard, `${label}.when`);
+  const recovery = entry.repair === undefined ? undefined : parseRecovery(entry.repair, `${label}.repair`);
+  return {
+    kind: "script",
+    id,
+    script,
+    ...(recovery ? { recovery } : {}),
+    ...(inputs ? { inputs } : {}),
+    ...(guard ? { guard } : {}),
+    ...(output !== undefined ? { output } : {}),
+  };
+}
+
 function parseStepEntry(raw: unknown, index: number, label: string, context: CompileContext): Block {
   if (typeof raw === "string") {
     const path = normalizeInstruction(raw, index, label, context);
@@ -278,12 +306,27 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     for (const key of ["run", "tools", "done", "output", "plan"] as const) {
       if (entry[key] !== undefined) throw new Error(`${label}.${key} only applies to "run:" tasks`);
     }
+    for (const key of ["script", "operator"] as const) {
+      if (entry[key] !== undefined) throw new Error(`${label}.${key} cannot be combined with "${loopKeys[0]}"`);
+    }
     const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
     recordInputEdges(context, id, inputs, label);
     const guard = parseGuard(entry.when, `${label}.when`);
     recordGuardEdge(context, id, guard, `${label}.when`);
     const block = parseLoop(loopKeys[0], entry[loopKeys[0]], id, label, context);
     return { ...(guard ? { guard } : {}), ...block, ...(inputs ? { inputs } : {}) };
+  }
+  if (entry.operator !== undefined) {
+    for (const key of ["run", "tools", "done", "output", "plan", "script", "for_each", "repeat_until"] as const) {
+      if (entry[key] !== undefined) throw new Error(`${label}.${key} cannot be combined with "operator"`);
+    }
+    const id = stringAt(entry.id, `${label}.id`);
+    registerId(context, id, label);
+    const operatorId = stringAt(entry.operator, `${label}.operator`);
+    const operator = context.operators.get(operatorId);
+    if (!operator) throw new Error(`${label}.operator names "${operatorId}", which has no operator file`);
+    if (!operator.script) throw new Error(`${label}.operator "${operatorId}" is a model operator; steps support process operators only`);
+    return scriptStep(entry, id, label, context, operator.script, operator.output);
   }
   const structural = (["plan", "script"] as const).filter((key) => entry[key] !== undefined);
   if (structural.length > 1) throw new Error(`${label} declares more than one of: ${structural.join(", ")}`);
@@ -293,35 +336,13 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     for (const key of ["run", "tools", "done", "plan"] as const) {
       if (entry[key] !== undefined) throw new Error(`${label}.${key} only applies to "run:" tasks`);
     }
-    const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
-    recordInputEdges(context, id, inputs, label);
-    const guard = parseGuard(entry.when, `${label}.when`);
-    recordGuardEdge(context, id, guard, `${label}.when`);
-    const recovery = entry.repair === undefined ? undefined : parseRecovery(entry.repair, `${label}.repair`);
     const output = entry.output === undefined ? undefined : stringAt(entry.output, `${label}.output`);
     if (output !== undefined && !context.contracts.has(output)) {
       throw new Error(`${label}.output names contract "${output}", which has no contracts/ file`);
     }
     const spec = parseScriptSpec(entry.script, `${label}.script`);
-    if (spec.cwd !== ".") {
-      const target = resolve(context.lexicalRoot, spec.cwd);
-      const rel = relative(context.lexicalRoot, target);
-      if (escapesWorkflowRoot(rel)) throw new Error(`${label}.script.cwd escapes the workflow directory`);
-    }
-    (spec.files ?? []).forEach((capture, index) => {
-      const target = resolve(context.lexicalRoot, spec.cwd, capture.path);
-      const rel = relative(context.lexicalRoot, target);
-      if (escapesWorkflowRoot(rel)) throw new Error(`${label}.script.files[${index}].path escapes the workflow directory`);
-    });
-    return {
-      kind: "script",
-      id,
-      script: spec,
-      ...(recovery ? { recovery } : {}),
-      ...(inputs ? { inputs } : {}),
-      ...(guard ? { guard } : {}),
-      ...(output !== undefined ? { output } : {}),
-    } satisfies ScriptBlock;
+    assertScriptPaths(spec, `${label}.script`, context.lexicalRoot);
+    return scriptStep(entry, id, label, context, spec, output);
   }
   if (structural.length === 1) {
     const id = stringAt(entry.id, `${label}.id`);
@@ -361,6 +382,19 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
   } satisfies TaskBlock;
 }
 
+function assertScriptPaths(spec: ScriptSpec, label: string, workflowRoot: string): void {
+  if (spec.cwd !== ".") {
+    const target = resolve(workflowRoot, spec.cwd);
+    const rel = relative(workflowRoot, target);
+    if (escapesWorkflowRoot(rel)) throw new Error(`${label}.cwd escapes the workflow directory`);
+  }
+  (spec.files ?? []).forEach((capture, index) => {
+    const target = resolve(workflowRoot, spec.cwd, capture.path);
+    const rel = relative(workflowRoot, target);
+    if (escapesWorkflowRoot(rel)) throw new Error(`${label}.files[${index}].path escapes the workflow directory`);
+  });
+}
+
 function normalizeInstruction(configured: string, index: number, label: string, context: CompileContext): string {
   const entry = configured.replaceAll("\\", "/");
   if (!entry.endsWith(".md")) throw new Error(`${label} must reference a Markdown (.md) file`);
@@ -380,28 +414,46 @@ function parsePlan(raw: unknown, id: string, label: string, context: CompileCont
 
 const LOOP_KEYS = ["items", "body", "maxItems", "maxIterations", "when"] as const;
 
+function parseBodySteps(raw: unknown, label: string, context: CompileContext): readonly Block[] {
+  const body = objectAt(raw, label);
+  if (body.steps === undefined) return [parseBodyStep(body, label, context)];
+  if (body.run !== undefined || body.inputs !== undefined) {
+    throw new Error(`${label} declares both "run" and "steps"; a loop body picks one form`);
+  }
+  for (const key of Object.keys(body)) {
+    if (key !== "steps") throw new Error(`${label}.${key} is not accepted; a loop body holds "run" (one step) or "steps" (a list of steps)`);
+  }
+  const steps = parseStepsList(body.steps, `${label}.steps`, context);
+  if (steps.length > LIMITS.checkpointListItems) {
+    throw new Error(`${label}.steps holds ${steps.length} entries; a loop body holds at most ${LIMITS.checkpointListItems}`);
+  }
+  for (const step of steps) {
+    if (step.kind === "loop") throw new Error(`${label}.steps must not nest loops; nested loops are not supported`);
+    if (step.kind === "plan") throw new Error(`${label}.steps must not contain a plan; plans are not accepted inside a loop body`);
+  }
+  return steps;
+}
+
 function parseBodyStep(raw: unknown, label: string, context: CompileContext): TaskBlock {
-  const body = objectAt(raw, `${label}.body`);
-  const keys = Object.keys(body);
-  for (const key of keys) {
-    if (key !== "run" && key !== "inputs") throw new Error(`${label}.body.${key} is not accepted; a loop body is a single "run:" step`);
+  const body = objectAt(raw, label);
+  for (const key of Object.keys(body)) {
+    if (key !== "run" && key !== "inputs") throw new Error(`${label}.${key} is not accepted; a loop body holds "run" (one step) or "steps" (a list of steps)`);
   }
-  const configured = stringAt(body.run, `${label}.body.run`);
-  const path = normalizeInstruction(configured, 0, `${label}.body`, context);
+  const configured = stringAt(body.run, `${label}.run`);
+  const path = normalizeInstruction(configured, 0, label, context);
   const id = deriveStepLabel(configured, 0);
-  registerId(context, id, `${label}.body`);
-  const inputs = parseInputBindings(body.inputs, `${label}.body.inputs`);
-  for (const [name, binding] of Object.entries(inputs ?? {})) {
-    if (binding.from !== "$item") throw new Error(`${label}.body.inputs.${name}.from must be "$item"; loop bodies bind the current item`);
-  }
+  registerId(context, id, label);
+  const inputs = parseInputBindings(body.inputs, `${label}.inputs`);
+  recordInputEdges(context, id, inputs, `${label}.inputs`);
   return { kind: "task", id, instructionPath: path, ...(inputs ? { inputs } : {}) };
 }
 
 function parseLoop(kind: "for_each" | "repeat_until", raw: unknown, id: string, label: string, context: CompileContext): LoopBlock {
   const body = objectAt(raw, `${label}.${kind}`);
   assertKeys(body, LOOP_KEYS, `${label}.${kind}`);
-  const step = parseBodyStep(body.body, `${label}.${kind}`, context);
-  const sequence = bodySequence(context, id, "body", [step]);
+  const bodyContext: CompileContext = { ...context, allowItemInputs: true };
+  const children = parseBodySteps(body.body, `${label}.${kind}.body`, bodyContext);
+  const sequence = bodySequence(context, id, "body", children);
   if (kind === "for_each") {
     if (body.when !== undefined) throw new Error(`${label}.for_each.when is only accepted by repeat_until`);
     const itemsRaw = objectAt(body.items, `${label}.for_each.items`);

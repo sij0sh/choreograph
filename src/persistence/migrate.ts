@@ -1,7 +1,8 @@
 import type { Execution, Frame, PlanExecution } from "../domain/execution.ts";
+import { isArtifactRef } from "../domain/artifacts.ts";
 import { LIMITS } from "../domain/limits.ts";
 import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
-import type { Block, SequenceBlock, Workflow } from "../domain/workflow.ts";
+import type { Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
 
@@ -19,12 +20,12 @@ function contractProblem(workflow: Workflow, contractId: string | undefined, dat
   return errors.length > 0 ? `${label} violates contract ${contractId}: ${errors.join("; ")}` : undefined;
 }
 
-function hasContractBearingOperator(workflow: Workflow, operators: readonly string[]): boolean {
-  return operators.some((id) => workflow.operators.get(id)?.output !== undefined);
+function hasRuntimeManagedProcessData(state: Execution, key: string, data: unknown): boolean {
+  return state.invocations?.[key]?.status === "waiting" || isArtifactRef(data);
 }
 
-function childrenOf(block: Block | undefined): readonly Block[] | undefined {
-  return block?.kind === "sequence" ? block.children : undefined;
+function hasContractBearingOperator(workflow: Workflow, operators: readonly string[]): boolean {
+  return operators.some((id) => workflow.operators.get(id)?.output !== undefined);
 }
 
 function validatePair(workflow: Workflow, state: Execution, parent: Frame, child: Frame, plans: Readonly<Record<string, PlanExecution>>): string | undefined {
@@ -102,12 +103,14 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
     if (!block && !nodeEntry) return `checkpoint key ${key} does not belong to any block in the current workflow`;
     if (checkpoint.skipped === true) continue;
     if (block?.kind === "task" || block?.kind === "script") {
-      const problem = contractProblem(workflow, block.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
+      const runtimeManaged = block.kind === "script" && hasRuntimeManagedProcessData(state, key, checkpoint.data);
+      const problem = runtimeManaged ? undefined : contractProblem(workflow, block.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
       if (problem) return problem;
     }
     if (nodeEntry) {
       const operator = workflow.operators.get(nodeEntry.node.operator);
-      const problem = contractProblem(workflow, operator?.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
+      const runtimeManaged = operator?.script !== undefined && hasRuntimeManagedProcessData(state, key, checkpoint.data);
+      const problem = runtimeManaged ? undefined : contractProblem(workflow, operator?.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
       if (problem) return problem;
     }
   }
@@ -152,7 +155,8 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
       if (!block.operators.includes(operatorId)) {
         return `retained result ${key}/${resultId} uses operator ${operatorId}, which is not trusted by ${plan.blockId}`;
       }
-      const problem = contractProblem(workflow, operator.output, result.data === undefined ? {} : result.data, `node result ${key}/${resultId}`);
+      const runtimeArtifact = operator.script !== undefined && isArtifactRef(result.data);
+      const problem = runtimeArtifact ? undefined : contractProblem(workflow, operator.output, result.data === undefined ? {} : result.data, `node result ${key}/${resultId}`);
       if (problem) return problem;
       if (!node) retained.add(resultId);
     }

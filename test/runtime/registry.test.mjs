@@ -83,3 +83,16 @@ test("cancel aborts an in-flight process dispatch", async () => {
   assert.equal(await reg.cancel("root/slow"), true);
   assert.equal((await pending).status, "canceled");
 });
+
+test("re-dispatching an at-least-once runner requires an explicit retry acknowledgment", async () => {
+  const reg = registry();
+  const refused = await reg.dispatch(invocation("root/probe", "process", 2), processSpecOf(okScript)).result;
+  assert.equal(refused.status, "failed", "attempt 2 on an at-least-once runner is refused without the acknowledgment");
+  assert.match(refused.reason, /at-least-once/);
+  assert.match(refused.reason, /retry acknowledgment/);
+  const acknowledged = await reg.dispatch(invocation("root/probe", "process", 2), processSpecOf(okScript), undefined, { acknowledgedRetry: true }).result;
+  assert.equal(acknowledged.status, "succeeded", "a deliberate re-dispatch acknowledges the retry safety");
+  const handle = reg.dispatch(invocation("root/frame", "agent", 2), agentSpec);
+  assert.equal(reg.complete("root/frame", { status: "succeeded" }), true, "idempotent runners re-dispatch without an acknowledgment");
+  assert.deepEqual(await handle.result, { status: "succeeded" });
+});

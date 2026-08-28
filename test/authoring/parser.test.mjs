@@ -320,7 +320,7 @@ steps:
       items: { from: gather }
       body: { run: steps/frame.md, tools: [read] }
       maxItems: 4
-`, /loop body is a single "run:" step/],
+`, /is not accepted; a loop body holds "run" \(one step\) or "steps"/],
     ["for-each-when", `
 steps:
   - id: gather
@@ -540,17 +540,17 @@ steps:
 
 test("loop body inputs reject non-item producers", () => {
   const cases = [
-    ["body-rejects-other", `
-description: Reject other producers.
+    ["body-rejects-unknown", `
+description: Reject unknown producers.
 steps:
   - id: gather
     run: steps/frame.md
   - id: bad
     for_each:
       items: { from: gather }
-      body: { run: steps/frame.md, inputs: { file: { from: gather } } }
+      body: { run: steps/frame.md, inputs: { file: { from: missing } } }
       maxItems: 4
-`, /body.inputs.file.from must be "\$item"/],
+`, /body.inputs.file.from names "missing", which is not an earlier step/],
     ["step-rejects-item", `
 description: Reject item outside loops.
 steps:
@@ -570,4 +570,317 @@ steps:
     const dir = workflowDir(name, frontmatter);
     assert.throws(() => loadWorkflowManifest(dir), match, name);
   }
+});
+
+test("script files capture entries parse, reject escaping paths, and reject bad names", () => {
+  const dir = workflowDir("script-files", `
+description: Script run.
+steps:
+  - steps/frame.md
+  - id: build
+    script:
+      argv: [node, test.js]
+      files:
+        - name: report
+          path: out/fixture.txt
+`);
+  const wf = loadWorkflowManifest(dir);
+  const block = wf.root.children[1];
+  assert.equal(block.kind, "script");
+  assert.deepEqual(block.script.files, [{ name: "report", path: "out/fixture.txt" }]);
+
+  const escaping = workflowDir("script-files-escape", `
+description: Script run.
+steps:
+  - steps/frame.md
+  - id: build
+    script:
+      argv: [node, test.js]
+      files:
+        - name: report
+          path: ../escape.txt
+`);
+  assert.throws(() => loadWorkflowManifest(escaping), /escapes the workflow directory/);
+
+  const badName = workflowDir("script-files-name", `
+description: Script run.
+steps:
+  - steps/frame.md
+  - id: build
+    script:
+      argv: [node, test.js]
+      files:
+        - name: "Not A Name"
+          path: out.txt
+`);
+  assert.throws(() => loadWorkflowManifest(badName), /files\[0\]\.name/);
+});
+
+test("multi-step loop bodies parse with tasks, scripts, and item or outer inputs", () => {
+  const dir = workflowDir("loop-steps", `
+description: Multi-step body.
+contracts:
+  report: contracts/report.schema.json
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: review-files
+    for_each:
+      items: { from: gather, select: /data/files }
+      maxItems: 4
+      body:
+        steps:
+          - id: read-one
+            run: steps/read-one.md
+            inputs: { item: { from: "$item" }, scope: { from: gather, select: "/data/scope" } }
+          - id: check-one
+            script:
+              argv: [node, check.mjs]
+              stdout: json
+            inputs: { report: { from: read-one } }
+            output: report
+`, { files: ["steps/frame.md", "steps/read-one.md"] });
+  mkdirSync(join(dir, "contracts"), { recursive: true });
+  writeFileSync(join(dir, "contracts", "report.schema.json"), JSON.stringify({ type: "object" }));
+  const wf = loadWorkflowManifest(dir);
+  const loopBlock = wf.root.children[1];
+  assert.equal(loopBlock.kind, "loop");
+  assert.equal(loopBlock.body.children.length, 2, "the body keeps both steps in order");
+  const [readOne, checkOne] = loopBlock.body.children;
+  assert.equal(readOne.kind, "task");
+  assert.deepEqual(readOne.inputs, { item: { from: "$item" }, scope: { from: "gather", select: "/data/scope" } });
+  assert.equal(wf.inputEdges.get("read-one")?.includes("gather"), true, "the outer producer is recorded as an input edge");
+  assert.equal(checkOne.kind, "script");
+  assert.deepEqual(checkOne.inputs, { report: { from: "read-one" } });
+  assert.equal(checkOne.output, "report");
+});
+
+test("multi-step loop bodies reject nested loops, plans, mixed forms, and overlong lists", () => {
+  const cases = [
+    ["nested-loop", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    for_each:
+      items: { from: gather }
+      maxItems: 2
+      body:
+        steps:
+          - id: inner
+            for_each:
+              items: { from: gather }
+              body: { run: steps/frame.md }
+              maxItems: 2
+`, /must not nest loops/],
+    ["plan-in-body", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    for_each:
+      items: { from: gather }
+      maxItems: 2
+      body:
+        steps:
+          - id: plan-step
+            plan:
+              operators: [inspect]
+`, /must not contain a plan/, { operators: { inspect: "---\ndescription: Inspect.\n---\nbody" } }],
+    ["mixed-forms", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    for_each:
+      items: { from: gather }
+      maxItems: 2
+      body:
+        run: steps/frame.md
+        steps:
+          - run: steps/frame.md
+`, /declares both "run" and "steps"/],
+    ["too-many-steps", `
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    for_each:
+      items: { from: gather }
+      maxItems: 2
+      body:
+        steps:
+${Array.from({ length: 9 }, (_, i) => `          - id: body-${i}\n            run: steps/frame.md`).join("\n")}
+`, /holds 9 entries; a loop body holds at most 8/],
+  ];
+  for (const [name, frontmatter, pattern, options] of cases) {
+    const dir = workflowDir(name, `description: x\n${frontmatter}`, options);
+    assert.throws(() => loadWorkflowManifest(dir), pattern, name);
+  }
+});
+
+test("operator frontmatter may declare a process script", () => {
+  const dir = workflowDir("scripted", `
+description: Process operator run.
+steps:
+  - steps/frame.md
+`, {
+    operators: {
+      fetch: `---
+description: Fetch data from the service.
+script:
+  argv: [node, fetch.mjs]
+  stdout: json
+  timeoutMs: 5000
+---
+Body is never rendered.`,
+      inspect: `---
+description: Inspect code.
+tools: [read, grep]
+---
+Follow the path.`,
+    },
+  });
+  const wf = loadWorkflowManifest(dir);
+  const fetch = wf.operators.get("fetch");
+  assert.equal(fetch.script.argv.join(" "), "node fetch.mjs");
+  assert.equal(fetch.script.stdout, "json");
+  assert.equal(fetch.script.timeoutMs, 5000);
+  assert.equal(fetch.tools, undefined);
+  assert.equal(wf.operators.get("inspect").script, undefined);
+});
+
+test("a process operator rejects tools and unknown script fields", () => {
+  const tools = () => loadWorkflowManifest(workflowDir("scripted-tools", `
+description: Bad operator run.
+steps:
+  - steps/frame.md
+`, {
+    operators: {
+      fetch: `---
+description: Fetch data.
+tools: [read]
+script:
+  argv: [node, fetch.mjs]
+---
+Body`,
+    },
+  }));
+  assert.throws(tools, /takes no tools/);
+  const bad = () => loadWorkflowManifest(workflowDir("scripted-bad", `
+description: Bad operator run.
+steps:
+  - steps/frame.md
+`, {
+    operators: {
+      fetch: `---
+description: Fetch data.
+script:
+  argv: [node, fetch.mjs]
+  shell: true
+---
+Body`,
+    },
+  }));
+  assert.throws(bad, /unknown operators\/fetch\.md\.script key: shell/);
+  const escaping = () => loadWorkflowManifest(workflowDir("scripted-escape", `
+description: Escaping operator run.
+steps:
+  - steps/frame.md
+`, {
+    operators: {
+      fetch: `---
+description: Fetch data.
+script:
+  argv: [node, fetch.mjs]
+  cwd: ../outside
+---
+Body`,
+    },
+  }));
+  assert.throws(escaping, /operators\/fetch\.md\.script\.cwd escapes the workflow directory/);
+});
+
+test("process operators run as loop body steps", () => {
+  const dir = workflowDir("operator-body", `
+description: Operator body run.
+steps:
+  - steps/frame.md
+`, {
+    operators: {
+      fetch: `---
+description: Fetch data.
+output: fetch-report
+script:
+  argv: [node, fetch.mjs]
+  stdout: json
+---
+Body`,
+      inspect: `---
+description: Inspect code.
+---
+Body`,
+    },
+    contracts: { "fetch-report": { type: "object" } },
+  });
+  const manifest = `
+description: Operator body run.
+contracts:
+  fetch-report: contracts/fetch-report.schema.json
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: scan
+    for_each:
+      items: { from: gather, select: /data/files }
+      maxItems: 2
+      body:
+        steps:
+          - id: fetch-one
+            operator: fetch
+            inputs: { item: { from: "$item" } }
+          - id: note
+            run: steps/frame.md
+            inputs: { report: { from: fetch-one } }
+`;
+  // overwrite the frontmatter with the loop workflow and reload
+  mkdirSync(join(dir, "contracts"), { recursive: true });
+  writeFileSync(join(dir, "contracts", "fetch-report.schema.json"), JSON.stringify({ type: "object" }));
+  writeFileSync(join(dir, "WORKFLOW.md"), `---\n${manifest.trim()}\n---\n\n# Overview\n`);
+  const wf = loadWorkflowManifest(dir);
+  const loop = wf.root.children[1];
+  assert.equal(loop.kind, "loop");
+  const steps = loop.body.children;
+  assert.equal(steps[0].kind, "script");
+  assert.deepEqual(steps[0].script.argv, ["node", "fetch.mjs"]);
+  assert.equal(steps[0].output, "fetch-report");
+  assert.deepEqual(steps[0].inputs.item, { from: "$item" });
+});
+
+test("operator steps reject model operators, unknown ids, and conflicting keys", () => {
+  const mk = (operator, extra = "") => {
+    const dir = workflowDir(`op-${operator.replace(/[^a-z0-9-]/g, "-")}`, `
+description: Operator step run.
+contracts:
+  fetch-report: contracts/fetch-report.schema.json
+steps:
+  - id: one
+    operator: ${operator}
+    ${extra}
+`, {
+      operators: {
+        fetch: `---\ndescription: Fetch data.\noutput: fetch-report\nscript:\n  argv: [node, fetch.mjs]\n---\nBody`,
+        inspect: `---\ndescription: Inspect.\n---\nBody`,
+      },
+      contracts: { "fetch-report": { type: "object" } },
+    });
+    return () => {
+      mkdirSync(join(dir, "contracts"), { recursive: true });
+      writeFileSync(join(dir, "contracts", "fetch-report.schema.json"), JSON.stringify({ type: "object" }));
+      return loadWorkflowManifest(dir);
+    };
+  };
+  assert.throws(mk("missing"), /has no operator file/);
+  assert.throws(mk("inspect"), /model operator; steps support process operators only/);
+  assert.throws(mk("fetch", "done: [x]"), /cannot be combined with "operator"/);
 });

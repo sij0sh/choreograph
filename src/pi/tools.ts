@@ -312,8 +312,8 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
 
   pi.registerTool({
     name: RETRY_TOOL_NAME,
-    label: "Retry script",
-    description: "Re-run the failed script the workflow is parked at. Valid only while the run is parked at a script position after its retries were exhausted.",
+    label: "Retry process",
+    description: "Re-run the failed script step or process operator node where the workflow is parked after exhausting its retries.",
     parameters: NO_PARAMETERS,
     async execute(_id, _params, signal, _update, ctx) {
       return runtime.retry(signal, ctx);
