@@ -4,7 +4,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { start, transition } from "../../src/engine/interpreter.ts";
-import { completed, cp, loop, memoryStore, script, task, workflow } from "../engine/helpers.mjs";
+import { completed, cp, loop, memoryStore, script, sequence, task, workflow } from "../engine/helpers.mjs";
+import { isArtifactRef } from "../../src/domain/artifacts.ts";
+import { LIMITS } from "../../src/domain/limits.ts";
 import { processSpecOf } from "../../src/domain/node.ts";
 import { ArtifactStore } from "../../src/runtime/artifact-store.ts";
 import { inlineRefs, refLoaderFor, resolveBinding, resolveScriptInputs } from "../../src/runtime/artifacts.ts";
@@ -265,6 +267,54 @@ test("loop aggregate references resolve downstream transparently", () => {
     const inline = inlineRefs({ results: state.checkpoints["root/review"].data.results }, load);
     assert.equal(inline.ok, true);
     assert.deepEqual(inline.value.results[1].outputs["review-step"], { verdict: "hold" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("over-budget body outputs bind the payload, not a reference of a reference", () => {
+  const root = mkdtempSync(join(tmpdir(), "pwf-agg-oversize-"));
+  try {
+    const store = ArtifactStore.forRun(root, "r1");
+    const wf = workflow([
+      task("gather"),
+      {
+        kind: "loop", id: "review", mode: "for-each", maxIterations: 8,
+        body: sequence("review-body", [script("review-step", { spec: { stdout: "json" } })]),
+        itemsBinding: { from: "gather", select: "/data/files" },
+      },
+      script("consume", { spec: { stdout: "json" }, inputs: { finding: { from: "review", select: "/data/results/0/outputs/review-step" } } }),
+    ]);
+    const payload = { blob: "x".repeat(LIMITS.checkpointBytes) };
+    const exit = (file) => ({
+      type: "process-exit",
+      key: `root/review/loop[${file === "a" ? 1 : 2}]/review-step`,
+      exit: { code: 0, timedOut: false, stdout: `${JSON.stringify({ file, blob: payload.blob })}\n`, stderr: "", truncated: false },
+      store: store.sinkFor(`root/review/loop[${file === "a" ? 1 : 2}]/review-step`),
+    });
+    let state = start(wf, { runId: "r1" }, store).state;
+    state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: ["a", "b"] })) }, store).state;
+    state = transition(wf, state, exit("a"), store).state;
+    state = transition(wf, state, exit("b"), store).state;
+
+    const bodyRef = state.checkpoints["root/review/loop[1]/review-step"].data;
+    assert.ok(isArtifactRef(bodyRef), "the oversized body checkpoint stores a reference");
+    const ref = state.checkpoints["root/review"].data.results[0].outputs["review-step"];
+    assert.deepEqual(ref, bodyRef, "the aggregate reuses the body reference instead of re-wrapping it");
+    assert.ok(ref.size > LIMITS.checkpointBytes, "the reference addresses the payload, not a small ref-JSON");
+
+    const loaded = store.load(ref);
+    assert.equal(loaded.ok, true, loaded.ok ? "" : loaded.error);
+    assert.deepEqual(JSON.parse(loaded.ok ? loaded.content.toString("utf8") : ""), { file: "a", blob: payload.blob });
+
+    const resolved = resolveScriptInputs(wf, state, wf.root.children[2].inputs, (r) => store.materialize(r, root));
+    assert.equal(resolved.ok, true, resolved.ok ? "" : resolved.error);
+    const onDisk = JSON.parse(readFileSync(join(root, resolved.inputs.finding), "utf8"));
+    assert.deepEqual(onDisk, { file: "a", blob: payload.blob }, "downstream materialization yields the payload");
+
+    const inline = inlineRefs({ results: state.checkpoints["root/review"].data.results }, refLoaderFor(store));
+    assert.equal(inline.ok, true);
+    assert.deepEqual(inline.value.results[1].outputs["review-step"], { file: "b", blob: payload.blob });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

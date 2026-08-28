@@ -334,9 +334,11 @@ Rules:
 - `maxCaptureBytes` defaults to 65536 (cap 1 MiB, shared across stdout and
   stderr). Output beyond the cap is truncated and flagged in the checkpoint summary.
 - `stdout` mode decides the checkpoint data: `json` parses stdout into the data,
-  `text` stores it as `{ stdout }` (clipped to the checkpoint budget), `none`
-  stores an empty object. `stderr` is captured for diagnostics and never parsed
-  into the data.
+  `text` stores it as `{ stdout }`, `none` stores an empty object. When an output
+  would exceed the checkpoint budget, a run with an artifact store publishes it
+  there and keeps a reference (`json`) or a short preview plus an `artifact`
+  reference (`text`); without a store, `text` is clipped to the budget. `stderr`
+  is captured for diagnostics and never parsed into the data.
 - Script steps accept `id`, `script`, `repair`, `when`, `inputs`, and `output`.
   They reject `run`, `tools`, `done`, `plan`, `for_each`, and `repeat_until`, and
   cannot appear inside loop bodies.

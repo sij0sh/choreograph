@@ -10,7 +10,7 @@ import type { LoopBlock, PlanBlock, ScriptBlock, SequenceBlock, TaskBlock, Workf
 import { blockOf } from "../domain/workflow.ts";
 import { processSpecOf, type NodeInvocation, type NodeStatus, type RunnerKind } from "../domain/node.ts";
 import { upsertInvocation } from "../domain/execution.ts";
-import { resolveBinding, type ArtifactSink, type ArtifactSinkProvider } from "../domain/artifacts.ts";
+import { isArtifactRef, resolveBinding, type ArtifactSink, type ArtifactSinkProvider } from "../domain/artifacts.ts";
 import { canonicalJson, canonicalJsonBytes, isJsonValue, type JsonValue } from "../domain/json.ts";
 import { firstIncompleteNode } from "../planning/graph.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
@@ -185,6 +185,10 @@ function finishLoop(state: Execution, loopKey: string, block: LoopBlock, store: 
       const data = state.checkpoints[key]?.data;
       if (data === undefined) continue;
       const stepId = lastSegment(key);
+      if (isArtifactRef(data)) {
+        outputs[stepId] = data as unknown as JsonValue;
+        continue;
+      }
       try {
         outputs[stepId] = sink.publishJson(`${iteration}/${stepId}`, data) as unknown as JsonValue;
       } catch (error) {
