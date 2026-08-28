@@ -36,7 +36,7 @@ test("kills the process on timeout and reports the timeout", async () => {
     argv: ["node", "-e", LONG],
     cwd: process.cwd(),
     env: { PATH: process.env.PATH ?? "" },
-    timeoutMs: 1_000,
+    timeoutMs: 150, // >6x the ~24 ms Node child boot floor; kill semantics are timeout-value-independent (audit OPP-002)
     maxCaptureBytes: 65_536,
   });
   assert.equal(result.timedOut, true);
@@ -239,7 +239,7 @@ test("timeout kills the whole process group, not just the direct child", async (
     argv: markerArgv,
     cwd: process.cwd(),
     env: { PATH: process.env.PATH ?? "" },
-    timeoutMs: 1_000,
+    timeoutMs: 150, // >6x the ~24 ms Node child boot floor; kill semantics are timeout-value-independent (audit OPP-002)
     maxCaptureBytes: 65_536,
   });
   const result = await pending;
