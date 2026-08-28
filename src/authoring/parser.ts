@@ -69,7 +69,7 @@ function containedPath(lexicalRoot: string, realRoot: string, configured: string
   return target;
 }
 
-function deriveTitle(name: string): string {
+export function deriveTitle(name: string): string {
   return name
     .split("-")
     .map((word) => (word ? word[0].toUpperCase() + word.slice(1) : word))
@@ -228,6 +228,7 @@ function recordInputEdges(context: CompileContext, consumerId: string, inputs: R
   if (!inputs) return;
   const producers = context.inputEdges.get(consumerId) ?? [];
   for (const [name, binding] of Object.entries(inputs)) {
+    if (binding.from === "$item") throw new Error(`${label}.${name}.from "$item" is only available inside a loop body`);
     if (binding.from === "root" || binding.from === consumerId || !context.ids.has(binding.from)) {
       throw new Error(`${label}.${name}.from names "${binding.from}", which is not an earlier step`);
     }
@@ -378,13 +379,17 @@ function parseBodyStep(raw: unknown, label: string, context: CompileContext): Ta
   const body = objectAt(raw, `${label}.body`);
   const keys = Object.keys(body);
   for (const key of keys) {
-    if (key !== "run") throw new Error(`${label}.body.${key} is not accepted; a loop body is a single "run:" step`);
+    if (key !== "run" && key !== "inputs") throw new Error(`${label}.body.${key} is not accepted; a loop body is a single "run:" step`);
   }
   const configured = stringAt(body.run, `${label}.body.run`);
   const path = normalizeInstruction(configured, 0, `${label}.body`, context);
   const id = deriveStepLabel(configured, 0);
   registerId(context, id, `${label}.body`);
-  return { kind: "task", id, instructionPath: path };
+  const inputs = parseInputBindings(body.inputs, `${label}.body.inputs`);
+  for (const [name, binding] of Object.entries(inputs ?? {})) {
+    if (binding.from !== "$item") throw new Error(`${label}.body.inputs.${name}.from must be "$item"; loop bodies bind the current item`);
+  }
+  return { kind: "task", id, instructionPath: path, ...(inputs ? { inputs } : {}) };
 }
 
 function parseLoop(kind: "for_each" | "repeat_until", raw: unknown, id: string, label: string, context: CompileContext): LoopBlock {

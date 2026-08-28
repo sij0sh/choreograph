@@ -515,3 +515,59 @@ steps:
     assert.throws(() => loadWorkflowManifest(dir), pattern, name);
   }
 });
+
+test("loop body inputs bind the current item", () => {
+  const dir = workflowDir("loop-item", `
+description: Loop item run.
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: review
+    for_each:
+      items: { from: gather, select: /data/files }
+      body: { run: steps/discover.md, inputs: { item: { from: "$item" }, name: { from: "$item", select: "/name" } } }
+      maxItems: 8
+`);
+  const wf = loadWorkflowManifest(dir);
+  const loopBlock = wf.root.children[1];
+  assert.equal(loopBlock.kind, "loop");
+  const bodyStep = loopBlock.body.children[0];
+  assert.deepEqual(bodyStep.inputs, {
+    item: { from: "$item" },
+    name: { from: "$item", select: "/name" },
+  });
+});
+
+test("loop body inputs reject non-item producers", () => {
+  const cases = [
+    ["body-rejects-other", `
+description: Reject other producers.
+steps:
+  - id: gather
+    run: steps/frame.md
+  - id: bad
+    for_each:
+      items: { from: gather }
+      body: { run: steps/frame.md, inputs: { file: { from: gather } } }
+      maxItems: 4
+`, /body.inputs.file.from must be "\$item"/],
+    ["step-rejects-item", `
+description: Reject item outside loops.
+steps:
+  - id: bad
+    run: steps/frame.md
+    inputs: { item: { from: "$item" } }
+`, /from "\$item" is only available inside a loop body/],
+    ["guard-rejects-item", `
+description: Reject item in guards.
+steps:
+  - id: bad
+    run: steps/frame.md
+    when: { from: "$item", op: exists }
+`, /when.from must match/],
+  ];
+  for (const [name, frontmatter, match] of cases) {
+    const dir = workflowDir(name, frontmatter);
+    assert.throws(() => loadWorkflowManifest(dir), match, name);
+  }
+});

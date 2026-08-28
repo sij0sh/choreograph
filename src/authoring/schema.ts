@@ -78,7 +78,7 @@ export function parseInputBindings(raw: unknown, label: string): Record<string, 
       if (key !== "from" && key !== "select") throw new Error(`${label}.${name}.${key} is not an accepted binding field`);
     }
     const from = stringAt(entry.from, `${label}.${name}.from`);
-    if (!ID_PATTERN.test(from)) throw new Error(`${label}.${name}.from must match ^[a-z][a-z0-9-]*$`);
+    if (from !== "$item" && !ID_PATTERN.test(from)) throw new Error(`${label}.${name}.from must match ^[a-z][a-z0-9-]*$`);
     let select: string | undefined;
     if (entry.select !== undefined) {
       if (typeof entry.select !== "string") throw new Error(`${label}.${name}.select must be a JSON Pointer such as /nodes/0/id`);

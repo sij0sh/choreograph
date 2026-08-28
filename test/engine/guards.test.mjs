@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { start, transition } from "../../src/engine/interpreter.ts";
 import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
-import { completed, cp, needsWork, task, workflow } from "./helpers.mjs";
+import { completed, cp, needsWork, script, task, workflow } from "./helpers.mjs";
 
 const INSPECT = { id: "inspect", path: "operators/inspect.md", description: "Inspect." };
 const PLAN = { version: 1, nodes: [
@@ -144,5 +144,21 @@ test("skipped checkpoints restore without contract errors", () => {
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed", { ok: true })) }).state;
   const migrated = validateAgainstWorkflow(wf, state);
   assert.equal(migrated.ok, true);
+  assert.equal(state.checkpoints["root/deep"].skipped, true);
+});
+
+test("guards reference script checkpoint output", () => {
+  const wf = workflow([
+    script("probe", { spec: { stdout: "json" } }),
+    task("deep", { guard: { from: "probe", select: "/data/pass", op: "gte", value: 1 } }),
+    task("deliver"),
+  ]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, {
+    type: "process-exit",
+    key: "root/probe",
+    exit: { code: 0, timedOut: false, stdout: '{"pass":0}\n', stderr: "", truncated: false },
+  }).state;
+  assert.equal(state.stack.at(-1).blockId, "deliver", "a failing guard skips the task after a script step");
   assert.equal(state.checkpoints["root/deep"].skipped, true);
 });

@@ -66,6 +66,7 @@ export interface ScriptBlock {
   readonly id: string;
   readonly script: ScriptSpec;
   readonly recovery?: RecoveryPolicy;
+  readonly inputs?: Readonly<Record<string, InputBinding>>;
   readonly guard?: GuardClause;
   readonly output?: string;
 }

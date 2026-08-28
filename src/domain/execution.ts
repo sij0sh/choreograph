@@ -1,6 +1,8 @@
 import type { JsonValue } from "./json.ts";
 import type { Checkpoint } from "./checkpoint.ts";
 import type { DynamicPlan } from "../planning/schema.ts";
+import type { NodeInvocation } from "./node.ts";
+import { LIMITS } from "./limits.ts";
 
 export interface SequenceFrame {
   readonly kind: "sequence";
@@ -71,4 +73,23 @@ export interface Execution {
   readonly checkpointOrder: readonly string[];
   readonly plans: Readonly<Record<string, PlanExecution>>;
   readonly loops: Readonly<Record<string, LoopState>>;
+  readonly definitionDigest?: string;
+  readonly invocations?: Readonly<Record<string, NodeInvocation>>;
+}
+
+export function upsertInvocation(
+  state: Execution,
+  key: string,
+  invocation: NodeInvocation,
+): Execution["invocations"] {
+  const invocations: Record<string, NodeInvocation> = { ...(state.invocations ?? {}), [key]: invocation };
+  const keys = Object.keys(invocations);
+  if (keys.length <= LIMITS.stackDepth) return invocations;
+  for (const candidate of keys) {
+    if (keys.length <= LIMITS.stackDepth) break;
+    if (invocations[candidate]!.status !== "succeeded") continue;
+    delete invocations[candidate];
+    keys.splice(keys.indexOf(candidate), 1);
+  }
+  return invocations;
 }

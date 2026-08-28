@@ -10,19 +10,25 @@ export type ResolvedInput =
   | { readonly ok: true; readonly value: JsonValue }
   | { readonly ok: false; readonly error: string };
 
+function selectValue(value: JsonValue, producerId: string, select: string | undefined): ResolvedInput {
+  if (select === undefined) return { ok: true, value };
+  const selected = jsonPointerGet(value, select);
+  if (!selected.ok) return { ok: false, error: `input from "${producerId}"${select}: ${selected.error}` };
+  return { ok: true, value: selected.value };
+}
+
 export function resolveBinding(workflow: Workflow, state: Execution, binding: InputBinding): ResolvedInput {
+  if (binding.from === "$item") {
+    const item = itemOf(state);
+    if (item === undefined) return { ok: false, error: `input "from" names "$item", which resolves only inside a for_each loop body` };
+    return selectValue(item, "$item", binding.select);
+  }
   const block = blockOf(workflow, binding.from);
   if (!block) return { ok: false, error: `input "from" names "${binding.from}", which is not a step of ${workflow.name}` };
-  if (block.kind === "task") {
+  if (block.kind === "task" || block.kind === "script") {
     const found = checkpointOf(workflow, state, block.id);
     if (!found) return { ok: false, error: `input "from" names "${block.id}", which has no recorded checkpoint yet` };
-    const value = found.checkpoint as unknown as JsonValue;
-    if (binding.select !== undefined) {
-      const selected = jsonPointerGet(value, binding.select);
-      if (!selected.ok) return { ok: false, error: `input from "${block.id}"${binding.select}: ${selected.error}` };
-      return { ok: true, value: selected.value };
-    }
-    return { ok: true, value };
+    return selectValue(found.checkpoint as unknown as JsonValue, block.id, binding.select);
   }
   if (block.kind === "plan") {
     const key = planKeyForBlock(state, block.id);
@@ -33,12 +39,12 @@ export function resolveBinding(workflow: Workflow, state: Execution, binding: In
     }
     const value = aggregateOf(state, key);
     if (value === undefined) return { ok: false, error: `input "from" names "${block.id}", which has no plan execution` };
-    if (binding.select !== undefined) {
-      const selected = jsonPointerGet(value, binding.select);
-      if (!selected.ok) return { ok: false, error: `input from "${block.id}"${binding.select}: ${selected.error}` };
-      return { ok: true, value: selected.value };
-    }
-    return { ok: true, value };
+    return selectValue(value, block.id, binding.select);
+  }
+  if (block.kind === "loop") {
+    const found = checkpointOf(workflow, state, block.id);
+    if (!found) return { ok: false, error: `input "from" names "${block.id}", which has not completed its loop yet` };
+    return selectValue(found.checkpoint as unknown as JsonValue, block.id, binding.select);
   }
   return { ok: false, error: `input "from" names "${binding.from}", which does not produce artifacts` };
 }
@@ -90,10 +96,20 @@ export function planKeyForBlock(state: Execution, blockId: string): string | und
   return entry ? entry[0] : undefined;
 }
 
+function itemOf(state: Execution): JsonValue | undefined {
+  for (let i = state.stack.length - 1; i >= 0; i -= 1) {
+    const frame = state.stack[i];
+    if (frame.kind !== "loop") continue;
+    const loopState = state.loops[frame.key];
+    if (loopState?.items && loopState.items[loopState.iteration - 1] !== undefined) return loopState.items[loopState.iteration - 1];
+  }
+  return undefined;
+}
+
 export function producerArtifact(workflow: Workflow, state: Execution, blockId: string): ArtifactResult {
   const block = blockOf(workflow, blockId);
   if (!block) return { ok: false, error: `"${blockId}" is not a step of ${workflow.name}` };
-  if (block.kind === "task") {
+  if (block.kind === "task" || block.kind === "script") {
     const found = checkpointOf(workflow, state, block.id);
     if (!found) return { ok: true, present: false };
     return { ok: true, present: true, value: found.checkpoint as unknown as JsonValue };
@@ -108,6 +124,11 @@ export function producerArtifact(workflow: Workflow, state: Execution, blockId: 
     const value = aggregateOf(state, key);
     if (value === undefined) return { ok: true, present: false };
     return { ok: true, present: true, value };
+  }
+  if (block.kind === "loop") {
+    const found = checkpointOf(workflow, state, block.id);
+    if (!found) return { ok: true, present: false };
+    return { ok: true, present: true, value: found.checkpoint as unknown as JsonValue };
   }
   return { ok: false, error: `"${blockId}" does not produce artifacts` };
 }
