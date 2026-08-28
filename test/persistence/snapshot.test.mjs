@@ -308,3 +308,61 @@ test("a loop-free v5 snapshot restores identically alongside loop support", () =
   assert.deepEqual(parsed.execution, state);
   assert.deepEqual(parsed.execution.loops, {});
 });
+
+test("a parked active snapshot round-trips and a parked:false marker is omitted", () => {
+  const { wf, state } = midRunState();
+  const parked = activeSnapshot({ workflow: wf.name, execution: state, delivered: false, parked: true });
+  const parsedParked = parseSnapshot(JSON.parse(JSON.stringify(parked)));
+  assert.equal(parsedParked.status, "active");
+  assert.equal(parsedParked.parked, true, "the parked marker survives the round trip");
+
+  const plain = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });
+  const data = JSON.parse(JSON.stringify(plain));
+  assert.equal("parked" in data, false, "unparked snapshots carry no parked field");
+  const parsedPlain = parseSnapshot(data);
+  assert.equal(parsedPlain.parked, undefined);
+
+  const rejected = parseSnapshot({ ...data, parked: "yes" });
+  assert.equal(rejected.status, "invalid", "a non-boolean parked marker is rejected");
+});
+
+test("a definition digest and typed invocations round-trip through v5 snapshots", () => {
+  const { wf, state } = midRunState();
+  const withFields = {
+    ...state,
+    definitionDigest: "a".repeat(64),
+    invocations: { "root/probe": { blockId: "probe", key: "root/probe", runner: "process", status: "waiting", attempt: 2 } },
+  };
+  const snapshot = activeSnapshot({ workflow: wf.name, execution: withFields, delivered: false });
+  const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
+  assert.equal(parsed.status, "active");
+  assert.equal(parsed.execution.definitionDigest, "a".repeat(64));
+  assert.deepEqual(parsed.execution.invocations, withFields.invocations);
+
+  const data = JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: false })));
+  assert.equal("definitionDigest" in data.execution, false, "digestless runs omit the field");
+  assert.equal("invocations" in data.execution, false, "runs without invocations omit the field");
+});
+
+test("snapshot validation rejects malformed invocations and digests", () => {
+  const { wf, state } = midRunState();
+  const build = (execution) => parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution, delivered: false }))));
+  const badStatus = build({ ...state, invocations: { "root/probe": { blockId: "probe", key: "root/probe", runner: "process", status: "mostly-fine", attempt: 1 } } });
+  assert.equal(badStatus.status, "invalid");
+  assert.match(badStatus.error, /status must be one of/);
+  const badRunner = build({ ...state, invocations: { "root/probe": { blockId: "probe", key: "root/probe", runner: "cron", status: "running", attempt: 1 } } });
+  assert.equal(badRunner.status, "invalid");
+  assert.match(badRunner.error, /runner must be one of/);
+  const badKey = build({ ...state, invocations: { "root/probe": { blockId: "probe", key: "root/other", runner: "process", status: "running", attempt: 1 } } });
+  assert.equal(badKey.status, "invalid");
+  assert.match(badKey.error, /must match its map key/);
+  const badAttempt = build({ ...state, invocations: { "root/probe": { blockId: "probe", key: "root/probe", runner: "process", status: "running", attempt: 9 } } });
+  assert.equal(badAttempt.status, "invalid");
+  assert.match(badAttempt.error, /attempt must be an integer/);
+  const badDigest = build({ ...state, definitionDigest: 7 });
+  assert.equal(badDigest.status, "invalid");
+  assert.match(badDigest.error, /definitionDigest must be a string/);
+  const stray = build({ ...state, invocations: { "root/probe": { blockId: "probe", key: "root/probe", runner: "process", status: "running", attempt: 1, extra: 1 } } });
+  assert.equal(stray.status, "invalid");
+  assert.match(stray.error, /not an accepted invocation field/);
+});

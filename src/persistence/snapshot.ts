@@ -5,6 +5,34 @@ import { LIMITS, PLAN_CREATE_ATTEMPT_MAX } from "../domain/limits.ts";
 import type { PlanExecution } from "../domain/execution.ts";
 import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.ts";
+import type { NodeInvocation, NodeStatus, RunnerKind } from "../domain/node.ts";
+
+const NODE_STATUSES: readonly NodeStatus[] = ["running", "waiting", "succeeded", "failed", "canceled", "skipped"];
+const RUNNER_KINDS: readonly RunnerKind[] = ["agent", "process"];
+
+function invocationsAt(value: unknown, label: string): Record<string, NodeInvocation> {
+  const raw = objectAt(value, label);
+  const invocations: Record<string, NodeInvocation> = {};
+  for (const [key, entry] of Object.entries(raw)) {
+    const item = objectAt(entry, `${label}.${key}`);
+    for (const field of Object.keys(item)) {
+      if (!["blockId", "key", "runner", "status", "attempt"].includes(field)) {
+        throw new Error(`${label}.${key}.${field} is not an accepted invocation field`);
+      }
+    }
+    const invocationKey = requireString(item.key, `${label}.${key}.key`);
+    if (invocationKey !== key) throw new Error(`${label}.${key}.key must match its map key`);
+    const blockId = requireString(item.blockId, `${label}.${key}.blockId`);
+    if (!RUNNER_KINDS.includes(item.runner as RunnerKind)) throw new Error(`${label}.${key}.runner must be one of: ${RUNNER_KINDS.join(", ")}`);
+    if (!NODE_STATUSES.includes(item.status as NodeStatus)) throw new Error(`${label}.${key}.status must be one of: ${NODE_STATUSES.join(", ")}`);
+    const attempt = item.attempt;
+    if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 1 || attempt > LIMITS.nodeAttempts + 1) {
+      throw new Error(`${label}.${key}.attempt must be an integer between 1 and ${LIMITS.nodeAttempts + 1}`);
+    }
+    invocations[key] = { blockId, key: invocationKey, runner: item.runner as RunnerKind, status: item.status as NodeStatus, attempt };
+  }
+  return invocations;
+}
 
 export const SNAPSHOT_TYPE = "choreograph";
 
@@ -15,6 +43,7 @@ export type ActiveSnapshotV5 = {
   readonly execution: Execution;
   readonly delivered: boolean;
   readonly baselineTools?: readonly string[];
+  readonly parked?: boolean;
 };
 
 type TerminalSnapshot =
@@ -165,9 +194,12 @@ function loopsAt(value: unknown, label: string): Record<string, Execution["loops
 function executionAt(value: unknown, label: string): Execution {
   const raw = objectAt(value, label);
   for (const field of Object.keys(raw)) {
-    if (!["workflowName", "runId", "target", "status", "stack", "checkpoints", "checkpointOrder", "plans", "loops"].includes(field)) {
+    if (!["workflowName", "runId", "target", "status", "stack", "checkpoints", "checkpointOrder", "plans", "loops", "definitionDigest", "invocations"].includes(field)) {
       throw new Error(`${label}.${field} is not an accepted execution field`);
     }
+  }
+  if (raw.definitionDigest !== undefined && typeof raw.definitionDigest !== "string") {
+    throw new Error(`${label}.definitionDigest must be a string`);
   }
   const status = raw.status;
   if (status !== "active") throw new Error(`${label}.status must be active`);
@@ -179,6 +211,7 @@ function executionAt(value: unknown, label: string): Execution {
   const checkpoints = checkpointsAt(raw.checkpoints ?? {}, `${label}.checkpoints`);
   const plans = plansAt(raw.plans ?? {}, `${label}.plans`);
   const loops = loopsAt(raw.loops ?? {}, `${label}.loops`);
+  const invocations = raw.invocations === undefined ? undefined : invocationsAt(raw.invocations, `${label}.invocations`);
   for (const frame of stack) {
     if (frame.kind !== "loop") continue;
     const loopState = loops[frame.key];
@@ -211,6 +244,8 @@ function executionAt(value: unknown, label: string): Execution {
     checkpointOrder: orderRaw,
     plans,
     loops,
+    ...(raw.definitionDigest !== undefined ? { definitionDigest: raw.definitionDigest as string } : {}),
+    ...(invocations ? { invocations } : {}),
   };
 }
 
@@ -234,6 +269,7 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
         throw new Error("snapshot.baselineTools must be a list of tool names");
       }
     }
+    if (snapshot.parked !== undefined && typeof snapshot.parked !== "boolean") throw new Error("snapshot.parked must be a boolean");
     const baselineTools = snapshot.baselineTools as string[] | undefined;
     return {
       v: 5,
@@ -242,6 +278,7 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
       execution,
       delivered: snapshot.delivered as boolean,
       ...(baselineTools ? { baselineTools } : {}),
+      ...(snapshot.parked === true ? { parked: true } : {}),
     };
   } catch (error) {
     return { status: "invalid", error: error instanceof Error ? error.message : String(error) };
@@ -253,6 +290,7 @@ export function activeSnapshot(fields: {
   execution: Execution;
   delivered: boolean;
   baselineTools?: readonly string[];
+  parked?: boolean;
 }): ActiveSnapshotV5 {
   return {
     v: 5,
@@ -261,6 +299,7 @@ export function activeSnapshot(fields: {
     execution: fields.execution,
     delivered: fields.delivered,
     ...(fields.baselineTools ? { baselineTools: [...new Set(fields.baselineTools)] } : {}),
+    ...(fields.parked === true ? { parked: true } : {}),
   };
 }
 
