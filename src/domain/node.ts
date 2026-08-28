@@ -27,6 +27,15 @@ export interface ProcessNodeSpec {
 
 export type NodeSpec = AgentNodeSpec | ProcessNodeSpec;
 
+/** The agent-executable part of any position the runtime can dispatch. */
+export interface AgentPositionSpec {
+  readonly runner: "agent";
+  readonly blockId: string;
+}
+
+/** A spec any registered runner can be asked to run; AgentNodeSpec is structurally assignable. */
+export type RunnerSpec = AgentPositionSpec | ProcessNodeSpec;
+
 export interface NodeInvocation {
   readonly blockId: string;
   readonly key: string;
@@ -38,6 +47,12 @@ export interface NodeInvocation {
 export interface ArtifactRef {
   readonly invocationKey: string;
   readonly output: string;
+  /** Content digest of the stored bytes, formatted as `sha256-<hex>`. */
+  readonly checksum: string;
+  /** Stored payload size in bytes. */
+  readonly size: number;
+  /** RFC 2045 media type of the stored bytes. */
+  readonly mediaType: string;
 }
 
 export function processSpecOf(block: import("./workflow.ts").ScriptBlock, workflowDir?: string): ProcessNodeSpec {

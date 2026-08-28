@@ -5,10 +5,40 @@ import { blockOf } from "./workflow.ts";
 import { lastSegment } from "./keys.ts";
 import type { Checkpoint } from "./checkpoint.ts";
 import type { InputBinding } from "./workflow.ts";
+import type { ArtifactRef } from "./node.ts";
+
+export type { ArtifactRef };
 
 export type ResolvedInput =
   | { readonly ok: true; readonly value: JsonValue }
   | { readonly ok: false; readonly error: string };
+
+export const ARTIFACT_MEDIA_TYPES = {
+  json: "application/json",
+  text: "text/plain; charset=utf-8",
+  bytes: "application/octet-stream",
+} as const;
+
+export function isArtifactRef(value: unknown): value is ArtifactRef {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const ref = value as Record<string, unknown>;
+  return typeof ref.invocationKey === "string"
+    && typeof ref.output === "string"
+    && typeof ref.checksum === "string"
+    && typeof ref.size === "number"
+    && typeof ref.mediaType === "string";
+}
+
+/** Publishes byte payloads into the run's artifact store and returns enriched references. */
+export interface ArtifactSink {
+  publishJson(name: string, value: JsonValue): ArtifactRef;
+  publishText(name: string, text: string, mediaType?: string): ArtifactRef;
+}
+
+/** Publishes sinks under invocation keys; the run's artifact store is the canonical implementation. */
+export interface ArtifactSinkProvider {
+  sinkFor(invocationKey: string): ArtifactSink;
+}
 
 function selectValue(value: JsonValue, producerId: string, select: string | undefined): ResolvedInput {
   if (select === undefined) return { ok: true, value };
