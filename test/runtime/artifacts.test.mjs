@@ -1,9 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { start, transition } from "../../src/engine/interpreter.ts";
-import { completed, cp, loop, script, task, workflow } from "../engine/helpers.mjs";
+import { completed, cp, loop, memoryStore, script, task, workflow } from "../engine/helpers.mjs";
 import { processSpecOf } from "../../src/domain/node.ts";
-import { resolveBinding, resolveScriptInputs } from "../../src/runtime/artifacts.ts";
+import { ArtifactStore } from "../../src/runtime/artifact-store.ts";
+import { inlineRefs, refLoaderFor, resolveBinding, resolveScriptInputs } from "../../src/runtime/artifacts.ts";
 import { inputSection } from "../../src/runtime/prompts-inputs.ts";
 import { renderPrompt } from "../../src/runtime/prompts.ts";
 
@@ -212,10 +216,11 @@ test("$item binds the current loop item inside the body", () => {
 
 test("a completed loop aggregate is a downstream binding source", () => {
   const wf = workflow([task("gather"), loop("review", "for-each"), task("deliver", { inputs: { review: { from: "review", select: "/iterations" } } })]);
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: ["a", "b"] })) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed a")) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed b")) }).state;
+  const store = memoryStore();
+  let state = start(wf, { runId: "r1" }, store).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: ["a", "b"] })) }, store).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed a")) }, store).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed b")) }, store).state;
   const binding = resolveBinding(wf, state, { from: "review" });
   assert.equal(binding.ok, true);
   assert.equal(binding.value.data.mode, "for-each");
@@ -226,6 +231,70 @@ test("a completed loop aggregate is a downstream binding source", () => {
   assert.equal(selected.value, "b");
   assert.match(inputSection(wf, state, { review: { from: "review", select: "/data/iterations" } }), /`review` from `review`/);
   assert.match(inputSection(wf, state, { review: { from: "review", select: "/data/iterations" } }), /\b2\b/);
+});
+
+test("loop aggregate references resolve downstream transparently", () => {
+  const root = mkdtempSync(join(tmpdir(), "pwf-agg-"));
+  try {
+    const store = ArtifactStore.forRun(root, "r1");
+    const wf = workflow([
+      task("gather"),
+      loop("review", "for-each"),
+      script("consume", { spec: { stdout: "json" }, inputs: { finding: { from: "review", select: "/data/results/0/outputs/review-step" } } }),
+    ]);
+    let state = start(wf, { runId: "r1" }, store).state;
+    state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: ["a", "b"] })) }, store).state;
+    state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed a", { verdict: "ship it" })) }, store).state;
+    state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed b", { verdict: "hold" })) }, store).state;
+
+    const ref = state.checkpoints["root/review"].data.results[0].outputs["review-step"];
+    const binding = resolveBinding(wf, state, { from: "review", select: "/data/results/0/outputs/review-step" });
+    assert.equal(binding.ok, true);
+    assert.deepEqual(binding.value, ref, "the aggregate stores references, not payloads");
+
+    const resolved = resolveScriptInputs(wf, state, wf.root.children[2].inputs, (r) => store.materialize(r, root));
+    assert.equal(resolved.ok, true, resolved.ok ? "" : resolved.error);
+    const onDisk = JSON.parse(readFileSync(join(root, resolved.inputs.finding), "utf8"));
+    assert.deepEqual(onDisk, { verdict: "ship it" }, "materialized references carry the stored payload");
+
+    const load = refLoaderFor(store);
+    const section = inputSection(wf, state, { finding: { from: "review", select: "/data/results/0/outputs/review-step" } }, load);
+    assert.match(section, /\{"verdict":"ship it"\}/, "prompt inputs render the loaded value");
+    assert.ok(!section.includes(ref.checksum), "prompt inputs never show the raw reference");
+
+    const inline = inlineRefs({ results: state.checkpoints["root/review"].data.results }, load);
+    assert.equal(inline.ok, true);
+    assert.deepEqual(inline.value.results[1].outputs["review-step"], { verdict: "hold" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("$item values resolve their references for scripts and prompts", () => {
+  const root = mkdtempSync(join(tmpdir(), "pwf-item-"));
+  try {
+    const store = ArtifactStore.forRun(root, "r1");
+    const wf = workflow([
+      loop("until-green", "repeat-until", { maxIterations: 3, condition: { from: "until-green-step", select: "/data/exitCode", op: "equals", value: 0 } }),
+      loop("review", "for-each", { itemsBinding: { from: "until-green", select: "/data/results" }, body: { inputs: { prior: { from: "$item", select: "/outputs/until-green-step" } } } }),
+      task("deliver"),
+    ]);
+    let state = start(wf, { runId: "r1" }, store).state;
+    state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 1", { exitCode: 0 })) }, store).state;
+    const binding = resolveBinding(wf, state, { from: "$item", select: "/outputs/until-green-step" });
+    assert.equal(binding.ok, true);
+    assert.equal(binding.value.checksum, state.checkpoints["root/until-green"].data.results[0].outputs["until-green-step"].checksum, "$item carries the upstream reference");
+
+    const resolved = resolveScriptInputs(wf, state, wf.root.children[1].body.children[0].inputs, (r) => store.materialize(r, root));
+    assert.equal(resolved.ok, true, resolved.ok ? "" : resolved.error);
+    const onDisk = JSON.parse(readFileSync(join(root, resolved.inputs.prior), "utf8"));
+    assert.deepEqual(onDisk, { exitCode: 0 });
+
+    const section = inputSection(wf, state, { prior: { from: "$item", select: "/outputs/until-green-step" } }, refLoaderFor(store));
+    assert.match(section, /\{"exitCode":0\}/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("processSpecOf preserves script inputs for the runner", () => {
@@ -251,4 +320,41 @@ test("script inputs resolve through declared bindings before execution", () => {
 
   const nothing = resolveScriptInputs(wf, state, undefined);
   assert.deepEqual(nothing, { ok: true, inputs: {} });
+});
+
+const REF = { invocationKey: "root/emit#1", output: "output", checksum: `sha256-${"a".repeat(64)}`, size: 30_000, mediaType: "application/json" };
+
+test("script inputs materialize artifact references into workspace paths", () => {
+  const wf = workflow([task("frame"), script("consume")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed", { payload: REF })) }).state;
+  const materialize = (ref) => ({ ok: true, path: `.choreograph/artifacts/${ref.checksum.slice("sha256-".length)}` });
+  const resolved = resolveScriptInputs(wf, state, { payload: { from: "frame", select: "/data/payload" } }, materialize);
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.inputs.payload, `.choreograph/artifacts/${"a".repeat(64)}`);
+});
+
+test("materialization walks nested structures and replaces every reference", () => {
+  const wf = workflow([task("frame"), script("consume")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed", { output: REF, keep: { deep: [REF] } })) }).state;
+  const seen = [];
+  const materialize = (ref) => {
+    seen.push(ref.output);
+    return { ok: true, path: `files/${seen.length}` };
+  };
+  const resolved = resolveScriptInputs(wf, state, { whole: { from: "frame", select: "/data" } }, materialize);
+  assert.equal(resolved.ok, true);
+  assert.deepEqual(resolved.inputs.whole, { output: "files/1", keep: { deep: ["files/2"] } });
+  assert.deepEqual(seen, ["output", "output"]);
+});
+
+test("a materialization failure fails input resolution with the input name", () => {
+  const wf = workflow([task("frame"), script("consume")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed", { payload: REF })) }).state;
+  const resolved = resolveScriptInputs(wf, state, { payload: { from: "frame", select: "/data/payload" } }, () => ({ ok: false, error: "object is missing" }));
+  assert.equal(resolved.ok, false);
+  assert.match(resolved.error, /input "payload"/);
+  assert.match(resolved.error, /object is missing/);
 });

@@ -339,9 +339,10 @@ test("a definition digest and typed invocations round-trip through v5 snapshots"
   assert.equal(parsed.execution.definitionDigest, "a".repeat(64));
   assert.deepEqual(parsed.execution.invocations, withFields.invocations);
 
-  const data = JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: false })));
+  const data = JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: { ...state, invocations: undefined }, delivered: false })));
   assert.equal("definitionDigest" in data.execution, false, "digestless runs omit the field");
   assert.equal("invocations" in data.execution, false, "runs without invocations omit the field");
+  assert.ok("invocations" in JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: false }))).execution, "every executable position records an invocation");
 });
 
 test("snapshot validation rejects malformed invocations and digests", () => {

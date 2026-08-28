@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { start, transition } from "../../src/engine/interpreter.ts";
-import { blocked, completed, cp, loop, needsWork, sequence, task, workflow } from "./helpers.mjs";
+import { blocked, completed, cp, loop, memoryStore, needsWork, sequence, task, workflow } from "./helpers.mjs";
 
 function run(tasks) {
   return start(workflow(tasks), { runId: "r1", target: "t" });
@@ -208,9 +208,10 @@ test("for_each runs the body once per item and aggregates", () => {
   assert.equal(leaf.kind, "task");
   assert.equal(leaf.blockId, "review-step");
   assert.equal(leaf.key, "root/review/loop[1]/review-step");
+  const store = memoryStore();
   for (const name of ["a", "b", "c"]) {
     assert.equal(state.stack.at(-1).key, `root/review/loop[${name.charCodeAt(0) - 96}]/review-step`);
-    state = transition(wf, state, { type: "outcome", outcome: completed(cp(`reviewed ${name}`)) }).state;
+    state = transition(wf, state, { type: "outcome", outcome: completed(cp(`reviewed ${name}`)) }, store).state;
   }
   const aggregate = state.checkpoints["root/review"];
   assert.ok(aggregate, "the loop writes one aggregate checkpoint");
@@ -218,9 +219,9 @@ test("for_each runs the body once per item and aggregates", () => {
     mode: "for-each",
     iterations: 3,
     results: [
-      { iteration: 1, item: "a" },
-      { iteration: 2, item: "b" },
-      { iteration: 3, item: "c" },
+      { iteration: 1, item: "a", outputs: {} },
+      { iteration: 2, item: "b", outputs: {} },
+      { iteration: 3, item: "c", outputs: {} },
     ],
   });
   assert.equal(state.stack.at(-1).blockId, "deliver");
@@ -232,43 +233,57 @@ test("for_each runs the body once per item and aggregates", () => {
 test("for_each with zero items skips the body and records zero iterations", () => {
   const gather = task("gather");
   const wf = workflow([gather, loop("review", "for-each"), task("deliver")]);
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("empty", { files: [] })) }).state;
+  let state = start(wf, { runId: "r1" }, memoryStore()).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("empty", { files: [] })) }, memoryStore()).state;
   const aggregate = state.checkpoints["root/review"];
   assert.ok(aggregate);
-  assert.deepEqual(aggregate.data, { mode: "for-each", iterations: 0 });
+  assert.deepEqual(aggregate.data, { mode: "for-each", iterations: 0, results: [] });
   assert.equal(state.stack.at(-1).blockId, "deliver");
 });
 
 test("repeat_until exits when the condition holds", () => {
   const fix = loop("until-green", "repeat-until", { maxIterations: 3, condition: { from: "until-green-step", select: "/data/exitCode", op: "equals", value: 0 } });
   const wf = workflow([fix, task("deliver")]);
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 1", { exitCode: 1 })) }).state;
+  const store = memoryStore();
+  let state = start(wf, { runId: "r1" }, store).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 1", { exitCode: 1 })) }, store).state;
   assert.equal(state.stack.at(-1).key, "root/until-green/loop[2]/until-green-step", "a false condition reruns the body");
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 2", { exitCode: 0 })) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 2", { exitCode: 0 })) }, store).state;
   const aggregate = state.checkpoints["root/until-green"];
-  assert.deepEqual(aggregate.data, {
-    mode: "repeat-until",
-    iterations: 2,
-    results: [
-      { iteration: 1, outputs: { "until-green-step": { exitCode: 1 } } },
-      { iteration: 2, outputs: { "until-green-step": { exitCode: 0 } } },
-    ],
-  });
+  assert.equal(aggregate.data.mode, "repeat-until");
+  assert.equal(aggregate.data.iterations, 2);
+  const [first, second] = aggregate.data.results;
+  assert.deepEqual(first.item === undefined && Object.keys(first).sort(), ["iteration", "outputs"]);
+  assert.equal(first.outputs["until-green-step"].output, "1/until-green-step");
+  assert.equal(first.outputs["until-green-step"].invocationKey, "root/until-green");
+  assert.equal(first.outputs["until-green-step"].size, Buffer.byteLength(JSON.stringify({ exitCode: 1 }) + "\n"));
+  assert.match(first.outputs["until-green-step"].checksum, /^sha256-[0-9a-f]{64}$/);
+  assert.equal(second.outputs["until-green-step"].output, "2/until-green-step");
+  const published = store.published.at(-1);
+  assert.deepEqual(published.value, { exitCode: 0 }, "the store holds the full iteration output");
   assert.equal(state.stack.at(-1).blockId, "deliver");
 });
 
 test("repeat_until exhaustion at the cap marks the aggregate exhausted", () => {
   const fix = loop("until-green", "repeat-until", { maxIterations: 2 });
   const wf = workflow([fix, task("deliver")]);
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 1", { exitCode: 1 })) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 2", { exitCode: 1 })) }).state;
+  const store = memoryStore();
+  let state = start(wf, { runId: "r1" }, store).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 1", { exitCode: 1 })) }, store).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 2", { exitCode: 1 })) }, store).state;
   const aggregate = state.checkpoints["root/until-green"];
   assert.equal(aggregate.data.iterations, 2);
   assert.equal(aggregate.data.exhausted, true);
   assert.equal(state.stack.at(-1).blockId, "deliver", "an exhausted loop finishes like a completed one");
+});
+
+test("a loop without the run's artifact store cannot record its aggregate", () => {
+  const wf = workflow([loop("review", "repeat-until", { maxIterations: 2 }), task("deliver")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 1", { exitCode: 1 })) }).state;
+  const rejected = transition(wf, state, { type: "outcome", outcome: completed(cp("try 2", { exitCode: 1 })) });
+  assert.ok(!rejected.ok);
+  assert.match(rejected.error, /no artifact store/);
 });
 
 test("loop guards skip the whole loop", () => {
@@ -297,4 +312,29 @@ test("for_each requires the item binding to resolve to a list", () => {
   const result = transition(wf, state, { type: "outcome", outcome: completed(cp("scalar", { total: 3 })) });
   assert.ok(!result.ok);
   assert.match(result.error, /must resolve to a list/);
+});
+
+test("agent task positions record node invocations through their lifecycle", () => {
+  const wf = workflow([task("frame", { done: ["framed"] }), task("deliver")]);
+  const started = start(wf, { runId: "r1" });
+  const first = started.state.invocations?.["root/frame"];
+  assert.ok(first, "the first agent leaf records an invocation");
+  assert.equal(first.runner, "agent");
+  assert.equal(first.status, "running");
+  assert.equal(first.attempt, 1);
+
+  const stuck = transition(wf, started.state, { type: "outcome", outcome: blocked(cp("stuck")) });
+  assert.ok(stuck.ok);
+  assert.equal(stuck.state.invocations?.["root/frame"]?.status, "waiting");
+
+  const retried = transition(wf, stuck.state, { type: "outcome", outcome: needsWork(cp("again")) });
+  assert.ok(retried.ok);
+  assert.equal(retried.state.invocations?.["root/frame"]?.status, "running");
+  assert.equal(retried.state.invocations?.["root/frame"]?.attempt, 2);
+
+  const done = transition(wf, retried.state, { type: "outcome", outcome: completed(cp("framed"), ["framed"]) });
+  assert.ok(done.ok);
+  assert.equal(done.state.invocations?.["root/frame"]?.status, "succeeded");
+  assert.equal(done.state.invocations?.["root/deliver"]?.status, "running", "the next agent leaf records its own invocation");
+  assert.equal(done.state.invocations?.["root/deliver"]?.runner, "agent");
 });

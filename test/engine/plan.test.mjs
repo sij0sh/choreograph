@@ -172,3 +172,24 @@ test("plan-create positions report the frame attempt after recovery", () => {
   assert.equal(retry.state.stack.at(-1).attempt, 2);
   assert.equal(currentPosition(wf, retry.state).attempt, 2, "the position reports the frame's true attempt");
 });
+
+test("plan creation and plan nodes record invocations", () => {
+  const wf = planWorkflow();
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: { status: "completed", checkpoint: { summary: "framed" } } }).state;
+  const createKey = state.stack.at(-1).key;
+  assert.equal(state.invocations?.[createKey]?.runner, "agent");
+  assert.equal(state.invocations?.[createKey]?.status, "running");
+  assert.equal(state.invocations?.[createKey]?.attempt, 1);
+
+  state = transition(wf, state, { type: "outcome", outcome: planCompletion([node("probe"), node("map", "trace", { dependsOn: ["probe"] })]) }).state;
+  assert.equal(state.invocations?.[createKey]?.status, "succeeded", "the creation position records success");
+  assert.equal(state.stack.at(-1).kind, "node");
+  const nodeKey = state.stack.at(-1).key;
+  assert.equal(state.invocations?.[nodeKey]?.runner, "agent");
+  assert.equal(state.invocations?.[nodeKey]?.status, "running");
+
+  state = transition(wf, state, { type: "outcome", outcome: { status: "completed", met: ["probe-done"], checkpoint: { summary: "probed" } } }).state;
+  assert.equal(state.invocations?.[nodeKey]?.status, "succeeded");
+  assert.equal(state.invocations?.[`${createKey}/map`]?.status, "running", "the next plan node records its own invocation");
+});

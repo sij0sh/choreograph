@@ -1,4 +1,28 @@
+import { createHash } from "node:crypto";
 import { compileContract } from "../../src/domain/contract.ts";
+
+/**
+ * An in-memory artifact sink provider for engine tests. Published references carry real
+ * sha-256 digests of the JSON bytes, so identical runs stay identical.
+ */
+export function memoryStore() {
+  const published = [];
+  const sinkFor = (invocationKey) => ({
+    publishJson(name, value) {
+      const content = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+      const ref = {
+        invocationKey,
+        output: name,
+        checksum: `sha256-${createHash("sha256").update(content).digest("hex")}`,
+        size: content.length,
+        mediaType: "application/json",
+      };
+      published.push({ invocationKey, name, ref, value });
+      return ref;
+    },
+  });
+  return { sinkFor, published };
+}
 
 export function task(id, options = {}) {
   return { kind: "task", id, instructionPath: `steps/${id}.md`, ...options };

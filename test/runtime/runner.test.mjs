@@ -47,10 +47,21 @@ test("ProcessRunner rejects a spec for another runner", async () => {
   assert.match(result.reason, /ProcessRunner does not run agent specs/);
 });
 
-test("AgentRunner accepts agent specs and rejects process specs", async () => {
+test("AgentRunner awaits external completion instead of resolving immediately", async () => {
   const runner = new AgentRunner();
-  const ok = await runner.execute(invocation, { runner: "agent", blockId: "probe", instructionPath: "steps/x.md" }, {});
-  assert.deepEqual(ok, { status: "succeeded" });
+  let settled = false;
+  const pending = runner.execute(invocation, { runner: "agent", blockId: "probe", instructionPath: "steps/x.md" }, {}).then((result) => {
+    settled = true;
+    return result;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(settled, false, "agent execution stays pending until it is settled");
+  assert.equal(runner.settle("root/probe", { status: "succeeded" }), true);
+  assert.deepEqual(await pending, { status: "succeeded" });
+  assert.equal(runner.settle("root/probe", { status: "succeeded" }), false, "a settled dispatch cannot settle twice");
+  const reopened = runner.execute(invocation, { runner: "agent", blockId: "probe", instructionPath: "steps/x.md" }, {});
+  runner.cancel(invocation);
+  assert.deepEqual(await reopened, { status: "canceled" }, "cancel settles a re-dispatched invocation");
   const bad = await runner.execute(invocation, processSpecOf(scriptBlock), {});
   assert.equal(bad.status, "failed");
   assert.match(bad.reason, /AgentRunner does not run process specs/);

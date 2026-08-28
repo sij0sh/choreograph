@@ -87,6 +87,25 @@ test("projection rebuilds from persisted events alone", () => {
   assert.match(summarizeProjection(view), /status=waiting nodes=1/);
 });
 
+test("a node failure fails the projection until a retry or park follows", () => {
+  const started = { type: "run-started", runId: "r", at: 0, workflow: "demo", target: "" };
+  const begin = { type: "node-started", runId: "r", at: 1, key: "root/a", runner: "process", attempt: 1 };
+  const failed = { type: "node-failed", runId: "r", at: 2, key: "root/a", reason: "runner crashed" };
+  const failedView = project([started, begin, failed].map((event) => parseEvent(event)));
+  assert.equal(failedView.status, "failed", "a node failure fails the run projection");
+  assert.equal(failedView.invocations["root/a"].status, "failed");
+
+  const retryView = project(
+    [started, begin, failed, { type: "retry-scheduled", runId: "r", at: 3, key: "root/a", attempt: 2 }].map((event) => parseEvent(event)),
+  );
+  assert.equal(retryView.status, "running", "a scheduled retry returns the projection to running");
+
+  const parkedView = project(
+    [started, begin, { type: "node-waiting", runId: "r", at: 3, key: "root/a", reason: "retries exhausted" }].map((event) => parseEvent(event)),
+  );
+  assert.equal(parkedView.status, "waiting", "a parked node keeps the projection waiting");
+});
+
 test("a run appends lifecycle events for start, agent nodes, and completion", async () => {
   const h = harness();
   const wf = simpleWorkflow();
@@ -191,4 +210,25 @@ async function runCycle(runtime, h) {
 test("descriptions are stable strings", () => {
   const event = parseEvent({ type: "node-failed", runId: "r", at: 1_700_000_000_000, key: "root/a", reason: "exit 3" });
   assert.match(describeEvent(event), /root\/a failed: exit 3/);
+});
+
+test("agent lifecycle events come from recorded invocations, not delivery", async () => {
+  const h = harness();
+  const wf = workflow([task("frame", { done: ["framed"] }), task("deliver")]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  await runtime.transition({ status: "needs-work", checkpoint: cp("stuck") }, undefined, h.ctx);
+  await runtime.handleAgentSettled(h.ctx);
+  await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  await runtime.handleAgentSettled(h.ctx);
+  const events = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
+  const starts = events.filter((event) => event.type === "node-started");
+  assert.equal(starts.length, 3, "exactly one start per attempt and per position");
+  assert.deepEqual(
+    starts.map((event) => [event.key, event.attempt]),
+    [["root/frame", 1], ["root/frame", 2], ["root/deliver", 1]],
+  );
+  assert.ok(events.some((event) => event.type === "retry-scheduled" && event.key === "root/frame" && event.attempt === 2));
+  assert.ok(events.some((event) => event.type === "node-succeeded" && event.key === "root/frame"));
 });

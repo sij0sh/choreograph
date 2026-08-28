@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
+import { ArtifactStore } from "../../src/runtime/artifact-store.ts";
 import { completed, cp, script, task, workflow } from "../engine/helpers.mjs";
 
 const roots = [];
@@ -132,6 +133,56 @@ test("a parked script persists a waiting invocation in the snapshot", async () =
     snapshots.some((entry) => entry.data.execution.invocations?.["root/stuck"]?.status === "waiting"),
     "the park is persisted as a waiting invocation in the active snapshot",
   );
+});
+
+test("a parked script persists the parked marker in its snapshots", async () => {
+  const h = harness();
+  const wf = workflow([script("stuck", { spec: { argv: ["node", "-e", "process.exit(1)"], inheritEnv: ["PATH"] }, recovery: { maxAttempts: 1, strategy: ["block"] } })]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  const active = h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active");
+  assert.equal("parked" in active[0].data, false, "the pre-run snapshot at the script leaf is not parked");
+  const parked = active.filter((entry) => entry.data.execution.invocations?.["root/stuck"]?.status === "waiting");
+  assert.ok(parked.length >= 1, "the park is snapshotted");
+  assert.ok(parked.every((entry) => entry.data.parked === true), "every park snapshot carries the parked marker");
+  assert.equal(active.at(-1).data.parked, true, "the delivered marker snapshot keeps the parked marker");
+  assert.equal(active.at(-1).data.delivered, true, "the park is marked delivered");
+});
+
+test("restore re-executes a script whose persisted invocation is still running", async () => {
+  const dir = tempDir();
+  const marker = join(dir, "runs.txt");
+  const h = harness();
+  const wf = workflow([
+    script("probe", {
+      spec: {
+        argv: ["node", "-e", "require('node:fs').appendFileSync(process.env.MARKER, 'x\\n'); process.exit(1)"],
+        inheritEnv: ["PATH"],
+        env: { MARKER: marker },
+      },
+      recovery: { maxAttempts: 1, strategy: ["block"] },
+    }),
+  ]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  assert.equal(readLines(marker), 1, "the first execution parks the run");
+
+  const revivedHarness = harness();
+  revivedHarness.entries.push(...h.entries);
+  const last = revivedHarness.entries.filter((entry) => entry.customType === "choreograph").at(-1);
+  last.data = structuredClone(last.data);
+  delete last.data.parked;
+  last.data.delivered = false;
+  last.data.execution.invocations["root/probe"] = { ...last.data.execution.invocations["root/probe"], status: "running" };
+  const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read);
+  revived.handleSessionStart(revivedHarness.ctx);
+  await settle(revived, revivedHarness);
+  assert.equal(readLines(marker), 2, "a running script leaf is re-executed instead of inferred as parked");
+  assert.equal(revived.state.parked, true, "the re-executed failure parks again from persisted state");
+  const reparked = revivedHarness.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").at(-1);
+  assert.equal(reparked.data.parked, true, "the re-park persists the marker again");
 });
 
 test("restore of a parked script run does not re-execute the script", async () => {
@@ -450,4 +501,59 @@ test("an unresolvable script input fails the node and parks the run at the scrip
     .at(-1);
   assert.ok(failed, "the resolution failure is journaled as node-failed");
   assert.match(failed.reason, /input "gone"/);
+});
+
+test("script runs publish stdout and stderr log artifacts under the run directory", async () => {
+  const root = tempDir();
+  const wf = {
+    ...workflow([
+      script("probe", {
+        spec: {
+          argv: ["node", "-e", "process.stdout.write('logged output'); process.stderr.write('warn line');"],
+          inheritEnv: ["PATH"],
+        },
+      }),
+      task("deliver"),
+    ]),
+    overviewPath: join(root, "WORKFLOW.md"),
+  };
+  const h = harness();
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  const run = await runtime.startWorkflow(h.ctx, wf, "");
+  assert.ok(run);
+  const store = ArtifactStore.forRun(root, run.execution.runId);
+  const objectsDir = join(store.rootDir, "objects");
+  const contents = readdirSync(objectsDir).map((name) => readFileSync(join(objectsDir, name), "utf8"));
+  assert.ok(contents.some((text) => text.includes("logged output")), "stdout is retained");
+  assert.ok(contents.some((text) => text.includes("warn line")), "stderr is retained");
+});
+
+test("an oversized script output is stored and materialized into the next script's workspace", async () => {
+  const root = tempDir();
+  const big = JSON.stringify({ answer: 42, rows: Array.from({ length: 400 }, (_, index) => ({ id: index, note: "y".repeat(48) })) });
+  const consumer = "let raw='';process.stdin.on('data',d=>raw+=d);process.stdin.on('end',()=>{const inputs=JSON.parse(raw);const stored=JSON.parse(require('node:fs').readFileSync(inputs.payload,'utf8'));process.stdout.write(String(stored.answer))});";
+  const wf = {
+    ...workflow([
+      script("emit", { spec: { argv: ["node", "-e", `process.stdout.write(${JSON.stringify(big)})`], stdout: "json", inheritEnv: ["PATH"] } }),
+      script("consume", { spec: { argv: ["node", "-e", consumer], inheritEnv: ["PATH"] }, inputs: { payload: { from: "emit", select: "/data" } } }),
+      task("deliver"),
+    ]),
+    overviewPath: join(root, "WORKFLOW.md"),
+  };
+  const h = harness();
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  runtime.handleSessionStart(h.ctx);
+  const run = await runtime.startWorkflow(h.ctx, wf, "");
+  assert.ok(run);
+  assert.equal(run.execution.stack.at(-1).blockId, "deliver", "both scripts ran without a model turn");
+  const emitted = run.execution.checkpoints["root/emit"].data;
+  assert.match(emitted.checksum, /^sha256-[0-9a-f]{64}$/);
+  assert.ok(emitted.size >= big.length, "the ref records the full stored payload");
+  const store = ArtifactStore.forRun(root, run.execution.runId);
+  const loaded = store.load(emitted);
+  assert.ok(loaded.ok, loaded.ok ? "" : loaded.error);
+  assert.deepEqual(JSON.parse(loaded.content.toString("utf8")), JSON.parse(big));
+  assert.equal(run.execution.checkpoints["root/consume"].data.stdout, "42", "the consumer read the materialized artifact");
+  assert.ok(existsSync(join(root, ".choreograph", "artifacts", emitted.checksum.slice("sha256-".length))), "the artifact was materialized into the consumer's workspace");
 });

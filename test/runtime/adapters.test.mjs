@@ -73,6 +73,25 @@ test("the task prompt carries instructions, context, criteria, and controls", ()
   assert.match(prompt, /workflow_transition/);
 });
 
+test("the prompt states the tools granted at the position", () => {
+  const wf = workflow([task("frame")]);
+  const state = start(wf, { runId: "r1" }).state;
+  const files = { "WORKFLOW.md": "# Overview", "steps/frame.md": "# Frame" };
+  const read = reader(files);
+  const narrowed = renderPrompt(wf, state, read, undefined, ["read", "workflow_transition", "workflow_abort", "workflow_retry"]);
+  assert.match(narrowed, /Tools granted at this position: `read`\./);
+  assert.ok(!narrowed.includes("`bash`"), "ungranted tools are not listed as granted");
+  assert.ok(!narrowed.includes("workflow_retry"), "workflow controls are not reported as file tools");
+  assert.match(narrowed, /Tools not listed are unavailable/);
+  const wide = renderPrompt(wf, state, read, undefined, ["read", "bash", "workflow_transition", "workflow_abort"]);
+  assert.match(wide, /Tools granted at this position: `read`, `bash`\./);
+  assert.match(wide, /Use bash \(`ls`, `find`, `rg`\) to discover files/);
+  const unlisted = renderPrompt(wf, state, read, undefined, []);
+  assert.match(unlisted, /Tools granted at this position: none beyond the workflow controls above\./);
+  const omitted = renderPrompt(wf, state, read);
+  assert.ok(!omitted.includes("## Tools"), "omitting the tool list omits the section");
+});
+
 test("the plan-create prompt lists operator descriptions but never bodies", () => {
   const OPERATORS = new Map([
     ["inspect", { id: "inspect", path: "operators/inspect.md", description: "Inspect code." }],

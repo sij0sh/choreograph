@@ -76,13 +76,13 @@ test("starting a run swaps in run tools and persists an active snapshot", async 
   assert.equal(h.sent.length, 1, "the follow-up is sent");
 });
 
-test("session start keeps the narrowed active set and offers workflow_start", () => {
+test("session start keeps the narrowed active set and offers the idle tools", () => {
   const h = harness({ baseline: ["read", "bash"], allTools: ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell"] });
   const wf = simpleWorkflow({ piVisibility: true, tools: ["read", "bash", "edit", "write"] });
   const runtime = coordinator(h, [wf]);
   const warnings = runtime.handleSessionStart(h.ctx);
   assert.deepEqual(warnings.unknownTools, []);
-  assert.deepEqual([...h.activeTools], ["read", "bash", "workflow_start"]);
+  assert.deepEqual([...h.activeTools], ["read", "bash", "workflow_run_definition", "workflow_promote", "workflow_start"]);
 });
 
 test("reload of an active run restores the persisted baseline tools", async () => {
@@ -162,6 +162,22 @@ test("storage failure on transition keeps the prior position", async () => {
   assert.match(result.details.status, /storage-failed/);
   const prompt = runtime.handleBeforeAgentStart({ systemPrompt: "" });
   assert.match(prompt.systemPrompt, /frame/, "the run stays at the prior position");
+});
+
+test("agent positions dispatch through the runner registry and settle on transition and abort", async () => {
+  const h = harness();
+  const c = coordinator(h, [simpleWorkflow()]);
+  await c.startWorkflow(h.ctx, simpleWorkflow(), "");
+  let active = c.registry.activeInvocations();
+  assert.equal(active.length, 1, "the agent position is dispatched through the registry");
+  assert.equal(active[0].key, "root/frame");
+  assert.equal(active[0].runner, "agent");
+  await c.transition(completed(cp("framed"), ["framed"]), undefined, h.ctx);
+  await c.handleAgentSettled(h.ctx);
+  active = c.registry.activeInvocations();
+  assert.deepEqual(active.map((entry) => entry.key), ["root/deliver"], "the settled position is replaced by the next agent dispatch");
+  await c.abort(undefined, h.ctx);
+  assert.equal(c.registry.activeInvocations().length, 0, "abort cancels the awaiting dispatch");
 });
 
 test("an undelivered position cannot transition", async () => {
