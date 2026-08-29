@@ -8,7 +8,7 @@ import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
 import { evaluateGuard, skipReason, type GuardClause } from "../domain/guard.ts";
 import type { LoopBlock, OperatorDescriptor, PlanBlock, ScriptBlock, ScriptSpec, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
-import { processSpecOf, type NodeInvocation, type NodeStatus, type RunnerKind } from "../domain/node.ts";
+import { type NodeInvocation, type NodeStatus, type RunnerKind } from "../domain/node.ts";
 import { upsertInvocation } from "../domain/execution.ts";
 import { isArtifactRef, resolveBinding, type ArtifactRef, type ArtifactSink, type ArtifactSinkProvider } from "../domain/artifacts.ts";
 import { canonicalJsonBytes, isJsonValue, type JsonValue } from "../domain/json.ts";
@@ -35,7 +35,7 @@ export type Effect =
   | { readonly kind: "stay" }
   | { readonly kind: "complete" }
   | { readonly kind: "aborted" }
-  | { readonly kind: "run-process"; readonly key: string; readonly node: ReturnType<typeof processSpecOf> };
+  | { readonly kind: "run-process"; readonly key: string };
 
 export type EngineResult =
   | { readonly ok: true; readonly state: Execution; readonly effect: Effect }
@@ -525,7 +525,7 @@ function leafEffect(workflow: Workflow, state: Execution, fallback: Effect): Eng
   if (leaf?.kind === "task") {
     const block = blockOf(workflow, leaf.blockId);
     if (block?.kind === "script") {
-      return { ok: true, state: enterInvocation(workflow, state, leaf), effect: { kind: "run-process", key: leaf.key, node: processSpecOf(block) } };
+      return { ok: true, state: enterInvocation(workflow, state, leaf), effect: { kind: "run-process", key: leaf.key } };
     }
   }
   if (leaf && (leaf.kind === "task" || leaf.kind === "plan" || leaf.kind === "node")) {
