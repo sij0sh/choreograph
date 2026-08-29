@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { start, transition } from "../../src/engine/interpreter.ts";
-import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
+import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-execution.ts";
 import { completed, cp, needsWork, script, task, workflow } from "./helpers.mjs";
 
 const INSPECT = { id: "inspect", path: "operators/inspect.md", description: "Inspect." };

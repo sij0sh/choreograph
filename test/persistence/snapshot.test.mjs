@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { activeSnapshot, parseSnapshot, terminalSnapshot } from "../../src/persistence/snapshot.ts";
-import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
+import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-execution.ts";
 import { latestSnapshot } from "../../src/persistence/store.ts";
 import { completed, cp, loop, needsWork, sequence, task, workflow } from "../engine/helpers.mjs";
 import { start, transition } from "../../src/engine/interpreter.ts";

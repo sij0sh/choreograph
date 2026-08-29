@@ -6,9 +6,9 @@ import type { Workflow } from "../domain/workflow.ts";
 import { blockOf } from "../domain/workflow.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
 
-type MigrationResult = { ok: true; execution: Execution } | { ok: false; error: string };
+type ValidationResult = { ok: true; execution: Execution } | { ok: false; error: string };
 
-function reject(error: string): MigrationResult {
+function reject(error: string): ValidationResult {
   return { ok: false, error };
 }
 
@@ -168,7 +168,7 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
   return undefined;
 }
 
-export function validateAgainstWorkflow(workflow: Workflow, execution: Execution): MigrationResult {
+export function validateAgainstWorkflow(workflow: Workflow, execution: Execution): ValidationResult {
   if (execution.workflowName !== workflow.name) return reject(`snapshot belongs to workflow ${execution.workflowName}, not ${workflow.name}`);
   const stack = execution.stack;
   const rootFrame = stack[0];

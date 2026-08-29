@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { start, transition } from "../../src/engine/interpreter.ts";
-import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
+import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-execution.ts";
 import { blocked, completed, cp, loop, memoryStore, needsWork, script, sequence, task, workflow } from "./helpers.mjs";
 
 function recordingStore() {

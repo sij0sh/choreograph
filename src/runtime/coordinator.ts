@@ -24,7 +24,7 @@ import { blockOf, workflowBlocks } from "../domain/workflow.ts";
 import type { NodeResult } from "./runner.ts";
 import { latestSnapshot, withinMemoryBound, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
 import { activeSnapshot, rolloverSnapshot, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
-import { validateAgainstWorkflow } from "../persistence/migrate.ts";
+import { validateAgainstWorkflow } from "../persistence/validate-stored-execution.ts";
 import { effectiveTools, CONTROL_TOOLS, PROMOTE_TOOL_NAME, RUN_DEFINITION_TOOL_NAME } from "./capabilities.ts";
 import { controlMessage, readBlockFrom, renderPrompt, rosterPrompt, summaryMessage, summaryPrefix } from "./prompts.ts";
 import { capWorkflowContext, isolateWorkflowContext, EPOCH_MESSAGE_TYPE, HANDOFF_MESSAGE_TYPE, type IsolatableMessage } from "./isolation.ts";

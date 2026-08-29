@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { start, transition } from "../../src/engine/interpreter.ts";
 import { isArtifactRef } from "../../src/domain/artifacts.ts";
-import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
+import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-execution.ts";
 import { completed, contractOf, cp, memoryStore, sequence, task, workflow } from "./helpers.mjs";
 
 const FETCH_SCRIPT = {

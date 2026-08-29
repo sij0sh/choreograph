@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
 import { activeSnapshot } from "../../src/persistence/snapshot.ts";
-import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
+import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-execution.ts";
 import { completed, cp, loop, memoryStore, task, workflow } from "../engine/helpers.mjs";
 import { start, transition } from "../../src/engine/interpreter.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
