@@ -6,6 +6,11 @@ import { canonicalJson } from "./json.ts";
 import type { Workflow } from "./workflow.ts";
 import { workflowBlocks } from "./workflow.ts";
 
+// Budget for the rollup narrative built from checkpoint handoff summaries.
+// Distinct from LIMITS.positionInputsBytes, which bounds per-position input
+// payloads; the two are not the same budget.
+const NARRATIVE_BUDGET_BYTES = 24_576;
+
 interface Constraint {
   readonly id: string;
   readonly text: string;
@@ -197,7 +202,7 @@ export function createRollup(
   const fullNarrative = [previous?.narrative, ...handoffs.map((handoff) => `${handoff.positionKey} (${handoff.outcome}): ${handoff.summary}`)]
     .filter((item): item is string => Boolean(item))
     .join("\n");
-  const narrative = Buffer.byteLength(fullNarrative, "utf8") <= 24_576
+  const narrative = Buffer.byteLength(fullNarrative, "utf8") <= NARRATIVE_BUDGET_BYTES
     ? fullNarrative
     : `[Earlier narrative omitted; exact sources remain available.]\n${fullNarrative.slice(-24_000)}`;
   const body = {
