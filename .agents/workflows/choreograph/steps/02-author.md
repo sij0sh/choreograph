@@ -29,7 +29,6 @@ Write `WORKFLOW.md` with this shape; unknown keys are rejected.
 ---
 description: What it does and when to use it.
 piVisibility: false              # Optional; exposes the workflow to the model; defaults to false
-legalTools: [read, bash]        # Optional; workflow tool ceiling
 contracts:                       # Optional; maps contract ids to schema files
   finding: contracts/finding.schema.json
 steps:
@@ -48,7 +47,8 @@ steps:
 
 Rules:
 - Every block id MUST be unique across the workflow.
-- Each step entry MUST use exactly one of `run` or `plan`.
+- Each step entry MUST use exactly one of `run`, `plan`, `script`, `for_each`, or `repeat_until`; a process-operator step uses `operator` instead.
+- Omit `legalTools` so every position keeps the session's full toolset. Add `tools` on a task or operator only when that phase needs a narrower ceiling.
 - A `plan:` block MUST list only operator ids that have files.
 - `inputs.from` MUST name a block declared earlier in `steps` order.
 - `output` MUST name a discovered contract id. It is invalid on `plan:` steps; plans emit an engine-generated aggregate.
@@ -78,6 +78,81 @@ Rules:
   (including negations). Use `exists`/`not-exists` to key off presence.
 - A guard registers a dependency edge, so invalidating the producer
   re-evaluates the guard on the next pass.
+
+## Script steps
+
+A script step runs one bounded local process with no model turn. The engine
+spawns it, records its exit, and moves on; `workflow_transition` is rejected
+at script positions.
+
+```yaml
+- id: run-tests
+  script:
+    argv: [npm, test]
+    stdout: json
+    timeoutMs: 120000
+  output: test-report
+```
+
+Rules:
+- `argv` is required; there is no shell. `cwd` stays inside the package
+  (default `.`).
+- `stdout`/`stderr` take `json`, `text`, or `none`; `json` stdout becomes the
+  checkpoint data. `timeoutMs` defaults to 60000; `acceptedExitCodes` defaults
+  to `[0]`.
+- Declared `inputs` arrive as one JSON object on stdin.
+- Script steps accept `id`, `script`, `repair`, `when`, `inputs`, and
+  `output`. They reject `run`, `tools`, `done`, and `plan`.
+
+## Loops
+
+A loop repeats its body under a hard cap. `for_each` consumes a bound list;
+`repeat_until` re-runs until a `when` guard holds.
+
+```yaml
+- id: review-files
+  for_each:
+    items: { from: gather, select: /data/files }
+    body:
+      steps:
+        - run: steps/review-one.md
+          id: read-one
+          inputs: { item: { from: "$item" } }
+        - id: check-one
+          script: { argv: [node, check-one.mjs], stdout: json }
+          inputs: { report: { from: read-one } }
+    maxItems: 8
+- id: fix-until-green
+  repeat_until:
+    body: { run: steps/apply-fix.md }
+    when: { from: apply-fix, select: /data/exitCode, op: equals, value: 0 }
+    maxIterations: 3
+```
+
+Rules:
+- The cap (`maxItems`/`maxIterations`) is a required integer from 1 to 8.
+- A body holds one `run` step, or a `steps:` list of 1 to 8 task, script, or
+  process-operator entries. Loops and plans are not accepted inside a body.
+- Body steps may bind `$item` (for_each only) or any earlier body step.
+- `repeat_until` is do-while: the guard is evaluated after each iteration; cap
+  exhaustion finishes the loop with `exhausted: true` in its aggregate.
+- The loop writes one aggregate checkpoint: mode, iterations, the `exhausted`
+  flag, and per-iteration outputs. Downstream steps bind `{ from: <loop-id> }`.
+
+## Process operators
+
+In any step list, including a loop body, an `operator:` entry invokes a
+process operator (an operator whose frontmatter declares `script:`) as a
+bounded local step:
+
+```yaml
+- id: fetch-status
+  operator: deploy-status
+  inputs: { brief: { from: observe } }
+```
+
+It accepts `inputs`, `repair`, and `when`, and inherits the operator's
+`output` contract. Model operators cannot use this step form.
 
 ## Contracts
 
