@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
 import { activeSnapshot } from "../../src/persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../../src/persistence/migrate.ts";
@@ -38,7 +41,8 @@ function harness(options = {}) {
     context.ui = { setStatus() {}, notify: (message, level) => context.notices.push({ message, level }) };
     return context;
   };
-  return { pi, sent, entries, activeTools, ctx };
+  const storeRoot = mkdtempSync(join(tmpdir(), "pwf-hard-store-"));
+  return { pi, sent, entries, activeTools, ctx, storeRoot };
 }
 
 const OPERATORS = new Map([
@@ -71,7 +75,7 @@ test("restore drops the run when the workflow was removed", async () => {
   const { wf, state } = await midPlanState();
   const h = harness();
   h.entries.push({ type: "custom", customType: "choreograph", data: activeSnapshot({ workflow: wf.name, execution: state, delivered: true }) });
-  const runtime = new RuntimeCoordinator(h.pi, [], () => "# x");
+  const runtime = new RuntimeCoordinator(h.pi, [], () => "# x", h.storeRoot);
   const context = h.ctx();
   runtime.handleSessionStart(context);
   assert.ok(context.notices.some((notice) => /no longer exists/.test(notice.message)));
@@ -128,7 +132,7 @@ test("restored plans are re-validated with creation-time semantics", async () =>
 test("delivery failure leaves the run pending and retries after settle", async () => {
   const h = harness({ failSend: new Error("queue closed") });
   const wf = workflow([task("frame"), task("deliver")]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x", h.storeRoot);
   const ctx = h.ctx();
   runtime.handleSessionStart(ctx);
   await runtime.startWorkflow(ctx, wf, "");
@@ -146,7 +150,7 @@ test("delivery failure leaves the run pending and retries after settle", async (
 test("malformed met entries are rejected without state change", async () => {
   const h = harness();
   const wf = workflow([task("frame", { done: ["scope-clear"] }), task("deliver")]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x", h.storeRoot);
   const ctx = h.ctx();
   runtime.handleSessionStart(ctx);
   await runtime.startWorkflow(ctx, wf, "");
@@ -164,7 +168,7 @@ test("malformed met entries are rejected without state change", async () => {
 test("storage failure on abort keeps the run active", async () => {
   const h = harness();
   const wf = workflow([task("frame")]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x", h.storeRoot);
   const ctx = h.ctx();
   runtime.handleSessionStart(ctx);
   await runtime.startWorkflow(ctx, wf, "");
@@ -181,7 +185,7 @@ test("storage failure on abort keeps the run active", async () => {
 test("oversized targets are refused before any snapshot is written", async () => {
   const h = harness();
   const wf = workflow([task("frame")]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x", h.storeRoot);
   const ctx = h.ctx();
   runtime.handleSessionStart(ctx);
   const big = "x".repeat(LIMITS.targetBytes + 1);
@@ -200,7 +204,7 @@ test("transitions that exceed the memory bound are rejected without state change
     task("discover"),
     ...Array.from({ length: 40 }, (_, i) => task(`inspect-${i}`)),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x");
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x", h.storeRoot);
   const ctx = h.ctx();
   runtime.handleSessionStart(ctx);
   await runtime.startWorkflow(ctx, wf, "");

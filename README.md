@@ -253,9 +253,10 @@ output size, so a downstream consumer always knows what a binding resolves to.
 
 Downstream bindings resolve those references transparently: script inputs are
 materialized into the workspace as files, and task inputs are rendered with the
-stored value inlined. This includes references reached through `$item`. A loop
-requires the run's artifact store to record its aggregate; runs without one
-(definitions that exist only in memory) cannot finish a loop. Recovery is
+stored value inlined. This includes references reached through `$item`. Every
+run has an artifact store, rooted beside the workflow or under the agent
+directory when the workflow exists only in memory, so loops always record
+their aggregates; hosts without a writable directory are unsupported. Recovery is
 per iteration: a `retry` re-runs the failed body step in place, and an
 `invalidate` targeting body steps re-runs only the affected steps of the
 current iteration, leaving earlier iterations untouched. An invalidation that
@@ -347,16 +348,15 @@ Rules:
   stderr). Output beyond the cap is truncated and flagged in the checkpoint summary.
 - `stdout` mode decides the checkpoint data: `json` parses stdout into the data,
   `text` stores it as `{ stdout }`, `none` stores an empty object. When an output
-  would exceed the checkpoint budget, a run with an artifact store publishes it
-  there and keeps a reference (`json`) or a short preview plus an `artifact`
-  reference (`text`); without a store, `text` is clipped to the budget. Whenever
-  the stored `stdout` text is a clip or a preview rather than the full stream,
-  the data carries `stdoutTruncated: true`.
+  would exceed the checkpoint budget, the run publishes it to the artifact store
+  and keeps a reference (`json`) or a short preview plus an `artifact`
+  reference (`text`). When the stored `stdout` text is a preview rather than the
+  full stream, the data carries `stdoutTruncated: true`.
 - `stderr` mode decides how standard error is honored. `none` (the default) keeps
   stderr diagnostic-only: captured for the run's log artifacts, never parsed into
   the data. `text` adds the captured text under the `stderr` key of the data;
-  beyond the checkpoint budget it is clipped (`stderrTruncated: true`) or, with a
-  store, previewed with a `stderrArtifact` reference. `json` parses stderr and
+  beyond the checkpoint budget it is previewed with a `stderrArtifact`
+  reference (`stderrTruncated: true`). `json` parses stderr and
   stores the decoded value under `stderr`; stderr that is not valid JSON fails the
   step like invalid stdout JSON. When `stdout: json` decodes to a non-object while
   a `stderr` value or captured files exist, the data becomes an object with the

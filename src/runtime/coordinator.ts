@@ -126,13 +126,14 @@ export class RuntimeCoordinator {
   private tuiMode: TuiMode = tuiModeFromEnv(process.env.CHOREOGRAPH_TUI);
   private eventsPersistWarned = false;
   private runtimeArtifactRoot: string | undefined;
+  private readonly defaultArtifactRoot: string | undefined;
   private readonly handoffs = new Map<string, HandoffManifestV1>();
   private readonly persistedHandoffDigests = new Set<string>();
   private isolationRunId: string | undefined;
   private reportContext: { workflow: Workflow; runId: string; manifest: HandoffManifestV1 } | undefined;
   private suppressDelivery = false;
 
-  constructor(pi: RuntimeCoordinator["pi"], workflows: readonly Workflow[], read: ReturnType<typeof readBlockFrom> = defaultRead) {
+  constructor(pi: RuntimeCoordinator["pi"], workflows: readonly Workflow[], read: ReturnType<typeof readBlockFrom> = defaultRead, defaultArtifactRoot?: string) {
     this.pi = pi;
     this.workflows = workflows;
     this.visibleWorkflows = workflows.filter((workflow) => workflow.piVisibility);
@@ -141,6 +142,7 @@ export class RuntimeCoordinator {
     };
     this.read = read;
     this.injectedReader = read !== defaultRead;
+    this.defaultArtifactRoot = defaultArtifactRoot;
     this.delivery = new DeliveryCoordinator({
       send: async (message) => {
         await this.pi.sendUserMessage(message, { deliverAs: "followUp" });
@@ -310,22 +312,22 @@ export class RuntimeCoordinator {
     }
   }
 
-  private publishLogs(runId: string, key: string, sink: ArtifactSink | undefined, exit: { readonly stdout: string; readonly stderr: string; readonly truncated: boolean }): void {
+  private publishLogs(runId: string, key: string, sink: ArtifactSink, exit: { readonly stdout: string; readonly stderr: string; readonly truncated: boolean }): void {
     for (const stream of ["stdout", "stderr"] as const) {
       const text = exit[stream];
       if (!text) continue;
       this.record({ type: "node-log", runId, at: this.now(), key, stream, message: text, truncated: exit.truncated });
       try {
-        sink?.publishText(stream, text);
+        sink.publishText(stream, text);
       } catch {
         // Log artifacts are best effort. The bounded journal event remains available.
       }
     }
   }
 
-  private captureScriptFiles(key: string, spec: ScriptSpec, cwd: string, store: ArtifactStore | undefined, exit: ProcessResult): { readonly files?: readonly ArtifactRef[]; readonly captureError?: string } {
+  private captureScriptFiles(key: string, spec: ScriptSpec, cwd: string, store: ArtifactStore, exit: ProcessResult): { readonly files?: readonly ArtifactRef[]; readonly captureError?: string } {
     const accepted = !exit.timedOut && !exit.cancelled && exit.spawnError === undefined && exit.code !== undefined && spec.acceptedExitCodes.includes(exit.code);
-    if (!accepted || !store || !spec.files?.length) return {};
+    if (!accepted || !spec.files?.length) return {};
     const files: ArtifactRef[] = [];
     try {
       for (const capture of spec.files) files.push(store.publishFile(capture.name, key, resolve(cwd, capture.path)));
@@ -344,20 +346,18 @@ export class RuntimeCoordinator {
    * Workflows without a real directory on disk (synthetic or virtual definitions) keep the
    * inline-checkpoint behavior.
    */
-  private artifactStoreFor(workflow: Workflow, runId: string): ArtifactStore | undefined {
+  private artifactStoreFor(workflow: Workflow, runId: string): ArtifactStore {
     const cached = this.artifactStores.get(runId);
     if (cached) return cached;
     const workflowDir = dirname(workflow.overviewPath);
     const dir = isAbsolute(workflowDir) && existsSync(workflowDir)
       ? workflowDir
-      : this.generated.has(workflow.name) && this.runtimeArtifactRoot
-        ? this.runtimeArtifactRoot
-        : undefined;
-    if (!dir) return undefined;
+      : this.defaultArtifactRoot ?? this.runtimeArtifactRoot;
+    if (!dir) throw new Error(`run ${runId} cannot resolve an artifact store root for workflow ${workflow.name}`);
     const store = ArtifactStore.forRun(dir, runId, ({ invocationKey: key, ...artifact }) => {
       this.record({ type: "artifact-published", runId, at: this.now(), key, ...artifact });
     });
-    if (!store) return undefined;
+    if (!store) throw new Error(`run ${runId} cannot resolve an absolute artifact store root`);
     this.artifactStores.set(runId, store);
     return store;
   }
@@ -833,13 +833,13 @@ export class RuntimeCoordinator {
       const invocation = { ...(recorded ?? { blockId: process.blockId, key: processKey, runner: "process" as const, attempt }), status: "running" as const, attempt };
       const processSpec = processSpecFor(process.script, process.blockId, dirname(current.workflow.overviewPath));
       const store = this.artifactStoreFor(current.workflow, current.execution.runId);
-      const sink = store?.sinkFor(processKey);
+      const sink = store.sinkFor(processKey);
       const resolved = process.planKey === undefined
         ? resolveScriptInputs(
             current.workflow,
             current.execution,
             process.inputs,
-            store ? (ref) => store.materialize(ref, processSpec.cwd) : undefined,
+            (ref) => store.materialize(ref, processSpec.cwd),
           )
         : dependencyInputs(current.execution, process.planKey, process.dependsOn);
       if (!resolved.ok) {
@@ -870,7 +870,7 @@ export class RuntimeCoordinator {
       }
       const captured = this.captureScriptFiles(processKey, processSpec.spec, processSpec.cwd, store, exit);
       this.publishLogs(current.execution.runId, processKey, sink, exit);
-      const applied = engineTransition(current.workflow, current.execution, { type: "process-exit", key: processKey, exit, ...captured, ...(sink ? { store: sink } : {}) }, store);
+      const applied = engineTransition(current.workflow, current.execution, { type: "process-exit", key: processKey, exit, ...captured, store: sink }, store);
       if (!applied.ok) {
         this.record({ type: "node-failed", runId: current.execution.runId, at: this.now(), key: processKey, reason: applied.error });
         ctx.ui.notify(`Result for ${processKey} could not be applied: ${applied.error}. The run stays at ${processKey}.`, "error");
@@ -1144,7 +1144,6 @@ export class RuntimeCoordinator {
     const workflow = state?.workflow ?? this.reportContext?.workflow ?? (transfer ? this.workflows.find((item) => item.name === transfer.workflow) ?? this.generated.get(transfer.workflow)?.built.workflow : undefined);
     if (!runId || !workflow) throw new Error("no active workflow handoff store");
     const store = this.artifactStoreFor(workflow, runId);
-    if (!store) throw new Error("workflow handoff artifacts are unavailable for this run");
     const loaded = store.load({ invocationKey: "handoff", output: "requested", checksum, size: 0, mediaType: "application/json" });
     if (!loaded.ok) throw new Error(loaded.error);
     const truncated = loaded.content.length > 50_000;
@@ -1345,7 +1344,7 @@ export class RuntimeCoordinator {
     if (this.state.status === "active") {
       const store = this.artifactStoreFor(this.state.workflow, this.state.execution.runId);
       const manifest = this.handoffs.get(this.state.execution.runId);
-      const guide = renderPrompt(this.state.workflow, this.state.execution, this.promptRead, store ? refLoaderFor(store) : undefined, this.activeToolsFor(this.state), (manifest?.epoch ?? 1) > 1);
+      const guide = renderPrompt(this.state.workflow, this.state.execution, this.promptRead, refLoaderFor(store), this.activeToolsFor(this.state), (manifest?.epoch ?? 1) > 1);
       return { systemPrompt: `${event.systemPrompt}\n\n${guide}` };
     }
     const roster = rosterPrompt(this.visibleWorkflows);

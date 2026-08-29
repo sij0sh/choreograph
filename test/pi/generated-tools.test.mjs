@@ -33,7 +33,8 @@ function harness(options = {}) {
     sessionManager: { getBranch: () => entries },
   };
   const workflowsRoot = options.workflowsRoot ?? mkdtempSync(join(tmpdir(), "promote-tools-"));
-  const runtime = new RuntimeCoordinator(pi, options.workflows ?? [], () => "# fallback");
+  const storeRoot = mkdtempSync(join(tmpdir(), "pwf-tools-store-"));
+  const runtime = new RuntimeCoordinator(pi, options.workflows ?? [], () => "# fallback", storeRoot);
   registerWorkflowTools(pi, runtime, options.workflows ?? [], workflowsRoot);
   return { pi, ctx, tools, sent, entries, activeTools, runtime, workflowsRoot };
 }

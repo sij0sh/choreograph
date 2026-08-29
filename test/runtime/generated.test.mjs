@@ -33,7 +33,8 @@ function harness(options = {}) {
     },
     sessionManager: { getBranch: () => entries },
   };
-  return { pi, ctx, sent, entries, activeTools };
+  const storeRoot = mkdtempSync(join(tmpdir(), "pwf-gen-store-"));
+  return { pi, ctx, sent, entries, activeTools, storeRoot };
 }
 
 function spec(overrides = {}) {
@@ -83,7 +84,7 @@ test("compiled digest is stable and instruction-sensitive", () => {
 
 test("a generated definition runs start to completion with in-memory instructions", async () => {
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [], () => "# fallback");
+  const runtime = new RuntimeCoordinator(h.pi, [], () => "# fallback", h.storeRoot);
   const run = await runtime.startGenerated(spec(), "the demo asset set", h.ctx);
   assert.ok(run, "the run starts");
   const runId = run.execution.runId;
@@ -106,7 +107,7 @@ test("a generated definition runs start to completion with in-memory instruction
 
 test("generated runs persist a definition entry and restore in a fresh session", async () => {
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [], () => "# fallback");
+  const runtime = new RuntimeCoordinator(h.pi, [], () => "# fallback", h.storeRoot);
   await runtime.startGenerated(spec(), "target", h.ctx);
   await runtime.handleAgentSettled(h.ctx);
   await runtime.transition(completed(cp("scanned"), []), undefined, h.ctx);
@@ -116,7 +117,7 @@ test("generated runs persist a definition entry and restore in a fresh session",
 
   const restoredHarness = harness();
   restoredHarness.entries.push(...h.entries);
-  const restored = new RuntimeCoordinator(restoredHarness.pi, [], () => "# fallback");
+  const restored = new RuntimeCoordinator(restoredHarness.pi, [], () => "# fallback", restoredHarness.storeRoot);
   restored.handleSessionStart(restoredHarness.ctx);
   assert.ok(
     restoredHarness.ctx.ui.notices.some((notice) => /Resumed Audit Assets run/.test(notice.message)),
@@ -130,7 +131,7 @@ test("generated runs persist a definition entry and restore in a fresh session",
 
 test("a restored generated run refuses a changed definition instead of resuming", async () => {
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [], () => "# fallback");
+  const runtime = new RuntimeCoordinator(h.pi, [], () => "# fallback", h.storeRoot);
   await runtime.startGenerated(spec(), "target", h.ctx);
   await runtime.handleAgentSettled(h.ctx);
 
@@ -142,7 +143,7 @@ test("a restored generated run refuses a changed definition instead of resuming"
     }
     tampered.entries.push({ type: "custom", customType: DEFINITIONS_ENTRY_TYPE, data: spec({ steps: [{ id: "scan", instruction: "rewritten" }] }) });
   }
-  const restored = new RuntimeCoordinator(tampered.pi, [], () => "# fallback");
+  const restored = new RuntimeCoordinator(tampered.pi, [], () => "# fallback", tampered.storeRoot);
   restored.handleSessionStart(tampered.ctx);
   assert.ok(
     tampered.ctx.ui.notices.some((notice) => /digest mismatch/.test(notice.message)),
@@ -153,7 +154,7 @@ test("a restored generated run refuses a changed definition instead of resuming"
 test("generated names may not collide with discovered workflows and busy sessions refuse starts", async () => {
   const h = harness();
   const discovered = workflow([task("only")], { name: "demo", piVisibility: true });
-  const runtime = new RuntimeCoordinator(h.pi, [discovered], () => "# fallback");
+  const runtime = new RuntimeCoordinator(h.pi, [discovered], () => "# fallback", h.storeRoot);
   await assert.rejects(() => runtime.startGenerated(spec({ name: "demo" }), "", h.ctx), /already used by a discovered workflow/);
   const run = await runtime.startGenerated(spec(), "", h.ctx);
   assert.ok(run);
@@ -164,7 +165,7 @@ test("generated names may not collide with discovered workflows and busy session
 
 test("promotion persists a generated definition as a discoverable workflow", async () => {
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [], () => "# fallback");
+  const runtime = new RuntimeCoordinator(h.pi, [], () => "# fallback", h.storeRoot);
   await runtime.startGenerated(spec(), "target", h.ctx);
   const root = mkdtempSync(join(tmpdir(), "promote-"));
   const { directory } = runtime.promoteDefinition("audit-assets", root);
@@ -179,7 +180,7 @@ test("promotion persists a generated definition as a discoverable workflow", asy
   // Disproof attempt: the promoted workflow must run as a discovered
   // workflow in a fresh session, not merely parse.
   const freshHarness = harness();
-  const fresh = new RuntimeCoordinator(freshHarness.pi, discovered.workflows, readBlockFrom({ readFileSync }));
+  const fresh = new RuntimeCoordinator(freshHarness.pi, discovered.workflows, readBlockFrom({ readFileSync }), freshHarness.storeRoot);
   const promotedRun = await fresh.startWorkflow(freshHarness.ctx, discovered.workflows[0], "assets", undefined);
   assert.ok(promotedRun, "the promoted workflow starts");
   await fresh.transition(completed(cp("promoted-scan")), undefined, freshHarness.ctx);
@@ -191,7 +192,7 @@ test("promotion persists a generated definition as a discoverable workflow", asy
 test("promotion refuses unknown names, collisions, and overwrites", async () => {
   const h = harness();
   const discovered = workflow([task("only")], { name: "demo" });
-  const runtime = new RuntimeCoordinator(h.pi, [discovered], () => "# fallback");
+  const runtime = new RuntimeCoordinator(h.pi, [discovered], () => "# fallback", h.storeRoot);
   await runtime.startGenerated(spec(), "target", h.ctx);
   const root = mkdtempSync(join(tmpdir(), "promote-"));
   assert.throws(() => runtime.promoteDefinition("nope", root), /no generated workflow/);

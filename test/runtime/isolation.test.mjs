@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { isolateWorkflowContext } from "../../src/runtime/isolation.ts";
 import { controlPrefix } from "../../src/runtime/prompts.ts";
 import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
@@ -93,13 +96,14 @@ function harness() {
     ui: { notices: [], setStatus: () => {}, notify: (message, level) => ctx.ui.notices.push({ message, level }) },
     sessionManager: { getBranch: () => entries },
   };
-  return { pi, ctx, sent };
+  const storeRoot = mkdtempSync(join(tmpdir(), "pwf-iso-store-"));
+  return { pi, ctx, sent, storeRoot };
 }
 
 test("handleContext filters only for an active, delivered run", async () => {
   const h = harness();
   const wf = workflow([task("frame", { done: ["framed"] }), task("deliver")]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# instructions");
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# instructions", h.storeRoot);
   runtime.handleSessionStart(h.ctx);
 
   assert.equal(runtime.handleContext({ messages: [user("chat")] }), undefined, "idle: no filtering");
@@ -122,7 +126,7 @@ test("handleContext filters only for an active, delivered run", async () => {
 test("handleContext keeps everything before delivery", async () => {
   const h = harness();
   const wf = workflow([task("frame")]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# instructions");
+  const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# instructions", h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "target");
   h.sent.length = 0;

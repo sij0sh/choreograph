@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { RuntimeCoordinator, newRunId } from "../../src/runtime/coordinator.ts";
 import { activeSnapshot, terminalSnapshot } from "../../src/persistence/snapshot.ts";
 import { AgentRunner } from "../../src/runtime/runner.ts";
@@ -42,11 +45,12 @@ function harness(options = {}) {
     setModel: undefined,
   };
   const read = () => "# instructions";
-  return { pi, ctx, sent, entries, activeTools, read };
+  const storeRoot = mkdtempSync(join(tmpdir(), "pwf-co-store-"));
+  return { pi, ctx, sent, entries, activeTools, read, storeRoot };
 }
 
 function coordinator(harness_, workflows) {
-  return new RuntimeCoordinator(harness_.pi, workflows, harness_.read);
+  return new RuntimeCoordinator(harness_.pi, workflows, harness_.read, harness_.storeRoot);
 }
 
 function simpleWorkflow(overrides = {}) {

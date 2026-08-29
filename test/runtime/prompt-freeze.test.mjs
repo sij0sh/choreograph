@@ -22,7 +22,8 @@ function harness() {
     ui: { status: undefined, notices: [], setStatus: () => {}, notify: () => {} },
     sessionManager: { getBranch: () => entries },
   };
-  return { pi, ctx, sent, entries };
+  const storeRoot = mkdtempSync(join(tmpdir(), "pwf-pf-store-"));
+  return { pi, ctx, sent, entries, storeRoot };
 }
 
 function workflowDir(name, stepText) {
@@ -43,7 +44,7 @@ test("task prompts are served from frozen content; a mid-run edit is inert", asy
   const dir = workflowDir("freeze-probe", "# Frame v1");
   const wf = loadWorkflowManifest(dir);
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [wf]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], undefined, h.storeRoot);
 
   await runtime.startWorkflow(h.ctx, wf, "t");
   await runtime.handleAgentSettled(h.ctx);
@@ -67,7 +68,7 @@ test("frontmatter is stripped from frozen task instructions", async () => {
   writeFileSync(join(dir, "steps", "frame.md"), "---\nignored: meta\n---\n# Frame body\n");
   const wf = loadWorkflowManifest(dir);
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [wf]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], undefined, h.storeRoot);
   await runtime.startWorkflow(h.ctx, wf, "t");
   await runtime.handleAgentSettled(h.ctx);
   assert.match(promptOf(runtime, h.ctx), /# Frame body/);
@@ -85,7 +86,7 @@ test("operator prompts are served frozen", async () => {
   writeFileSync(join(dir, "steps", "frame.md"), "# Frame\n");
   const wf = loadWorkflowManifest(dir);
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [wf]);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], undefined, h.storeRoot);
   await runtime.startWorkflow(h.ctx, wf, "t");
   await runtime.handleAgentSettled(h.ctx);
   await runtime.transition({ status: "completed", checkpoint: { summary: "gathered" } }, undefined, h.ctx);
@@ -109,7 +110,7 @@ test("generated workflows still render from their virtual frozen instructions", 
     steps: [{ id: "scan", instruction: "# Scan generated\nDo the scan." }],
   }));
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, []);
+  const runtime = new RuntimeCoordinator(h.pi, [], undefined, h.storeRoot);
   await runtime.startGenerated(JSON.parse(JSON.stringify({
     name: "gen-probe",
     description: "Generated probe.",

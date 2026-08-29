@@ -51,7 +51,8 @@ function harness(options = {}) {
     sessionManager: { getBranch: () => entries },
   };
   const read = () => "# instructions";
-  return { pi, ctx, sent, entries, activeTools, read };
+  const storeRoot = mkdtempSync(join(tmpdir(), "pwf-journal-store-"));
+  return { pi, ctx, sent, entries, activeTools, read, storeRoot };
 }
 
 function simpleWorkflow() {
@@ -134,7 +135,7 @@ test("a node failure fails the projection until a retry or park follows", () => 
 test("a run appends lifecycle events for start, agent nodes, and completion", async () => {
   const h = harness();
   const wf = simpleWorkflow();
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "ship it");
   await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
@@ -156,30 +157,30 @@ test("script runs journal started and succeeded events, then advance", async () 
     script("probe", { spec: { argv: ["node", "-e", "process.stdout.write(JSON.stringify({ answer: 42 }))"], inheritEnv: ["PATH"], stdout: "json" } }),
     task("deliver"),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const events = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
   const types = events.map((event) => event.type);
   assert.ok(types.includes("node-started"), "the script start is journaled");
   assert.ok(types.includes("node-succeeded"), "the script success is journaled");
-  assert.equal(types.at(-1), "node-started", "the run then waits at the next task");
+  assert.ok(types.lastIndexOf("node-started") > types.indexOf("node-succeeded"), "the run then waits at the next task");
 });
 
 test("a script-only run journals started through completed", async () => {
   const h = harness();
   const wf = workflow([script("only", { spec: { argv: ["node", "-e", "process.stdout.write('done')"], inheritEnv: ["PATH"] } })]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const types = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data.type);
-  assert.deepEqual(types, ["run-started", "node-ready", "node-started", "node-log", "node-succeeded", "run-completed"]);
+  assert.deepEqual(types, ["run-started", "node-ready", "node-started", "node-log", "artifact-published", "node-succeeded", "artifact-published", "artifact-published", "run-completed"]);
 });
 
 test("restore replays persisted events into the projection", async () => {
   const h = harness();
   const wf = simpleWorkflow();
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
@@ -187,7 +188,7 @@ test("restore replays persisted events into the projection", async () => {
 
   const restored = harness();
   restored.entries.push(...h.entries);
-  const runtime2 = new RuntimeCoordinator(restored.pi, [wf], restored.read);
+  const runtime2 = new RuntimeCoordinator(restored.pi, [wf], restored.read, restored.storeRoot);
   runtime2.handleSessionStart(restored.ctx);
   const report = runtime2.inspect();
   assert.ok(report, "an active restored run can be inspected");
@@ -214,7 +215,7 @@ test("TUI renders off, compact, and detailed modes from the projection", () => {
 
 test("workflow-tui cycles modes and the env var picks the initial mode", async () => {
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [simpleWorkflow()], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [simpleWorkflow()], h.read, h.storeRoot);
   const seen = [];
   seen.push(await runCycle(runtime, h));
   seen.push(await runCycle(runtime, h));
@@ -240,7 +241,7 @@ test("descriptions are stable strings", () => {
 test("agent lifecycle events come from recorded invocations, not delivery", async () => {
   const h = harness();
   const wf = workflow([task("frame", { done: ["framed"] }), task("deliver")]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.transition({ status: "needs-work", checkpoint: cp("stuck") }, undefined, h.ctx);
@@ -264,7 +265,7 @@ test("an injected script failure parks the run and the projection reports waitin
     script("stuck", { spec: { argv: ["node", "-e", "process.exit(1)"], inheritEnv: ["PATH"] }, recovery: { maxAttempts: 1, strategy: ["block"] } }),
     task("deliver"),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const eventsOf = () => h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
@@ -299,7 +300,7 @@ test("a runner-level input failure journals node-failed and fails the projection
     task("gather"),
     script("consume", { spec: { argv: ["node", "-e", "process.exit(0)"], inheritEnv: ["PATH"] }, inputs: { x: { from: "gather", select: "/missing" } } }),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.transition({ status: "completed", checkpoint: cp("gathered", { files: ["a"] }) }, undefined, h.ctx);
@@ -380,7 +381,7 @@ test("runtime emits ready, skipped, loop iteration, loop completion, and artifac
     loop("review", "for-each"),
     task("deliver"),
   ], { overviewPath: join(tempDir(), "WORKFLOW.md") });
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.transition({ status: "completed", checkpoint: cp("gathered", { files: ["a"], runOptional: false }) }, undefined, h.ctx);
@@ -406,7 +407,7 @@ test("process logs and their durable artifacts are emitted into the projection",
   const wf = workflow([
     script("probe", { spec: { argv: ["node", "-e", "process.stdout.write('hello journal')"], inheritEnv: ["PATH"] } }),
   ], { overviewPath: join(tempDir(), "WORKFLOW.md") });
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const events = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
@@ -420,7 +421,7 @@ test("process logs and their durable artifacts are emitted into the projection",
 test("inspect keeps completed run history and restores it without an active run", async () => {
   const h = harness();
   const wf = simpleWorkflow();
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const started = await runtime.startWorkflow(h.ctx, wf, "history target");
   const runId = started.execution.runId;
@@ -434,7 +435,7 @@ test("inspect keeps completed run history and restores it without an active run"
 
   const restored = harness();
   restored.entries.push(...h.entries);
-  const runtime2 = new RuntimeCoordinator(restored.pi, [wf], restored.read);
+  const runtime2 = new RuntimeCoordinator(restored.pi, [wf], restored.read, restored.storeRoot);
   runtime2.handleSessionStart(restored.ctx);
   const restoredReport = runtime2.inspect(runId);
   assert.equal(restoredReport.projection.status, "succeeded");
@@ -451,7 +452,7 @@ test("loop events include iterations traversed entirely through skipped body ste
     }),
     task("deliver"),
   ], { overviewPath: join(tempDir(), "WORKFLOW.md") });
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.transition({ status: "completed", checkpoint: cp("gathered", { files: ["a", "b"], runBody: false }) }, undefined, h.ctx);

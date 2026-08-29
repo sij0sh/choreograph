@@ -47,7 +47,8 @@ function harness(options = {}) {
     sessionManager: { getBranch: () => entries },
   };
   const read = () => "# instructions";
-  return { pi, ctx, sent, entries, activeTools, read };
+  const storeRoot = mkdtempSync(join(tmpdir(), "pwf-park-store-"));
+  return { pi, ctx, sent, entries, activeTools, read, storeRoot };
 }
 
 function scriptWorkflow() {
@@ -60,7 +61,7 @@ function scriptWorkflow() {
 test("a script step drives to completion without any model turn", async () => {
   const h = harness();
   const wf = scriptWorkflow();
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const run = await runtime.startWorkflow(h.ctx, wf, "");
   assert.ok(run);
@@ -75,7 +76,7 @@ test("a script step drives to completion without any model turn", async () => {
 test("a script-only workflow completes without sending a model message", async () => {
   const h = harness();
   const wf = workflow([script("only", { spec: { argv: ["node", "-e", "process.stdout.write('done')"], inheritEnv: ["PATH"] } })]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const run = await runtime.startWorkflow(h.ctx, wf, "");
   assert.ok(run);
@@ -87,7 +88,7 @@ test("a script-only workflow completes without sending a model message", async (
 test("workflow_transition is rejected at a script position", async () => {
   const h = harness();
   const wf = workflow([script("stuck", { spec: { argv: ["node", "-e", "process.exit(1)"], inheritEnv: ["PATH"] }, recovery: { maxAttempts: 1, strategy: ["block"] } })]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const run = await runtime.startWorkflow(h.ctx, wf, "");
   assert.ok(run);
@@ -101,7 +102,7 @@ test("workflow_transition is rejected at a script position", async () => {
 test("a parked script notifies the model through a delivered control message", async () => {
   const h = harness();
   const wf = workflow([script("stuck", { spec: { argv: ["node", "-e", "process.exit(1)"], inheritEnv: ["PATH"] }, recovery: { maxAttempts: 1, strategy: ["block"] } })]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   assert.ok(h.sent.some((entry) => entry.message.includes("root/stuck")), "the park delivers a control message naming the position");
@@ -112,7 +113,7 @@ test("exhausted script retries park the run without a model turn in between", as
   const wf = workflow([
     script("flaky", { spec: { argv: ["node", "-e", "process.stdout.write('x'.repeat(4))"], inheritEnv: ["PATH"], stdout: "json" }, recovery: { maxAttempts: 2, strategy: ["retry", "block"] } }),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const run = await runtime.startWorkflow(h.ctx, wf, "");
   assert.ok(run);
@@ -125,7 +126,7 @@ test("exhausted script retries park the run without a model turn in between", as
 test("a parked script persists a waiting invocation in the snapshot", async () => {
   const h = harness();
   const wf = workflow([script("stuck", { spec: { argv: ["node", "-e", "process.exit(1)"], inheritEnv: ["PATH"] }, recovery: { maxAttempts: 1, strategy: ["block"] } })]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const snapshots = h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active");
@@ -138,7 +139,7 @@ test("a parked script persists a waiting invocation in the snapshot", async () =
 test("a parked script persists the parked marker in its snapshots", async () => {
   const h = harness();
   const wf = workflow([script("stuck", { spec: { argv: ["node", "-e", "process.exit(1)"], inheritEnv: ["PATH"] }, recovery: { maxAttempts: 1, strategy: ["block"] } })]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const active = h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active");
@@ -164,7 +165,7 @@ test("restore re-executes a script whose persisted invocation is still running",
       recovery: { maxAttempts: 1, strategy: ["block"] },
     }),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   assert.equal(readLines(marker), 1, "the first execution parks the run");
@@ -176,7 +177,7 @@ test("restore re-executes a script whose persisted invocation is still running",
   delete last.data.parked;
   last.data.delivered = false;
   last.data.execution.invocations["root/probe"] = { ...last.data.execution.invocations["root/probe"], status: "running" };
-  const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read);
+  const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read, revivedHarness.storeRoot);
   revived.handleSessionStart(revivedHarness.ctx);
   await settle(revived, revivedHarness);
   await waitFor(() => readLines(marker) === 2 && revived.state.parked);
@@ -200,14 +201,14 @@ test("restore of a parked script run does not re-execute the script", async () =
       recovery: { maxAttempts: 1, strategy: ["block"] },
     }),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   assert.equal(readLines(marker), 1, "the script ran exactly once before parking");
 
   const revivedHarness = harness();
   revivedHarness.entries.push(...h.entries);
-  const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read);
+  const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read, revivedHarness.storeRoot);
   revived.handleSessionStart(revivedHarness.ctx);
   await settle(revived, revivedHarness);
   assert.ok(revivedHarness.ctx.ui.notices.some((notice) => /Resumed/.test(notice.message)), "the run resumes");
@@ -233,7 +234,7 @@ test("workflow_retry re-runs the parked script and parks again on another failur
       recovery: { maxAttempts: 1, strategy: ["block"] },
     }),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const result = await runtime.retry(undefined, h.ctx);
@@ -259,7 +260,7 @@ test("workflow_retry advances the run when the retried script succeeds", async (
     }),
     task("deliver"),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   assert.equal(runtime.state.execution.stack.at(-1).blockId, "recovers", "the first failure parks");
@@ -274,7 +275,7 @@ test("workflow_retry advances the run when the retried script succeeds", async (
 test("workflow_retry is rejected away from a parked script", async () => {
   const h = harness();
   const wf = workflow([task("frame", { done: ["f"] })]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const result = await runtime.retry(undefined, h.ctx);
@@ -298,7 +299,7 @@ test("workflow_retry rejects while a script is still in flight", async () => {
     }),
     task("deliver"),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const started = runtime.startWorkflow(h.ctx, wf, "");
   await waitFor(() => exists(marker));
@@ -335,7 +336,7 @@ test("abort cancels an in-flight script and terminates the process", async () =>
     }),
     task("deliver"),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const started = runtime.startWorkflow(h.ctx, wf, "");
   await waitFor(() => exists(marker));
@@ -376,7 +377,7 @@ async function settle(runtime, ctx) {
 test("restore with an undelivered park delivers the retry guidance", async () => {
   const h = harness();
   const wf = workflow([script("stuck", { spec: { argv: ["node", "-e", "process.exit(1)"], inheritEnv: ["PATH"] }, recovery: { maxAttempts: 1, strategy: ["block"] } })]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const parkSnapshot = h.entries
@@ -385,7 +386,7 @@ test("restore with an undelivered park delivers the retry guidance", async () =>
 
   const revivedHarness = harness();
   revivedHarness.entries.push(parkSnapshot);
-  const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read);
+  const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read, revivedHarness.storeRoot);
   revived.handleSessionStart(revivedHarness.ctx);
   await settle(revived, revivedHarness);
   assert.ok(
@@ -408,7 +409,7 @@ test("a script whose cwd escapes the workflow root is refused without spawning",
     [script("escapee", { spec: { argv: ["node", "-e", "process.stdout.write('escaped')"], cwd: "escape/loop", inheritEnv: ["PATH"], maxAttempts: 1, recovery: { maxAttempts: 1, strategy: ["block"] } } })],
     { overviewPath: join(root, "WORKFLOW.md") },
   );
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   return runtime.startWorkflow(h.ctx, wf, "").then((run) => {
     assert.ok(run);
@@ -422,7 +423,7 @@ test("a script whose cwd escapes the workflow root is refused without spawning",
 test("started runs persist the compiled definition digest", async () => {
   const h = harness();
   const wf = workflow([script("probe", { spec: { argv: ["node", "-e", "process.stdout.write('ok')"], inheritEnv: ["PATH"] } }), task("deliver")]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const started = h.entries.find((entry) => entry.customType === "choreograph" && entry.data.status === "active" && entry.data.execution.definitionDigest !== undefined);
@@ -433,16 +434,16 @@ test("started runs persist the compiled definition digest", async () => {
 test("restore refuses a run whose workflow definition changed under it", async () => {
   const h = harness();
   const wf = workflow([task("frame", { done: ["f"] }), task("deliver")]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   const active = h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active");
 
   const revivedHarness = harness();
   revivedHarness.entries.push(...active);
-  const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read);
+  const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read, revivedHarness.storeRoot);
   const changed = workflow([task("frame", { done: ["f"] }), task("deliver", { done: ["d"] })]);
-  const revivedWithChanged = new RuntimeCoordinator(revivedHarness.pi, [changed], revivedHarness.read);
+  const revivedWithChanged = new RuntimeCoordinator(revivedHarness.pi, [changed], revivedHarness.read, revivedHarness.storeRoot);
   revivedWithChanged.handleSessionStart(revivedHarness.ctx);
   assert.ok(
     revivedHarness.ctx.ui.notices.some((notice) => /definition digest mismatch/.test(notice.message)),
@@ -459,7 +460,7 @@ test("a script with declared inputs still drives through the runner", async () =
     script("probe", { spec: { argv: ["node", "-e", "process.stdout.write(JSON.stringify({ answer: 42 }))"], inheritEnv: ["PATH"], stdout: "json" }, inputs: { id: { from: "frame", select: "/data/id" } } }),
     task("deliver"),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
@@ -483,7 +484,7 @@ test("declared script inputs arrive on the child's stdin as one JSON object", as
     }),
     task("deliver"),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
@@ -506,7 +507,7 @@ test("a script without inputs runs with an empty stdin", async () => {
     }),
     task("deliver"),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
@@ -522,7 +523,7 @@ test("an unresolvable script input fails the node and parks the run at the scrip
     script("probe", { spec: { stdout: "json" }, inputs: { gone: { from: "frame", select: "/data/missing" } } }),
     task("deliver"),
   ]);
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
@@ -557,7 +558,7 @@ test("script runs publish stdout and stderr log artifacts under the run director
     overviewPath: join(root, "WORKFLOW.md"),
   };
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const run = await runtime.startWorkflow(h.ctx, wf, "");
   assert.ok(run);
@@ -581,7 +582,7 @@ test("an oversized script output is stored and materialized into the next script
     overviewPath: join(root, "WORKFLOW.md"),
   };
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const run = await runtime.startWorkflow(h.ctx, wf, "");
   assert.ok(run);
@@ -613,7 +614,7 @@ test("declared capture files are published to the artifact store and referenced 
     overviewPath: join(root, "WORKFLOW.md"),
   };
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const run = await runtime.startWorkflow(h.ctx, wf, "");
   assert.ok(run);
@@ -641,7 +642,7 @@ test("a capture file that cannot be read fails the step through its repair polic
     overviewPath: join(root, "WORKFLOW.md"),
   };
   const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   const run = await runtime.startWorkflow(h.ctx, wf, "");
   assert.ok(run);

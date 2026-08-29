@@ -725,16 +725,11 @@ interface ProcessExitEvent {
   readonly exit: { readonly code?: number; readonly signal?: string; readonly timedOut: boolean; readonly stdout: string; readonly stderr: string; readonly truncated: boolean; readonly spawnError?: string };
   readonly files?: readonly ArtifactRef[];
   readonly captureError?: string;
-  readonly store?: ArtifactSink;
+  readonly store: ArtifactSink;
 }
 
 const TEXT_STDOUT_BUDGET_BYTES = LIMITS.checkpointBytes - 256;
 
-function clipToByteBudget(text: string, budget: number): string {
-  let clipped = text;
-  while (clipped.length > 0 && Buffer.byteLength(clipped, "utf8") > budget) clipped = clipped.slice(0, -16);
-  return clipped;
-}
 
 /** Adds side outputs (stderr, captured files) to the stdout-derived data without losing non-object stdout values. */
 function mergeOutputSides(base: JsonValue, sides: Record<string, JsonValue>): JsonValue {
@@ -752,12 +747,11 @@ function capturedFilesSides(files: readonly ArtifactRef[] | undefined): Record<s
 }
 
 /** Applies the configured stderr mode: none keeps stderr diagnostic-only, text stores it, json parses it. */
-function scriptStderrValue(spec: ScriptSpec, exit: ProcessExitEvent["exit"], store?: ArtifactSink): { sides: Record<string, JsonValue>; clipped?: boolean } | { error: string } {
+function scriptStderrValue(spec: ScriptSpec, exit: ProcessExitEvent["exit"], store: ArtifactSink): { sides: Record<string, JsonValue>; clipped?: boolean } | { error: string } {
   if (spec.stderr === "none") return { sides: {} };
   if (spec.stderr === "text") {
     const text = exit.stderr;
     if (Buffer.byteLength(text, "utf8") <= TEXT_STDOUT_BUDGET_BYTES) return { sides: { stderr: text } };
-    if (!store) return { sides: { stderr: clipToByteBudget(text, TEXT_STDOUT_BUDGET_BYTES), stderrTruncated: true }, clipped: true };
     const ref = store.publishText("stderr", text);
     return { sides: { stderr: utf8Preview(text, 192), stderrArtifact: ref as unknown as JsonValue }, clipped: true };
   }
@@ -770,7 +764,7 @@ function scriptStderrValue(spec: ScriptSpec, exit: ProcessExitEvent["exit"], sto
   }
 }
 
-function scriptStdoutValue(spec: ScriptSpec, exit: ProcessExitEvent["exit"], store?: ArtifactSink): { value: JsonValue; clipped?: boolean } | { error: string } {
+function scriptStdoutValue(spec: ScriptSpec, exit: ProcessExitEvent["exit"], store: ArtifactSink): { value: JsonValue; clipped?: boolean } | { error: string } {
   let base: JsonValue = {};
   let stdoutClipped = false;
   if (spec.stdout === "json") {
@@ -785,9 +779,6 @@ function scriptStdoutValue(spec: ScriptSpec, exit: ProcessExitEvent["exit"], sto
     const stdout = exit.stdout;
     if (Buffer.byteLength(stdout, "utf8") <= TEXT_STDOUT_BUDGET_BYTES) {
       base = { stdout };
-    } else if (!store) {
-      base = { stdout: clipToByteBudget(stdout, TEXT_STDOUT_BUDGET_BYTES), stdoutTruncated: true };
-      stdoutClipped = true;
     } else {
       const ref = store.publishText("output", stdout);
       base = { stdout: utf8Preview(stdout, 192), stdoutTruncated: true, artifact: ref as unknown as JsonValue };
@@ -824,7 +815,7 @@ function applyProcessExit(workflow: Workflow, state: Execution, event: ProcessEx
   const contract = contractErrorFor(workflow, block.output, output.value, `script ${leaf.key} output`);
   if (contract) return scriptFailure(workflow, state, leaf, block, contract);
   let checkpoint: Checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}.${output.truncation}`), data: output.value };
-  if (event.store && canonicalJsonBytes(checkpoint as unknown as JsonValue) > LIMITS.checkpointBytes) {
+  if (canonicalJsonBytes(checkpoint as unknown as JsonValue) > LIMITS.checkpointBytes) {
     const ref = event.store.publishJson("output", output.value);
     checkpoint = { summary: clipSummary(`Script ${block.id} exited ${event.exit.code}; its ${ref.size}-byte output was published to the artifact store as ${ref.checksum}.${output.truncation}`), data: ref as unknown as JsonValue };
   }

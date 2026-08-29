@@ -278,19 +278,6 @@ test("oversized text stdout keeps a preview inline and the full text in the stor
   assert.equal(store.published[0].text, full, "the full text is preserved in the store");
 });
 
-test("without a store an oversized json stdout still fails the script", () => {
-  const wf = workflow([script("emit", { spec: { stdout: "json" } })]);
-  let state = start(wf, { runId: "r1" }).state;
-  const exit = { code: 0, timedOut: false, stdout: BIG_JSON, stderr: "", truncated: false };
-  const retried = transition(wf, state, { type: "process-exit", key: "root/emit", exit });
-  assert.ok(retried.ok, retried.ok ? "" : retried.error);
-  assert.equal(retried.effect.kind, "deliver", "default recovery retries first");
-  state = retried.state;
-  const parked = transition(wf, state, { type: "process-exit", key: "root/emit", exit });
-  assert.ok(parked.ok, parked.ok ? "" : parked.error);
-  assert.equal(parked.effect.kind, "stay", "with retries exhausted it blocks");
-  assert.match(parked.state.checkpoints["root/emit"].summary, /exceeds/);
-});
 
 test("a failing output contract rejects the script even when a store is available", () => {
   const contracts = { report: { type: "object", required: ["pass"], additionalProperties: false, properties: { pass: { type: "integer" } } } };
@@ -361,20 +348,6 @@ test("stderr that is not valid json in json mode fails the step", () => {
   assert.match(next.state.checkpoints["root/emit"].summary, /stderr is not valid JSON/);
 });
 
-test("text stdout clipped to the checkpoint budget sets the truncation flag", () => {
-  const wf = workflow([script("emit")]);
-  const started = start(wf, { runId: "r1" });
-  const next = transition(wf, started.state, {
-    type: "process-exit",
-    key: "root/emit",
-    exit: { code: 0, timedOut: false, stdout: "x".repeat(20_000), stderr: "", truncated: false },
-  });
-  assert.ok(next.ok, next.ok ? "" : next.error);
-  const checkpoint = next.state.checkpoints["root/emit"];
-  assert.equal(checkpoint.data.stdoutTruncated, true, "the silent clip is flagged in the data");
-  assert.ok(Buffer.byteLength(checkpoint.data.stdout, "utf8") <= 16_128, "the clip stays within the text budget");
-  assert.match(checkpoint.summary, /captured output was truncated/);
-});
 
 test("previewed text stdout with a store also sets the truncation flag", () => {
   const wf = workflow([script("chatter")]);

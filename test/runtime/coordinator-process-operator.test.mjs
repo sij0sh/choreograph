@@ -45,7 +45,8 @@ function harness() {
     sessionManager: { getBranch: () => entries },
   };
   const read = () => "# instructions";
-  return { pi, ctx, sent, entries, activeTools, read };
+  const storeRoot = mkdtempSync(join(tmpdir(), "pwf-proc-op-store-"));
+  return { pi, ctx, sent, entries, activeTools, read, storeRoot };
 }
 
 const FETCH_SCRIPT = {
@@ -84,7 +85,7 @@ const PLAN = {
 };
 
 async function toProcessNode(h, wf) {
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.transition(completed(cp("framed")), undefined, h.ctx);
@@ -151,7 +152,7 @@ test("consecutive process nodes run in one drive pass", async () => {
       { id: "double-it", operator: "double", objective: "Double.", dependsOn: ["fetch-data"] },
     ],
   };
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.transition(completed(cp("framed")), undefined, h.ctx);
@@ -194,7 +195,7 @@ test("a process operator runs as a loop body step across iterations", async () =
     { name: "operator-body-e2e", overviewPath: join(tempDir(), "WORKFLOW.md"), operators: operators(FETCH_SCRIPT) },
   );
   // the operator step form parses to the same script block; assert the parsed shape via the parser first
-  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read);
+  const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.transition(completed(cp("gathered", { files: ["a", "b"] })), undefined, h.ctx);
