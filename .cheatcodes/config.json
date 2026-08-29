@@ -1,0 +1,10 @@
+{
+  "projectId": "github.com/sij0sh/choreograph",
+  "model": "z-ai-openai/glm-5.3-flash",
+  "inputs": [
+    "/home/joshsimon/.pi/agent/sessions/--home-joshsimon-Projects-pi-extensions-choreograph--"
+  ],
+  "projectRoots": [
+    "."
+  ]
+}

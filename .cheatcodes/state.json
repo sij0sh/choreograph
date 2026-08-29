@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "files": {
+    "/home/joshsimon/.pi/agent/sessions/--home-joshsimon-Projects-pi-extensions-choreograph--/2026-08-25T18-00-37-201Z_01a03a14-ce50-725a-93d1-c94363a1e026.jsonl": {
+      "sessionId": "01a03a14-ce50-725a-93d1-c94363a1e026",
+      "committedOffset": 1058998,
+      "observedSize": 1058998,
+      "mtimeMs": 1787684267754.9429,
+      "prefixSha256": "4046fff954e42c920248fb964bd2c37535202a83e50a7e3c04c2efa75f5f4309"
+    }
+  }
+}
