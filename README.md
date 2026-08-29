@@ -133,6 +133,12 @@ frontmatter `contracts:` mapping names them.
 Frontmatter in task files is optional. When valid object frontmatter is
 present, choreograph removes it from the instructions shown to the model.
 
+### Workflow checking
+
+Workflow definitions are checked when parsed from disk
+(`src/authoring/parser.ts`) and when generated in-session
+(`src/authoring/generated.ts`).
+
 ## Workflow frontmatter
 
 `WORKFLOW.md` must start with YAML frontmatter. Unknown fields are rejected.
@@ -741,7 +747,7 @@ npm test
 ```
 
 The command runs TypeScript in strict mode, then executes the engine,
-authoring, persistence, runtime, and integration tests.
+authoring, planning, persistence, pi, runtime, and integration tests.
 
 The project groups source by responsibility:
 
