@@ -79,12 +79,12 @@ export function resolveBinding(workflow: Workflow, state: Execution, binding: In
   return { ok: false, error: `input "from" names "${binding.from}", which does not produce artifacts` };
 }
 
-export type ArtifactResult =
+type ArtifactResult =
   | { readonly ok: true; readonly present: true; readonly value: JsonValue }
   | { readonly ok: true; readonly present: false; readonly skipped?: Checkpoint }
   | { readonly ok: false; readonly error: string };
 
-export function checkpointOf(workflow: Workflow, state: Execution, blockId: string): { key: string; checkpoint: NonNullable<Execution["checkpoints"][string]> } | undefined {
+function checkpointOf(workflow: Workflow, state: Execution, blockId: string): { key: string; checkpoint: NonNullable<Execution["checkpoints"][string]> } | undefined {
   const prefix = `${workflow.root.id}/`;
   const order = state.checkpointOrder ?? Object.keys(state.checkpoints);
   for (let i = order.length - 1; i >= 0; i -= 1) {
@@ -97,7 +97,7 @@ export function checkpointOf(workflow: Workflow, state: Execution, blockId: stri
   return undefined;
 }
 
-export function aggregateOf(state: Execution, key: string): JsonValue | undefined {
+function aggregateOf(state: Execution, key: string): JsonValue | undefined {
   const execution = state.plans[key];
   if (!execution) return undefined;
   const currentIds = new Set(execution.plan.nodes.map((node) => node.id));

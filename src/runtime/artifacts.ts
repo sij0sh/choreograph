@@ -8,7 +8,7 @@ import type { InputBinding, Workflow } from "../domain/workflow.ts";
 export type { ResolvedInput } from "../domain/artifacts.ts";
 export { resolveBinding };
 
-export type ResolvedScriptInputs =
+type ResolvedScriptInputs =
   | { readonly ok: true; readonly inputs: Readonly<Record<string, JsonValue>> }
   | { readonly ok: false; readonly error: string };
 
@@ -66,7 +66,7 @@ export function refLoaderFor(store: ArtifactStore): RefValueLoader {
 }
 
 /** Materializes an artifact reference into the script's workspace and returns a workspace-relative path. */
-export type ArtifactMaterializer = (ref: ArtifactRef) => { readonly ok: true; readonly path: string } | { readonly ok: false; readonly error: string };
+type ArtifactMaterializer = (ref: ArtifactRef) => { readonly ok: true; readonly path: string } | { readonly ok: false; readonly error: string };
 
 const MATERIALIZE_DEPTH_MAX = 32;
 

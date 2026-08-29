@@ -58,7 +58,7 @@ export function isValidJsonPointer(pointer: string): boolean {
   return pointer === "" || JSON_POINTER_PATTERN.test(pointer);
 }
 
-export type PointerResult = { ok: true; value: JsonValue } | { ok: false; error: string };
+type PointerResult = { ok: true; value: JsonValue } | { ok: false; error: string };
 
 export function jsonPointerGet(value: JsonValue, pointer: string): PointerResult {
   if (!isValidJsonPointer(pointer)) return { ok: false, error: `pointer ${pointer} is not valid JSON Pointer syntax` };

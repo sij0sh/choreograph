@@ -13,7 +13,7 @@ export interface ProcessResult {
   readonly spawnError?: string;
 }
 
-export interface ProcessSpec {
+interface ProcessSpec {
   readonly argv: readonly string[];
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;

@@ -6,7 +6,7 @@ import { canonicalJson } from "./json.ts";
 import type { Workflow } from "./workflow.ts";
 import { workflowBlocks } from "./workflow.ts";
 
-export interface Constraint {
+interface Constraint {
   readonly id: string;
   readonly text: string;
 }
@@ -16,27 +16,27 @@ export interface Criterion {
   readonly text: string;
 }
 
-export interface PendingItem {
+interface PendingItem {
   readonly id: string;
   readonly text: string;
   readonly sourceOrdinal: number;
 }
 
-export interface EvidenceRef {
+interface EvidenceRef {
   readonly description: string;
 }
 
-export interface Decision {
+interface Decision {
   readonly text: string;
   readonly sourceOrdinal: number;
 }
 
-export interface ContractOutputRef {
+interface ContractOutputRef {
   readonly description: string;
   readonly artifact: ArtifactRef;
 }
 
-export interface GenesisHandoffV1 {
+interface GenesisHandoffV1 {
   readonly v: 1;
   readonly kind: "genesis";
   readonly run: {
@@ -78,7 +78,7 @@ export interface CheckpointHandoffV1 {
   readonly digest: string;
 }
 
-export interface HandoffRollupV1 {
+interface HandoffRollupV1 {
   readonly v: 1;
   readonly kind: "rollup";
   readonly covers: {

@@ -52,7 +52,7 @@ type TerminalSnapshot =
   | { readonly v: 5; readonly status: "completed"; readonly workflow: string; readonly runId: string; readonly execution?: Execution; readonly handoff?: HandoffManifestV1 }
   | { readonly v: 5; readonly status: "aborted"; readonly workflow: string; readonly runId: string; readonly execution?: Execution; readonly handoff?: HandoffManifestV1 };
 
-export type RolloverSnapshotV6 = {
+type RolloverSnapshotV6 = {
   readonly v: 6;
   readonly status: "rollover-pending";
   readonly workflow: string;

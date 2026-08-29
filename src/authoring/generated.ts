@@ -12,7 +12,7 @@ import type { CompiledWorkflowV2 } from "../domain/compiled-workflow.ts";
  * A serializable workflow definition produced at runtime. The MVP grammar is
  * tasks only: every step is an agent task with inline Markdown instructions.
  */
-export interface GeneratedStepSpec {
+interface GeneratedStepSpec {
   readonly id: string;
   readonly instruction: string;
   readonly done?: readonly string[];

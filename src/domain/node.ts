@@ -5,7 +5,7 @@ export type RunnerKind = "agent" | "process";
 
 export type NodeStatus = "running" | "waiting" | "succeeded" | "failed" | "canceled" | "skipped";
 
-export interface AgentNodeSpec {
+interface AgentNodeSpec {
   readonly runner: "agent";
   readonly blockId: string;
   readonly instructionPath: string;
@@ -16,7 +16,7 @@ export interface AgentNodeSpec {
   readonly output?: string;
 }
 
-export interface ProcessNodeSpec {
+interface ProcessNodeSpec {
   readonly runner: "process";
   readonly blockId: string;
   readonly spec: ScriptSpec;
@@ -28,7 +28,7 @@ export interface ProcessNodeSpec {
 export type NodeSpec = AgentNodeSpec | ProcessNodeSpec;
 
 /** The agent-executable part of any position the runtime can dispatch. */
-export interface AgentPositionSpec {
+interface AgentPositionSpec {
   readonly runner: "agent";
   readonly blockId: string;
 }

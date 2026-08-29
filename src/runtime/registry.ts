@@ -4,17 +4,17 @@ import type { NodeResult, Runner, RunnerContext } from "./runner.ts";
 export type RunnerKind = NodeInvocation["runner"];
 
 /** A runner whose dispatches wait for an external completion signal, such as the agent settling a position. */
-export interface AwaitingRunner extends Runner {
+interface AwaitingRunner extends Runner {
   settle(invocationKey: string, result: NodeResult): boolean;
 }
 
-export interface DispatchHandle {
+interface DispatchHandle {
   readonly invocation: NodeInvocation;
   readonly runner: Runner;
   readonly result: Promise<NodeResult>;
 }
 
-export interface DispatchOptions {
+interface DispatchOptions {
   /** Set by callers that deliberately re-execute an at-least-once runner, such as an approved retry or a resumed run. */
   readonly acknowledgedRetry?: boolean;
 }

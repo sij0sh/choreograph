@@ -46,7 +46,7 @@ export function appendCheckpointHandoff(fields: {
   return { ...fields.manifest, atomicHandoffs: [...fields.manifest.atomicHandoffs, handoff] };
 }
 
-export function estimateManifestTokens(manifest: HandoffManifestV1): number {
+function estimateManifestTokens(manifest: HandoffManifestV1): number {
   return Math.ceil(Buffer.byteLength(renderHandoffCapsule(manifest), "utf8") / 4);
 }
 

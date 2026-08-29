@@ -4,11 +4,11 @@ import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { ARTIFACT_MEDIA_TYPES, type ArtifactSink, isArtifactRef, type ArtifactRef } from "../domain/artifacts.ts";
 import { canonicalJson, isJsonValue, type JsonValue } from "../domain/json.ts";
 
-export type LoadResult =
+type LoadResult =
   | { readonly ok: true; readonly content: Buffer }
   | { readonly ok: false; readonly error: string };
 
-export type MaterializeResult =
+type MaterializeResult =
   | { readonly ok: true; readonly path: string }
   | { readonly ok: false; readonly error: string };
 

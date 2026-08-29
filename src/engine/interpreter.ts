@@ -54,7 +54,7 @@ function isLeafFrame(frame: Frame): boolean {
   return frame.kind === "task" || frame.kind === "node" || (frame.kind === "plan" && frame.mode === "create");
 }
 
-export interface ProcessLeaf {
+interface ProcessLeaf {
   readonly key: string;
   readonly blockId: string;
   readonly script: ScriptSpec;
@@ -63,7 +63,7 @@ export interface ProcessLeaf {
   readonly dependsOn?: readonly string[];
 }
 
-export function scriptLeafAt(workflow: Workflow, state: Execution): { key: string; block: ScriptBlock } | undefined {
+function scriptLeafAt(workflow: Workflow, state: Execution): { key: string; block: ScriptBlock } | undefined {
   if (state.status !== "active") return undefined;
   const leaf = state.stack[state.stack.length - 1];
   if (!leaf || leaf.kind !== "task") return undefined;

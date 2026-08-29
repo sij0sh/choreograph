@@ -103,7 +103,7 @@ function resultOf(exit: ProcessResult): NodeResult {
   return { status: exit.code === 0 ? "succeeded" : "failed", reason: exit.code === 0 ? undefined : `exited with code ${exit.code}`, exit };
 }
 
-export function processEnvOf(spec: ScriptSpec): Record<string, string> {
+function processEnvOf(spec: ScriptSpec): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of spec.inheritEnv ?? []) {
     const value = process.env[name];

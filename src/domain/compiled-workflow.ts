@@ -12,7 +12,7 @@ export interface ContentRef {
   readonly content: string;
 }
 
-export interface CompiledTaskBlock {
+interface CompiledTaskBlock {
   readonly kind: "task";
   readonly id: string;
   readonly instruction: ContentRef;
@@ -24,7 +24,7 @@ export interface CompiledTaskBlock {
   readonly guard?: GuardClause;
 }
 
-export interface CompiledScriptBlock {
+interface CompiledScriptBlock {
   readonly kind: "script";
   readonly id: string;
   readonly script: ScriptSpec;
@@ -40,7 +40,7 @@ export interface CompiledSequenceBlock {
   readonly children: readonly CompiledBlock[];
 }
 
-export interface CompiledPlanBlock {
+interface CompiledPlanBlock {
   readonly kind: "plan";
   readonly id: string;
   readonly operators: readonly string[];
@@ -49,7 +49,7 @@ export interface CompiledPlanBlock {
   readonly guard?: GuardClause;
 }
 
-export interface CompiledLoopBlock {
+interface CompiledLoopBlock {
   readonly kind: "loop";
   readonly id: string;
   readonly mode: "for-each" | "repeat-until";

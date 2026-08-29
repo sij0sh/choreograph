@@ -46,7 +46,7 @@ export function newRunId(): string {
   return `${stamp}-${randomBytes(4).toString("hex")}`;
 }
 
-export function assertNotCancelled(signal: AbortSignal | undefined): void {
+function assertNotCancelled(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new Error("workflow operation cancelled");
 }
 

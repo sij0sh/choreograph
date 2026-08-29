@@ -27,7 +27,7 @@ export interface GuardClause {
   readonly value?: JsonValue;
 }
 
-export type GuardResult = { readonly ok: true; readonly holds: boolean } | { readonly ok: false; readonly error: string };
+type GuardResult = { readonly ok: true; readonly holds: boolean } | { readonly ok: false; readonly error: string };
 
 function canonicalMember(list: readonly JsonValue[], value: JsonValue): boolean {
   const form = canonicalJson(value);

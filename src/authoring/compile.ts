@@ -12,7 +12,7 @@ import {
 } from "../domain/compiled-workflow.ts";
 import type { Block, LoopBlock, PlanBlock, ScriptBlock, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 
-export type InstructionReader = (path: string) => string | undefined;
+type InstructionReader = (path: string) => string | undefined;
 
 function sha256(content: string): string {
   return createHash("sha256").update(content).digest("hex");

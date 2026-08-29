@@ -8,7 +8,7 @@ import type { InputBinding } from "../domain/workflow.ts";
 
 export const FRONTMATTER_KEYS = ["description", "steps", "piVisibility", "legalTools", "contracts"] as const;
 export const STEP_KEYS = ["id", "run", "tools", "done", "repair", "plan", "script", "operator", "inputs", "output", "when", "for_each", "repeat_until"] as const;
-export const SCRIPT_KEYS = ["argv", "cwd", "env", "inheritEnv", "timeoutMs", "acceptedExitCodes", "stdout", "stderr", "maxCaptureBytes", "files"] as const;
+const SCRIPT_KEYS = ["argv", "cwd", "env", "inheritEnv", "timeoutMs", "acceptedExitCodes", "stdout", "stderr", "maxCaptureBytes", "files"] as const;
 export const OPERATOR_KEYS = ["description", "tools", "output", "script"] as const;
 const RECOVERY_KEYS = ["max_attempts", "max_replans", "strategy", "scope"] as const;
 const RECOVERY_ACTIONS: readonly RecoveryAction[] = ["retry", "invalidate", "replan", "block"];

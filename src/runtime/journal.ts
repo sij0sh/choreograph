@@ -188,7 +188,7 @@ export class RunJournal {
   }
 }
 
-export interface InvocationView {
+interface InvocationView {
   readonly key: string;
   readonly runner: EventRunner;
   readonly status: InvocationStatus;
@@ -199,7 +199,7 @@ export interface InvocationView {
   readonly lastReason?: string;
 }
 
-export interface LoopView {
+interface LoopView {
   readonly key: string;
   readonly mode: LoopMode;
   readonly status: "running" | "succeeded" | "canceled";
@@ -210,8 +210,8 @@ export interface LoopView {
   readonly exhausted?: boolean;
 }
 
-export type ArtifactView = Extract<RunEvent, { type: "artifact-published" }>;
-export type LogView = Extract<RunEvent, { type: "node-log" }>;
+type ArtifactView = Extract<RunEvent, { type: "artifact-published" }>;
+type LogView = Extract<RunEvent, { type: "node-log" }>;
 
 export interface RunProjection {
   readonly runId: string;

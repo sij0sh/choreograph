@@ -2,7 +2,7 @@ import { canonicalJson, objectAt, type JsonValue } from "./json.ts";
 import type { Workflow } from "./workflow.ts";
 import { LIMITS } from "./limits.ts";
 
-export type ContractErrors = readonly string[];
+type ContractErrors = readonly string[];
 
 export interface ContractDescriptor {
   readonly id: string;

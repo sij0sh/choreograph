@@ -103,7 +103,7 @@ function boundLine(value: string): string {
   return line.length <= DETAIL_LINE_CHARS ? line : `${line.slice(0, DETAIL_LINE_CHARS - 3)}...`;
 }
 
-export function recentEvents(projection: RunProjection): readonly string[] {
+function recentEvents(projection: RunProjection): readonly string[] {
   return projection.lastEvent ? [describeEvent(projection.lastEvent)] : [];
 }
 
