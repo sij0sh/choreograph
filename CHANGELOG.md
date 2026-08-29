@@ -6,7 +6,12 @@ behavioral and reference the commits that introduced them.
 
 ## [Unreleased]
 
-Nothing yet.
+### Removed
+
+- The cross-session workflow manifest cache introduced earlier in this
+  tranche (c22872d), including its `WORKFLOW.md`-only digest trust rule.
+  Discovery re-parses every workflow from disk; there is no cache digest
+  and no cross-session decode path.
 
 ## [0.1.1] - 2026-08-28
 
