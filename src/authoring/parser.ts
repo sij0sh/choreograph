@@ -15,7 +15,6 @@ import type {
   Workflow,
 } from "../domain/workflow.ts";
 import { compileContract } from "../domain/contract.ts";
-import { manifestDigest, openManifestCache, type ManifestCache } from "./manifest-cache.ts";
 import { LIMITS } from "../domain/limits.ts";
 import { DEFAULT_PLAN_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
 import {
@@ -548,7 +547,7 @@ function resolvesToDirectory(root: string, entry: { name: string; isDirectory():
   }
 }
 
-export function discoverWorkflows(workflowsRoot: string, cachePath?: string): {
+export function discoverWorkflows(workflowsRoot: string): {
   workflows: Workflow[];
   diagnostics: WorkflowDiagnostic[];
 } {
@@ -564,36 +563,18 @@ export function discoverWorkflows(workflowsRoot: string, cachePath?: string): {
     }
     return { workflows, diagnostics };
   }
-  let cache: ManifestCache | undefined = cachePath === undefined ? undefined : openManifestCache(cachePath);
-  let realRoot = "";
-  if (cache !== undefined) {
-    try {
-      realRoot = realpathSync(workflowsRoot);
-    } catch {
-      cache = undefined;
-    }
-  }
   const directories = directoryEntries
     .filter((entry) => resolvesToDirectory(workflowsRoot, entry))
     .sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of directories) {
     const directory = join(workflowsRoot, entry.name);
     if (!existsSync(join(directory, "WORKFLOW.md"))) continue;
-    const digest = cache === undefined ? undefined : manifestDigest(directory);
-    const cached = cache !== undefined && digest !== undefined ? cache.lookup(entry.name, digest, realRoot) : undefined;
-    if (cached !== undefined) {
-      workflows.push(cached);
-      continue;
-    }
     try {
       const workflow = loadWorkflowManifest(directory);
       workflows.push(workflow);
-      if (cache !== undefined && digest !== undefined) cache.store(entry.name, digest, workflow);
     } catch (error) {
       diagnostics.push({ path: join(directory, "WORKFLOW.md"), error: error instanceof Error ? error.message : String(error) });
-      cache?.drop(entry.name);
     }
   }
-  cache?.flush();
   return { workflows, diagnostics };
 }
