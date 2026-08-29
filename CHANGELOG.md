@@ -4,7 +4,7 @@ Notable behavior changes to choreograph, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Entries are
 behavioral and reference the commits that introduced them.
 
-## [Unreleased]
+## [0.1.5] - 2026-08-29
 
 ### Removed
 

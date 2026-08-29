@@ -1,6 +1,6 @@
 {
   "name": "choreograph",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "description": "A pi coding-agent extension that runs stepped workflows from markdown definitions below the agent directory",
   "license": "MIT",
   "private": true,
