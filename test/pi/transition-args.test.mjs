@@ -43,6 +43,29 @@ test("a well-formed call passes through unchanged", () => {
   assert.deepEqual(normalizeTransitionArguments(call), call);
 });
 
+test("derives summary from checkpoint.data when summary is omitted", () => {
+  const out = normalizeTransitionArguments({
+    status: "completed",
+    checkpoint: { data: { verdicts: [{ id: "v1", verdict: "PROVEN" }] } },
+  });
+  assert.equal(out.checkpoint.summary, JSON.stringify({ verdicts: [{ id: "v1", verdict: "PROVEN" }] }));
+});
+
+test("a derived summary keeps an existing summary untouched and clips long data", () => {
+  const untouched = normalizeTransitionArguments({
+    status: "completed",
+    checkpoint: { summary: "s", data: { a: 1 } },
+  });
+  assert.equal(untouched.checkpoint.summary, "s");
+
+  const long = normalizeTransitionArguments({
+    status: "completed",
+    checkpoint: { data: { blob: "x".repeat(600) } },
+  });
+  assert.equal(long.checkpoint.summary.length, 512);
+  assert.ok(long.checkpoint.summary.endsWith("..."));
+});
+
 test("lifts met and issues out of checkpoint.data when the top level omits them", () => {
   const out = normalizeTransitionArguments({
     status: "needs-work",

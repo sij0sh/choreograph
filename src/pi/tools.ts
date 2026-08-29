@@ -87,6 +87,12 @@ export function normalizeTransitionArguments(args: unknown): Record<string, unkn
       }
       nested.data = dataOut;
     }
+    if (typeof nested.summary !== "string" || !nested.summary.trim()) {
+      if (nested.data !== undefined) {
+        const derived = JSON.stringify(nested.data) ?? "";
+        nested.summary = derived.length > 512 ? `${derived.slice(0, 509)}...` : derived;
+      }
+    }
     out.checkpoint = nested;
   }
 
@@ -116,7 +122,7 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
       parameters: Type.Object(
         {
           name: Type.Unsafe<string>({ type: "string", enum: visible.map((workflow) => workflow.name), description: "The workflow to start." }),
-          target: Type.Optional(Type.String({ maxLength: 4096, description: "Optional subject or arguments the workflow should focus on; at most 4,096 bytes." })),
+          target: Type.Optional(Type.String({ maxLength: 4096, description: "Required in practice: the concrete subject the workflow should focus on (files, area, question, or defect); at most 4,096 bytes. Calls with a blank target are rejected." })),
         },
         { additionalProperties: false },
       ),
@@ -125,9 +131,17 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
         if (!workflow) {
           return { content: [{ type: "text", text: `Unknown workflow: ${params.name}` }], details: { workflow: params.name, status: "unknown" }, isError: true } satisfies ToolResult;
         }
+        const target = typeof params.target === "string" ? params.target.trim() : "";
+        if (!target) {
+          return {
+            content: [{ type: "text", text: `A workflow needs a non-empty target. Name the concrete subject to work on (files, area, question, or defect) and retry.` }],
+            details: { workflow: params.name, status: "missing-target" },
+            isError: true,
+          } satisfies ToolResult;
+        }
         let run;
         try {
-          run = await runtime.startWorkflow(ctx, workflow, params.target ?? "", signal);
+          run = await runtime.startWorkflow(ctx, workflow, target, signal);
         } catch (error) {
           if (error instanceof WorkflowCompileError) {
             return {
@@ -291,7 +305,7 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
       "Exact shape: { status, met?, checkpoint: { summary, evidence?, decisions?, unknowns?, data? }, issues? }.",
       "Copy `met` criterion ids verbatim from the position's required criteria; list every required id on completion.",
       `Caps: evidence/decisions/unknowns at most ${LIMITS.checkpointListItems} items of ${LIMITS.checkpointItemBytes} bytes each; summary at most ${LIMITS.checkpointSummaryBytes / 1024} KiB; the checkpoint at most ${LIMITS.checkpointBytes / 1024} KiB.`,
-      "There are no other fields; position-specific output goes inside checkpoint.data. Rejections report every violation at once.",
+      "There are no other fields; position-specific output goes inside checkpoint.data. If summary is omitted but data is present, summary is derived from data. Rejections report every violation at once.",
     ].join(" "),
     prepareArguments: normalizeTransitionArguments as (args: unknown) => Static<typeof transitionParameters>,
     parameters: transitionParameters,

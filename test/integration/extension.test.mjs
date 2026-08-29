@@ -72,11 +72,22 @@ test("registration exposes commands and exactly six workflow tools", () => {
   assert.equal(ext.tools.get("workflow_start").parameters.properties.name.enum.length, 1);
 });
 
+test("workflow_start rejects a blank target", async () => {
+  const ext = buildExtension(LEGACY);
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  const rejected = await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "   " }, undefined, () => {}, ctx);
+  assert.ok(rejected.isError);
+  assert.equal(rejected.details.status, "missing-target");
+  const missing = await ext.tools.get("workflow_start").execute("id", { name: "demo-run" }, undefined, () => {}, ctx);
+  assert.ok(missing.isError);
+});
+
 test("a full run executes through the Pi surface", async () => {
   const ext = buildExtension(LEGACY);
   const ctx = ext.ctx();
   ext.handlers.get("session_start")(undefined, ctx);
-  const start = await ext.tools.get("workflow_start").execute("id", { name: "demo-run" }, undefined, () => {}, ctx);
+  const start = await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "demo target" }, undefined, () => {}, ctx);
   assert.ok(start.terminate);
   await settle(ext.handlers, ctx);
   assert.ok(ext.sent.at(-1).includes("root/frame"), "the first control message is delivered");
@@ -102,7 +113,7 @@ test("blocked transitions keep the run resumable through the tool surface", asyn
   const ext = buildExtension(LEGACY);
   const ctx = ext.ctx();
   ext.handlers.get("session_start")(undefined, ctx);
-  await ext.tools.get("workflow_start").execute("id", { name: "demo-run" }, undefined, () => {}, ctx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "blocked flow" }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
   const transition = ext.tools.get("workflow_transition");
   const blocked = await transition.execute("id", { status: "blocked", checkpoint: { summary: "waiting" } }, undefined, () => {}, ctx);
@@ -193,7 +204,7 @@ steps:
 `, { files: ["steps/frame.md", "steps/deliver.md", "steps/review-one.md"] });
   const ctx = ext.ctx();
   ext.handlers.get("session_start")(undefined, ctx);
-  await ext.tools.get("workflow_start").execute("id", { name: "demo-run" }, undefined, () => {}, ctx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "delivery flow" }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
   const transition = ext.tools.get("workflow_transition");
 
@@ -241,7 +252,7 @@ test("a script step runs between tasks without a model turn and persists", async
   const ext = buildExtension(SCRIPTED);
   const ctx = ext.ctx();
   ext.handlers.get("session_start")(undefined, ctx);
-  await ext.tools.get("workflow_start").execute("id", { name: "demo-run" }, undefined, () => {}, ctx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "script flow" }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
   assert.ok(ext.sent.at(-1).includes("root/frame"), "the first control message is delivered");
 
@@ -276,7 +287,7 @@ test("a persisted run restores through the script position", async () => {
   const ext = buildExtension(SCRIPTED);
   const ctx = ext.ctx();
   ext.handlers.get("session_start")(undefined, ctx);
-  await ext.tools.get("workflow_start").execute("id", { name: "demo-run" }, undefined, () => {}, ctx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "script flow" }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
   await ext.tools.get("workflow_transition").execute("id", { status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
