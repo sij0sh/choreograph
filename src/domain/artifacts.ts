@@ -162,10 +162,3 @@ export function producerArtifact(workflow: Workflow, state: Execution, blockId: 
   }
   return { ok: false, error: `"${blockId}" does not produce artifacts` };
 }
-
-export function selectFrom(artifact: Extract<ArtifactResult, { ok: true; present: true }>, select: string | undefined): ArtifactResult {
-  if (select === undefined) return artifact;
-  const selected = jsonPointerGet(artifact.value, select);
-  if (!selected.ok) return { ok: true, present: false };
-  return { ok: true, present: true, value: selected.value };
-}
