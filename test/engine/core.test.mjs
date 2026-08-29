@@ -154,16 +154,6 @@ test("needs-work past the attempt bound escalates to a blocked stay", () => {
   assert.ok(second.state.checkpoints["root/a"], "the final checkpoint is recorded");
 });
 
-test("abort ends the run", () => {
-  const wf = workflow([task("a")]);
-  const started = start(wf, { runId: "r1" });
-  const aborted = transition(wf, started.state, { type: "abort" });
-  assert.ok(aborted.ok);
-  assert.equal(aborted.effect.kind, "aborted");
-  assert.equal(aborted.state.status, "aborted");
-  const after = transition(wf, aborted.state, { type: "outcome", outcome: completed(cp("late")) });
-  assert.ok(!after.ok);
-});
 
 test("transitions after completion fail", () => {
   const wf = workflow([task("a")]);

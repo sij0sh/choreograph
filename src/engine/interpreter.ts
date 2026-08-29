@@ -27,14 +27,12 @@ export type TaskOutcome =
 
 type WorkflowEvent =
   | { readonly type: "outcome"; readonly outcome: TaskOutcome }
-  | { readonly type: "abort" }
   | ProcessExitEvent;
 
 export type Effect =
   | { readonly kind: "deliver" }
   | { readonly kind: "stay" }
   | { readonly kind: "complete" }
-  | { readonly kind: "aborted" }
   | { readonly kind: "run-process"; readonly key: string };
 
 export type EngineResult =
@@ -680,9 +678,6 @@ export function start(workflow: Workflow, input: StartInput, store?: ArtifactSin
 
 export function transition(workflow: Workflow, state: Execution, event: WorkflowEvent, store?: ArtifactSinkProvider): EngineResult {
   if (state.status !== "active") return fail("execution is not active");
-  if (event.type === "abort") {
-    return { ok: true, state: { ...state, status: "aborted" }, effect: { kind: "aborted" } };
-  }
   if (event.type === "process-exit") {
     return applyProcessExit(workflow, state, event, store);
   }
