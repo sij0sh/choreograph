@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { start, transition } from "../../src/engine/interpreter.ts";
+import { start, transition as engineTransition } from "../../src/engine/interpreter.ts";
 import { completed, cp, loop, memoryStore, script, task, workflow } from "../engine/helpers.mjs";
 import { completedPlanNodeOf, isArtifactRef, producerArtifact } from "../../src/domain/artifacts.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
@@ -11,6 +11,14 @@ import { ArtifactStore } from "../../src/runtime/artifact-store.ts";
 import { inlineRefs, refLoaderFor, resolveBinding, resolveScriptInputs } from "../../src/runtime/artifacts.ts";
 import { inputSection } from "../../src/runtime/prompts-inputs.ts";
 import { renderPositionEnvelope } from "../../src/runtime/prompts.ts";
+
+// Keyed outcomes (corr-c1): the engine requires each outcome event to carry the
+// leaf key. Tests inject it automatically; an explicit key in the event wins.
+const transition = (wf, state, event, store) =>
+  event?.type === "outcome"
+    ? engineTransition(wf, state, { ...event, outcome: { key: state?.stack?.at(-1)?.key, ...event.outcome } }, store)
+    : engineTransition(wf, state, event, store);
+
 
 const operators = (output) =>
   new Map([

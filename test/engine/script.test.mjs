@@ -1,9 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { start, transition } from "../../src/engine/interpreter.ts";
+import { start, transition as engineTransition } from "../../src/engine/interpreter.ts";
 import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-execution.ts";
 import { blocked, completed, cp, loop, memoryStore, needsWork, script, sequence, task, workflow } from "./helpers.mjs";
+
+// Keyed outcomes (corr-c1): the engine requires each outcome event to carry the
+// leaf key. Tests inject it automatically; an explicit key in the event wins.
+const transition = (wf, state, event, store) =>
+  event?.type === "outcome"
+    ? engineTransition(wf, state, { ...event, outcome: { key: state?.stack?.at(-1)?.key, ...event.outcome } }, store)
+    : engineTransition(wf, state, event, store);
+
 
 function recordingStore() {
   const published = [];

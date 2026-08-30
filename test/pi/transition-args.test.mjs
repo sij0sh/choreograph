@@ -27,14 +27,15 @@ const schema = transitionSchema();
 
 const valid = {
   status: "completed",
+  key: "root/only",
   met: ["done"],
   checkpoint: { summary: "the position is complete", data: { plan: { version: 1 } } },
 };
 
 test("a well-formed transition passes the schema", () => {
   assert.equal(Value.Check(schema, valid), true);
-  assert.equal(Value.Check(schema, { status: "needs-work", checkpoint: { summary: "broken" } }), true);
-  assert.equal(Value.Check(schema, { status: "blocked", checkpoint: { summary: "stuck" } }), true);
+  assert.equal(Value.Check(schema, { status: "needs-work", key: "root/only", checkpoint: { summary: "broken" } }), true);
+  assert.equal(Value.Check(schema, { status: "blocked", key: "root/only", checkpoint: { summary: "stuck" } }), true);
 });
 
 test("the tool schema derives transition and checkpoint enumerations", () => {
@@ -88,9 +89,9 @@ test("status is required and restricted to the three outcomes", () => {
 });
 
 test("issues entries require target and reason", () => {
-  assert.equal(Value.Check(schema, { status: "needs-work", checkpoint: { summary: "s" }, issues: [{ target: "root/frame" }] }), false);
+  assert.equal(Value.Check(schema, { status: "needs-work", key: "root/only", checkpoint: { summary: "s" }, issues: [{ target: "root/frame" }] }), false);
   assert.equal(
-    Value.Check(schema, { status: "needs-work", checkpoint: { summary: "s" }, issues: [{ target: "root/frame", reason: "broken" }] }),
+    Value.Check(schema, { status: "needs-work", key: "root/only", checkpoint: { summary: "s" }, issues: [{ target: "root/frame", reason: "broken" }] }),
     true,
   );
 });

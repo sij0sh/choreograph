@@ -115,7 +115,7 @@ test("handleContext filters only for an active, delivered run", async () => {
   assert.ok(isolated, "active and delivered: filtering applies");
   assert.equal(isolated.messages.length, 2);
 
-  const finished = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  const finished = await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
   assert.ok(!finished.isError);
   const nextBoundary = user(`Continue workflow \`${runId}\` at deliver.`);
   const after = runtime.handleContext({ messages: [boundaryMsg, assistant("work"), nextBoundary] });
@@ -131,7 +131,7 @@ test("handleContext keeps everything before delivery", async () => {
   await runtime.startWorkflow(h.ctx, wf, "target");
   h.sent.length = 0;
 
-  await runtime.transition({ status: "completed", checkpoint: cp("done") }, undefined, h.ctx);
+  await runtime.transition({ key: "root/frame", status: "completed", checkpoint: cp("done") }, undefined, h.ctx);
   assert.equal(runtime.handleContext({ messages: [user("anything")] }), undefined, "not yet delivered: safe fallback");
 });
 

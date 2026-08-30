@@ -4,7 +4,15 @@ import { effectiveTools, CONTROL_TOOLS } from "../../src/runtime/capabilities.ts
 import { statusValue } from "../../src/runtime/status.ts";
 import { readBlockFrom, renderPositionEnvelope, renderReportEnvelope, rosterPrompt, controlMessage } from "../../src/runtime/prompts.ts";
 import { completed, cp, loop, sequence, task, workflow } from "../engine/helpers.mjs";
-import { start, transition } from "../../src/engine/interpreter.ts";
+import { start, transition as engineTransition } from "../../src/engine/interpreter.ts";
+
+// Keyed outcomes (corr-c1): the engine requires each outcome event to carry the
+// leaf key. Tests inject it automatically; an explicit key in the event wins.
+const transition = (wf, state, event, store) =>
+  event?.type === "outcome"
+    ? engineTransition(wf, state, { ...event, outcome: { key: state?.stack?.at(-1)?.key, ...event.outcome } }, store)
+    : engineTransition(wf, state, event, store);
+
 
 const BASE = ["read", "bash", "edit"];
 

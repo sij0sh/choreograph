@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { start, transition } from "../../src/engine/interpreter.ts";
+import { start, transition as engineTransition } from "../../src/engine/interpreter.ts";
 import { completed, cp, task, workflow } from "./helpers.mjs";
+
+// Keyed outcomes (corr-c1): the engine requires each outcome event to carry the
+// leaf key. Tests inject it automatically; an explicit key in the event wins.
+const transition = (wf, state, event, store) =>
+  event?.type === "outcome"
+    ? engineTransition(wf, state, { ...event, outcome: { key: state?.stack?.at(-1)?.key, ...event.outcome } }, store)
+    : engineTransition(wf, state, event, store);
+
 
 const OPERATOR_SCHEMA = {
   type: "object",

@@ -5,8 +5,16 @@ import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-e
 import { latestSnapshot } from "../../src/persistence/store.ts";
 import { RUN_STATE_FIELDS, RUN_STATE_SCHEMA } from "../../src/persistence/run-state-schema.ts";
 import { completed, cp, loop, needsWork, sequence, task, workflow } from "../engine/helpers.mjs";
-import { start, transition } from "../../src/engine/interpreter.ts";
+import { start, transition as engineTransition } from "../../src/engine/interpreter.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
+
+// Keyed outcomes (corr-c1): the engine requires each outcome event to carry the
+// leaf key. Tests inject it automatically; an explicit key in the event wins.
+const transition = (wf, state, event, store) =>
+  event?.type === "outcome"
+    ? engineTransition(wf, state, { ...event, outcome: { key: state?.stack?.at(-1)?.key, ...event.outcome } }, store)
+    : engineTransition(wf, state, event, store);
+
 
 function steppedWorkflow() {
   return workflow([task("discover"), task("inspect"), task("deliver")]);

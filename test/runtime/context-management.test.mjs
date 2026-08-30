@@ -47,7 +47,7 @@ test("an accepted position prepares a snapshot-only child-session transfer", asy
     runtime.handleSessionStart(h.ctx);
     await runtime.startWorkflow(h.ctx, wf, "target");
 
-    const result = await runtime.transition({ status: "completed", checkpoint: cp("first done") }, undefined, h.ctx);
+    const result = await runtime.transition({ key: "root/first", status: "completed", checkpoint: cp("first done") }, undefined, h.ctx);
     assert.equal(result.details.status, "rollover-pending");
     assert.equal(result.terminate, true);
     assert.match(h.sent.at(-1).message, /^\/workflow-rollover /);
@@ -98,7 +98,7 @@ test("a completed run's terminal transfer delivers a report built from the execu
     const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# instructions");
     runtime.handleSessionStart(h.ctx);
     await runtime.startWorkflow(h.ctx, wf, "the target");
-    const finished = await runtime.transition({ status: "completed", met: ["only-done"], checkpoint: cp("the only step finished") }, undefined, h.ctx);
+    const finished = await runtime.transition({ key: "root/only", status: "completed", met: ["only-done"], checkpoint: cp("the only step finished") }, undefined, h.ctx);
     assert.equal(finished.details.status, "rollover-pending");
 
     const transfer = h.entries.findLast((entry) => entry.customType === TRANSFER_ENTRY_TYPE)?.data;

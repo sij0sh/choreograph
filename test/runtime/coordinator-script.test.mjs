@@ -94,7 +94,7 @@ test("workflow_transition is rejected at a script position", async () => {
   assert.ok(run);
   assert.equal(run.execution.stack.at(-1).blockId, "stuck", "the failed script parks the run");
   assert.ok(h.sent.length >= 1, "the parked run delivers a control message");
-  const result = await runtime.transition({ status: "completed", checkpoint: { summary: "trying to move on" } }, undefined, h.ctx);
+  const result = await runtime.transition({ key: "root/stuck", status: "completed", checkpoint: { summary: "trying to move on" } }, undefined, h.ctx);
   assert.ok(result.isError);
   assert.match(result.content[0].text, /does not accept transitions/);
 });
@@ -147,7 +147,8 @@ test("a parked script persists a waiting invocation and no parked marker", async
   assert.ok(active.every((entry) => !("parked" in entry.data)), "no snapshot carries a parked marker");
   const parked = active.filter((entry) => entry.data.execution.invocations?.["root/stuck"]?.status === "waiting");
   assert.ok(parked.length >= 1, "the park is snapshotted as a waiting invocation");
-  assert.equal(active.at(-1).data.delivered, true, "the park is marked delivered");
+  const marker = h.entries.filter((entry) => entry.customType === "choreograph").at(-1).data;
+  assert.ok(marker.kind === "delivered" || active.at(-1).data.delivered === true, "the park is marked delivered");
 });
 
 test("restore re-executes a script whose persisted invocation is still running", async () => {
@@ -171,7 +172,11 @@ test("restore re-executes a script whose persisted invocation is still running",
 
   const revivedHarness = harness();
   revivedHarness.entries.push(...h.entries);
-  const last = revivedHarness.entries.filter((entry) => entry.customType === "choreograph").at(-1);
+  // Simulate the crash-before-marker window: no delivered marker after the park,
+  // the park snapshot undelivered, and its invocation still "running".
+  const markerIndex = revivedHarness.entries.findLastIndex((entry) => entry.customType === "choreograph" && entry.data.kind === "delivered");
+  if (markerIndex !== -1) revivedHarness.entries.splice(markerIndex, 1);
+  const last = revivedHarness.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").at(-1);
   last.data = structuredClone(last.data);
   last.data.delivered = false;
   last.data.execution.invocations["root/probe"] = { ...last.data.execution.invocations["root/probe"], status: "running" };
@@ -212,7 +217,7 @@ test("restore of a parked script run does not re-execute the script", async () =
   assert.ok(revivedHarness.ctx.ui.notices.some((notice) => /Resumed/.test(notice.message)), "the run resumes");
   assert.equal(readLines(marker), 1, "restore does not re-execute the non-idempotent script");
   assert.equal(revivedHarness.sent.length, 0, "no duplicate park message is delivered; the original is already in the restored transcript");
-  const last = revivedHarness.entries.filter((entry) => entry.customType === "choreograph").at(-1);
+  const last = revivedHarness.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").at(-1);
   assert.equal(last.data.status, "active", "the run stays active and parked");
   assert.equal(last.data.execution.invocations?.["root/stuck"]?.status, "waiting", "the restored snapshot carries the waiting invocation");
   assert.equal(last.data.execution.stack.at(-1).blockId, "stuck");
@@ -266,7 +271,7 @@ test("workflow_retry advances the run when the retried script succeeds", async (
   assert.ok(!result.isError, result.content[0].text);
   assert.equal(result.details.status, "active");
   assert.equal(runtime.state.execution.stack.at(-1).blockId, "deliver", "the successful retry advances to the next task");
-  const last = h.entries.filter((entry) => entry.customType === "choreograph").at(-1);
+  const last = h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").at(-1);
   assert.equal(last.data.execution.invocations?.["root/recovers"]?.status, "succeeded", "the successful retry records a succeeded invocation");
 });
 
@@ -462,7 +467,7 @@ test("a script with declared inputs still drives through the runner", async () =
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
-  const result = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed", { id: "main.ts" }) }, undefined, h.ctx);
+  const result = await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed", { id: "main.ts" }) }, undefined, h.ctx);
   assert.ok(!result.isError, result.content[0].text);
   assert.equal(runtime.state.execution.stack.at(-1).blockId, "deliver", "resolvable inputs do not block the script");
   assert.deepEqual(runtime.state.execution.checkpoints["root/probe"].data, { answer: 42 });
@@ -486,7 +491,7 @@ test("declared script inputs arrive on the child's stdin as one JSON object", as
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
-  const result = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed", { id: "main.ts" }) }, undefined, h.ctx);
+  const result = await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed", { id: "main.ts" }) }, undefined, h.ctx);
   assert.ok(!result.isError, result.content[0].text);
   assert.equal(runtime.state.execution.stack.at(-1).blockId, "deliver", "the script consumed its stdin inputs");
   assert.deepEqual(runtime.state.execution.checkpoints["root/probe"].data, { echo: { id: "main.ts" } });
@@ -509,7 +514,7 @@ test("a script without inputs runs with an empty stdin", async () => {
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
-  const result = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed", {}) }, undefined, h.ctx);
+  const result = await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed", {}) }, undefined, h.ctx);
   assert.ok(!result.isError, result.content[0].text);
   assert.deepEqual(runtime.state.execution.checkpoints["root/probe"].data, { got: 0 });
 });
@@ -525,7 +530,7 @@ test("an unresolvable script input fails the node and parks the run at the scrip
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
-  const result = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed", {}) }, undefined, h.ctx);
+  const result = await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed", {}) }, undefined, h.ctx);
   assert.ok(!result.isError, result.content[0].text);
   assert.equal(runtime.state.execution.stack.at(-1).blockId, "probe", "the run stays at the script");
   assert.equal(runtime.state.execution.checkpoints["root/probe"], undefined, "the script never ran");

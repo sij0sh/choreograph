@@ -7,8 +7,16 @@ import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
 import { activeSnapshot } from "../../src/persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-execution.ts";
 import { completed, cp, loop, memoryStore, task, workflow } from "../engine/helpers.mjs";
-import { start, transition } from "../../src/engine/interpreter.ts";
+import { start, transition as engineTransition } from "../../src/engine/interpreter.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
+
+// Keyed outcomes (corr-c1): the engine requires each outcome event to carry the
+// leaf key. Tests inject it automatically; an explicit key in the event wins.
+const transition = (wf, state, event, store) =>
+  event?.type === "outcome"
+    ? engineTransition(wf, state, { ...event, outcome: { key: state?.stack?.at(-1)?.key, ...event.outcome } }, store)
+    : engineTransition(wf, state, event, store);
+
 
 function harness(options = {}) {
   const sent = [];
@@ -137,13 +145,13 @@ test("delivery failure leaves the run pending and retries after settle", async (
   runtime.handleSessionStart(ctx);
   await runtime.startWorkflow(ctx, wf, "");
   assert.equal(h.sent.length, 0);
-  const early = await runtime.transition({ status: "completed", checkpoint: cp("framed") }, undefined, ctx);
+  const early = await runtime.transition({ key: "root/frame", status: "completed", checkpoint: cp("framed") }, undefined, ctx);
   assert.ok(early.isError);
   assert.match(early.details.status, /delivery-pending/);
   h.pi.sendUserMessage = async (message) => h.sent.push(message);
   await runtime.handleAgentSettled(ctx);
   assert.equal(h.sent.length, 1, "delivery retries once the queue recovers");
-  const after = await runtime.transition({ status: "completed", checkpoint: cp("done") }, undefined, ctx);
+  const after = await runtime.transition({ key: "root/frame", status: "completed", checkpoint: cp("done") }, undefined, ctx);
   assert.ok(!after.isError, "the run continues after recovery");
 });
 
@@ -155,17 +163,17 @@ test("malformed met entries are rejected without state change", async () => {
   runtime.handleSessionStart(ctx);
   await runtime.startWorkflow(ctx, wf, "");
   await runtime.handleAgentSettled(ctx);
-  const badId = await runtime.transition({ status: "completed", met: ["NOT-VALID"], checkpoint: cp("framed") }, undefined, ctx);
+  const badId = await runtime.transition({ key: "root/frame", status: "completed", met: ["NOT-VALID"], checkpoint: cp("framed") }, undefined, ctx);
   assert.ok(badId.isError);
   assert.match(badId.details.status, /invalid-transition/);
-  const dupes = await runtime.transition({ status: "completed", met: ["scope-clear", "scope-clear"], checkpoint: cp("framed") }, undefined, ctx);
+  const dupes = await runtime.transition({ key: "root/frame", status: "completed", met: ["scope-clear", "scope-clear"], checkpoint: cp("framed") }, undefined, ctx);
   assert.ok(dupes.isError);
   assert.match(dupes.details.status, /invalid-transition/);
-  const fine = await runtime.transition({ status: "completed", met: ["scope-clear"], checkpoint: cp("framed") }, undefined, ctx);
+  const fine = await runtime.transition({ key: "root/frame", status: "completed", met: ["scope-clear"], checkpoint: cp("framed") }, undefined, ctx);
   assert.ok(!fine.isError);
 });
 
-test("storage failure on abort keeps the run active", async () => {
+test("storage failure on abort stops the run locally", async () => {
   const h = harness();
   const wf = workflow([task("frame")]);
   const runtime = new RuntimeCoordinator(h.pi, [wf], () => "# x", h.storeRoot);
@@ -178,8 +186,10 @@ test("storage failure on abort keeps the run active", async () => {
   const result = await runtime.abort(undefined, ctx);
   assert.ok(result.isError);
   assert.match(result.details.status, /storage-failed/);
-  const prompt = runtime.handleBeforeAgentStart({ systemPrompt: "" });
-  assert.ok(prompt, "the run stays active and rendered");
+  assert.match(result.content[0].text, /stopped locally/);
+  assert.equal(runtime.state.status, "idle", "nothing stays dispatchable after a failed abort");
+  assert.equal(runtime.handleBeforeAgentStart({ systemPrompt: "" }), undefined, "no run prompt after the local stop");
+  await assert.rejects(() => runtime.transition({ key: "root/frame", status: "completed", checkpoint: cp("x") }, undefined, ctx), /no active workflow/);
 });
 
 test("oversized targets are refused before any snapshot is written", async () => {
@@ -212,11 +222,11 @@ test("transitions that exceed the memory bound are rejected without state change
   const transition = runtime.transition.bind(runtime);
   const big = "x".repeat(16_000);
   const files64 = Array.from({ length: 64 }, (_, i) => `f${i}`);
-  let result = await transition({ status: "completed", checkpoint: { summary: "found", data: { files: files64 } } }, undefined, ctx);
+  let result = await transition({ key: "root/discover", status: "completed", checkpoint: { summary: "found", data: { files: files64 } } }, undefined, ctx);
   assert.ok(!result.isError, result.content[0].text);
   for (let i = 0; i < 40; i += 1) {
     await runtime.handleAgentSettled(ctx);
-    result = await transition({ status: "completed", checkpoint: { summary: "inspected", data: { blob: big } } }, undefined, ctx);
+    result = await transition({ key: `root/inspect-${i}`, status: "completed", checkpoint: { summary: "inspected", data: { blob: big } } }, undefined, ctx);
     if (result.isError) break;
   }
   assert.ok(result.isError, "accumulating loop checkpoints eventually hits the bound");

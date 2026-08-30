@@ -82,7 +82,9 @@ async function runTo(ctx, coordinator_, workflow, outcomes) {
   await coordinator_.startWorkflow(ctx, workflow, "");
   let last;
   for (const outcome of outcomes) {
-    last = await coordinator_.transition(outcome, undefined, ctx);
+    // Keyed outcomes (corr-c1): name the position the outcome applies to.
+    const keyed = { key: coordinator_.state.execution.stack.at(-1)?.key, ...outcome };
+    last = await coordinator_.transition(keyed, undefined, ctx);
     await coordinator_.handleAgentSettled(ctx);
   }
   return last;
@@ -98,7 +100,10 @@ test("starting a run swaps in run tools and persists an active snapshot", async 
   assert.deepEqual([...h.activeTools], ["read", "bash", "workflow_transition", "workflow_abort"]);
   const snapshots = h.entries.filter((entry) => entry.customType === "choreograph");
   assert.equal(snapshots[0].data.delivered, false, "the start snapshot commits before delivery");
-  assert.ok(snapshots.some((entry) => entry.data.delivered === true), "the delivered marker follows the send");
+  assert.ok(
+    snapshots.some((entry) => entry.data.delivered === true || entry.data.kind === "delivered"),
+    "the delivered marker follows the send",
+  );
   assert.equal(h.sent.length, 1, "the follow-up is sent");
 });
 
@@ -162,7 +167,7 @@ test("transitions persist the next snapshot before adopting it", async () => {
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
-  const result = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  const result = await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
   assert.ok(!result.isError, result.content[0].text);
   assert.equal(runtime.handleBeforeAgentStart({ systemPrompt: "" }).systemPrompt.includes("deliver"), true, "the next position renders");
   const snapshots = h.entries.filter((entry) => entry.customType === "choreograph").map((entry) => entry.data);
@@ -182,7 +187,7 @@ test("storage failure on transition keeps the prior position", async () => {
   h.entries.push = () => {
     throw new Error("append failed");
   };
-  const result = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  const result = await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
   assert.ok(result.isError);
   assert.match(result.content[0].text, /append failed/);
   assert.match(result.details.status, /storage-failed/);
@@ -197,7 +202,7 @@ test("agent positions dispatch through the runner registry and settle on transit
   c.registry.register(agent);
   await c.startWorkflow(h.ctx, simpleWorkflow(), "");
   assert.deepEqual(agent.invocations.map((inv) => inv.key), ["root/frame"], "the agent position is dispatched through the registry");
-  await c.transition(completed(cp("framed"), ["framed"]), undefined, h.ctx);
+  await c.transition({ ...completed(cp("framed"), ["framed"]), key: "root/frame" }, undefined, h.ctx);
   await c.handleAgentSettled(h.ctx);
   assert.deepEqual(agent.invocations.map((inv) => inv.key), ["root/frame", "root/deliver"], "the settled position is replaced by the next agent dispatch");
   await c.abort(undefined, h.ctx);
@@ -210,7 +215,7 @@ test("an undelivered position cannot transition", async () => {
   const runtime = coordinator(h, [wf]);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
-  const result = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  const result = await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
   assert.ok(result.isError);
   assert.match(result.details.status, /delivery-pending/);
 });
@@ -233,7 +238,8 @@ test("a successful send with a failing marker retries only the marker", async ()
   h.entries.push = originalPush;
   await runtime.handleAgentSettled(h.ctx);
   assert.equal(h.sent.length, 1, "the retry commits the marker without resending");
-  assert.equal(h.entries.at(-1).data.delivered, true);
+  const marker = h.entries.at(-1).data;
+  assert.ok(marker.delivered === true || marker.kind === "delivered", "the retry commits the delivered marker");
 });
 
 test("status and field mismatches are rejected without state change", async () => {
@@ -244,20 +250,20 @@ test("status and field mismatches are rejected without state change", async () =
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
   const blockedWithMet = await runtime.transition(
-    { status: "blocked", met: ["framed"], checkpoint: cp("stuck") },
+    { key: "root/frame", status: "blocked", met: ["framed"], checkpoint: cp("stuck") },
     undefined,
     h.ctx,
   );
   assert.ok(blockedWithMet.isError);
   assert.match(blockedWithMet.content[0].text, /met is only valid with status "completed"/);
   const completedWithIssues = await runtime.transition(
-    { status: "completed", met: [], issues: [{ target: "frame", reason: "still broken" }], checkpoint: cp("framed") },
+    { key: "root/frame", status: "completed", met: [], issues: [{ target: "frame", reason: "still broken" }], checkpoint: cp("framed") },
     undefined,
     h.ctx,
   );
   assert.ok(completedWithIssues.isError);
   assert.match(completedWithIssues.content[0].text, /issues is only valid with status "needs-work"/);
-  const resumed = await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  const resumed = await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
   assert.ok(!resumed.isError);
   assert.equal(resumed.details.position, "root/deliver", "the run never moved for the rejected calls");
 });
@@ -270,7 +276,7 @@ test("a retry re-delivers the retried position", async () => {
   await runtime.startWorkflow(h.ctx, wf, "");
   await runtime.handleAgentSettled(h.ctx);
   assert.equal(h.sent.length, 1);
-  const result = await runtime.transition({ status: "needs-work", checkpoint: cp("attempt failed") }, undefined, h.ctx);
+  const result = await runtime.transition({ key: "root/frame", status: "needs-work", checkpoint: cp("attempt failed") }, undefined, h.ctx);
   await runtime.handleAgentSettled(h.ctx);
   assert.match(result.content[0].text, /instructions arrive in the next message/);
   assert.equal(h.sent.length, 2, "the retry sends a new control message");
@@ -297,7 +303,7 @@ test("the registry settles agent invocations with the real outcome, not a fabric
   await runtime.startWorkflow(h.ctx, wf, "");
 
   await runtime.transition(
-    { status: "needs-work", checkpoint: cp("blocked on data", { gap: "counts" }), issues: [{ target: "frame", reason: "missing counts" }] },
+    { key: "root/frame", status: "needs-work", checkpoint: cp("blocked on data", { gap: "counts" }), issues: [{ target: "frame", reason: "missing counts" }] },
     undefined,
     h.ctx,
   );
@@ -307,9 +313,9 @@ test("the registry settles agent invocations with the real outcome, not a fabric
     { status: "failed", reason: "needs-work", summary: "blocked on data", data: { gap: "counts" }, issues: [{ target: "frame", reason: "missing counts" }] },
   ]);
 
-  await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed the data", { rows: 3 }) }, undefined, h.ctx);
+  await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed the data", { rows: 3 }) }, undefined, h.ctx);
   await runtime.handleAgentSettled(h.ctx);
-  await runtime.transition({ status: "completed", checkpoint: cp("delivered") }, undefined, h.ctx);
+  await runtime.transition({ key: "root/deliver", status: "completed", checkpoint: cp("delivered") }, undefined, h.ctx);
   assert.deepEqual(settled[1], ["root/frame", { status: "succeeded", summary: "framed the data", data: { rows: 3 }, met: ["framed"] }]);
   assert.deepEqual(settled[2], ["root/deliver", { status: "succeeded", summary: "delivered" }]);
 });
@@ -408,7 +414,7 @@ test("session resume restores the active run and re-renders its prompt", async (
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "repo");
   await runtime.handleAgentSettled(h.ctx);
-  await runtime.transition({ status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
 
   const fresh = harness();
   fresh.entries.push(...h.entries);

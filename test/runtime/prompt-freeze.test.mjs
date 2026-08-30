@@ -87,8 +87,9 @@ test("operator prompts are served frozen", async () => {
   const runtime = new RuntimeCoordinator(h.pi, [wf], undefined, h.storeRoot);
   await runtime.startWorkflow(h.ctx, wf, "t");
   await runtime.handleAgentSettled(h.ctx);
-  await runtime.transition({ status: "completed", checkpoint: { summary: "gathered" } }, undefined, h.ctx);
+  await runtime.transition({ key: "root/gather", status: "completed", checkpoint: { summary: "gathered" } }, undefined, h.ctx);
   await runtime.transition({
+    key: "root/make",
     status: "completed",
     checkpoint: { summary: "planned", data: { plan: { version: 1, nodes: [
       { id: "a", operator: "inspect", objective: "o", done: ["a-done"] },

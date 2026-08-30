@@ -10,9 +10,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { task, workflow } from '../engine/helpers.mjs';
-import { start, transition } from '../../src/engine/interpreter.ts';
+import { start, transition as engineTransition } from '../../src/engine/interpreter.ts';
 import { resolveBinding } from '../../src/domain/artifacts.ts';
 import { renderPositionEnvelope } from '../../src/runtime/prompts.ts';
+
+// Keyed outcomes (corr-c1): the engine requires each outcome event to carry the
+// leaf key. Tests inject it automatically; an explicit key in the event wins.
+const transition = (wf, state, event, store) =>
+  event?.type === 'outcome'
+    ? engineTransition(wf, state, { ...event, outcome: { key: state?.stack?.at(-1)?.key, ...event.outcome } }, store)
+    : engineTransition(wf, state, event, store);
+
 
 const OPERATORS = new Map([['inspect', { id: 'inspect', path: 'operators/inspect.md', description: 'Inspect code.' }]]);
 

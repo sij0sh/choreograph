@@ -96,13 +96,13 @@ test("a full run executes through the Pi surface", async () => {
   assert.match(prompt1.systemPrompt, /# steps\/frame\.md/);
 
   const transition = ext.tools.get("workflow_transition");
-  const first = await transition.execute("id", { status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
+  const first = await transition.execute("id", { key: "root/frame", status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
   assert.ok(!first.isError, first.content[0].text);
   await settle(ext.handlers, ctx);
   const prompt2 = ext.handlers.get("before_agent_start")({ systemPrompt: "base" });
   assert.match(prompt2.systemPrompt, /# steps\/deliver\.md/);
 
-  const final = await transition.execute("id", { status: "completed", checkpoint: { summary: "delivered" } }, undefined, () => {}, ctx);
+  const final = await transition.execute("id", { key: "root/deliver", status: "completed", checkpoint: { summary: "delivered" } }, undefined, () => {}, ctx);
   assert.ok(final.terminate);
   assert.equal(final.details.status, "completed");
   assert.equal(ext.entries.at(-1).data.status, "completed");
@@ -116,10 +116,10 @@ test("blocked transitions keep the run resumable through the tool surface", asyn
   await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "blocked flow" }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
   const transition = ext.tools.get("workflow_transition");
-  const blocked = await transition.execute("id", { status: "blocked", checkpoint: { summary: "waiting" } }, undefined, () => {}, ctx);
+  const blocked = await transition.execute("id", { key: "root/frame", status: "blocked", checkpoint: { summary: "waiting" } }, undefined, () => {}, ctx);
   assert.ok(!blocked.isError);
   assert.equal(blocked.details.status, "blocked");
-  const resumed = await transition.execute("id", { status: "completed", checkpoint: { summary: "unblocked" } }, undefined, () => {}, ctx);
+  const resumed = await transition.execute("id", { key: "root/frame", status: "completed", checkpoint: { summary: "unblocked" } }, undefined, () => {}, ctx);
   assert.ok(!resumed.isError);
   assert.equal(resumed.details.position, "root/deliver");
 });
@@ -130,7 +130,7 @@ test("session resume restores an active run through the entry point", async () =
   ext.handlers.get("session_start")(undefined, ctx);
   await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "repo" }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
-  await ext.tools.get("workflow_transition").execute("id", { status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
+  await ext.tools.get("workflow_transition").execute("id", { key: "root/frame", status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
 
   const revived = buildExtension(LEGACY);
   revived.entries.push(...ext.entries);
@@ -208,7 +208,7 @@ steps:
   await settle(ext.handlers, ctx);
   const transition = ext.tools.get("workflow_transition");
 
-  await transition.execute("id", { status: "completed", checkpoint: { summary: "listed", data: { files: ["a", "b"] } } }, undefined, () => {}, ctx);
+  await transition.execute("id", { key: "root/gather", status: "completed", checkpoint: { summary: "listed", data: { files: ["a", "b"] } } }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
   let prompt = ext.handlers.get("before_agent_start")({ systemPrompt: "base" }).systemPrompt;
   assert.match(prompt, /# steps\/review-one\.md/);
@@ -219,19 +219,19 @@ steps:
   assert.equal(midLoop.status, "active");
   assert.equal(midLoop.execution.loops["root/review"].iteration, 1);
 
-  await transition.execute("id", { status: "completed", checkpoint: { summary: "reviewed a" } }, undefined, () => {}, ctx);
+  await transition.execute("id", { key: "root/review/loop[1]/review-one", status: "completed", checkpoint: { summary: "reviewed a" } }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
   prompt = ext.handlers.get("before_agent_start")({ systemPrompt: "base" }).systemPrompt;
   assert.match(prompt, /iteration 2 of 2/);
   assert.match(prompt, /Current item: "b"/);
 
-  const final = await transition.execute("id", { status: "completed", checkpoint: { summary: "reviewed b" } }, undefined, () => {}, ctx);
+  const final = await transition.execute("id", { key: "root/review/loop[2]/review-one", status: "completed", checkpoint: { summary: "reviewed b" } }, undefined, () => {}, ctx);
   assert.ok(!final.isError, final.content[0].text);
   await settle(ext.handlers, ctx);
   prompt = ext.handlers.get("before_agent_start")({ systemPrompt: "base" }).systemPrompt;
   assert.match(prompt, /# steps\/deliver\.md/);
 
-  const done = await transition.execute("id", { status: "completed", checkpoint: { summary: "done" } }, undefined, () => {}, ctx);
+  const done = await transition.execute("id", { key: "root/deliver", status: "completed", checkpoint: { summary: "done" } }, undefined, () => {}, ctx);
   assert.ok(done.terminate);
   assert.equal(done.details.status, "completed");
 });
@@ -260,7 +260,7 @@ test("a script step runs between tasks without a model turn and persists", async
   assert.match(prompt.systemPrompt, /# steps\/frame\.md/, "the model only ever sees the task position");
 
   const transition = ext.tools.get("workflow_transition");
-  const first = await transition.execute("id", { status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
+  const first = await transition.execute("id", { key: "root/frame", status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
   assert.ok(!first.isError, first.content[0].text);
   await settle(ext.handlers, ctx);
 
@@ -277,7 +277,7 @@ test("a script step runs between tasks without a model turn and persists", async
   const prompt2 = ext.handlers.get("before_agent_start")({ systemPrompt: "base" });
   assert.match(prompt2.systemPrompt, /# steps\/deliver\.md/);
 
-  const final = await transition.execute("id", { status: "completed", checkpoint: { summary: "delivered" } }, undefined, () => {}, ctx);
+  const final = await transition.execute("id", { key: "root/deliver", status: "completed", checkpoint: { summary: "delivered" } }, undefined, () => {}, ctx);
   assert.ok(!final.isError, final.content[0].text);
   assert.ok(
     ext.entries.some((entry) => entry.customType === "choreograph" && entry.data.status === "completed"),
@@ -291,7 +291,7 @@ test("a persisted run restores through the script position", async () => {
   ext.handlers.get("session_start")(undefined, ctx);
   await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "script flow" }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
-  await ext.tools.get("workflow_transition").execute("id", { status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
+  await ext.tools.get("workflow_transition").execute("id", { key: "root/frame", status: "completed", checkpoint: { summary: "framed" } }, undefined, () => {}, ctx);
   await settle(ext.handlers, ctx);
 
   const revived = buildExtension(SCRIPTED);
