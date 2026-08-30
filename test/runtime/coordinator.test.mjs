@@ -53,6 +53,27 @@ function coordinator(harness_, workflows) {
   return new RuntimeCoordinator(harness_.pi, workflows, harness_.read, harness_.storeRoot);
 }
 
+function spyAgentRunner() {
+  const inner = new AgentRunner();
+  const invocations = [];
+  const cancels = [];
+  return {
+    invocations,
+    cancels,
+    get kind() { return inner.kind; },
+    get retrySafety() { return inner.retrySafety; },
+    execute(invocation, spec, ctx) {
+      invocations.push(invocation);
+      return inner.execute(invocation, spec, ctx);
+    },
+    settle(key, result) { return inner.settle(key, result); },
+    cancel(invocation) {
+      cancels.push(invocation);
+      return inner.cancel(invocation);
+    },
+  };
+}
+
 function simpleWorkflow(overrides = {}) {
   return workflow([task("frame", { done: ["framed"] }), task("deliver")], overrides);
 }
@@ -172,17 +193,15 @@ test("storage failure on transition keeps the prior position", async () => {
 test("agent positions dispatch through the runner registry and settle on transition and abort", async () => {
   const h = harness();
   const c = coordinator(h, [simpleWorkflow()]);
+  const agent = spyAgentRunner();
+  c.registry.register(agent);
   await c.startWorkflow(h.ctx, simpleWorkflow(), "");
-  let active = c.registry.activeInvocations();
-  assert.equal(active.length, 1, "the agent position is dispatched through the registry");
-  assert.equal(active[0].key, "root/frame");
-  assert.equal(active[0].runner, "agent");
+  assert.deepEqual(agent.invocations.map((inv) => inv.key), ["root/frame"], "the agent position is dispatched through the registry");
   await c.transition(completed(cp("framed"), ["framed"]), undefined, h.ctx);
   await c.handleAgentSettled(h.ctx);
-  active = c.registry.activeInvocations();
-  assert.deepEqual(active.map((entry) => entry.key), ["root/deliver"], "the settled position is replaced by the next agent dispatch");
+  assert.deepEqual(agent.invocations.map((inv) => inv.key), ["root/frame", "root/deliver"], "the settled position is replaced by the next agent dispatch");
   await c.abort(undefined, h.ctx);
-  assert.equal(c.registry.activeInvocations().length, 0, "abort cancels the awaiting dispatch");
+  assert.deepEqual(agent.cancels.map((inv) => inv.key), ["root/deliver"], "abort cancels the awaiting dispatch");
 });
 
 test("an undelivered position cannot transition", async () => {

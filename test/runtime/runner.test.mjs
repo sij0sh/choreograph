@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentRunner, ProcessRunner } from "../../src/runtime/runner.ts";
-import { processSpecOf } from "../../src/domain/node.ts";
+import { processSpecFor } from "../../src/domain/node.ts";
 
 const invocation = { blockId: "probe", key: "root/probe", runner: "process", status: "running", attempt: 1 };
 
@@ -13,6 +13,10 @@ const scriptBlock = {
 
 function dir() { return "/definitely-not-a-real-workflow-dir"; }
 
+function specOf(block, workflowDir) {
+  return processSpecFor(block.script, block.id, workflowDir);
+}
+
 test("both runners satisfy one shared contract", () => {
   for (const runner of [new AgentRunner(), new ProcessRunner()]) {
     assert.ok(["agent", "process"].includes(runner.kind), "runner declares its kind");
@@ -23,7 +27,7 @@ test("both runners satisfy one shared contract", () => {
 
 test("ProcessRunner executes through the runner contract and captures raw exit", async () => {
   const runner = new ProcessRunner();
-  const result = await runner.execute(invocation, processSpecOf(scriptBlock), {});
+  const result = await runner.execute(invocation, specOf(scriptBlock), {});
   assert.equal(result.status, "succeeded");
   assert.equal(result.exit.stdout, "ok");
   assert.equal(result.exit.code, 0);
@@ -32,8 +36,8 @@ test("ProcessRunner executes through the runner contract and captures raw exit",
 
 test("ProcessRunner resolves cwd against the workflow directory and contains it", async () => {
   const runner = new ProcessRunner();
-  const spec = processSpecOf(scriptBlock, dir());
-  assert.equal(spec.cwd, dir(), "processSpecOf resolves the authored relative cwd");
+  const spec = specOf(scriptBlock, dir());
+  assert.equal(spec.cwd, dir(), "processSpecFor resolves the authored relative cwd");
   assert.equal(spec.containmentRoot, dir());
   const result = await runner.execute(invocation, spec, {});
   assert.equal(result.status, "failed", "the fake workflow directory does not exist, so spawn fails");
@@ -62,7 +66,7 @@ test("AgentRunner awaits external completion instead of resolving immediately", 
   const reopened = runner.execute(invocation, { runner: "agent", blockId: "probe", instructionPath: "steps/x.md" }, {});
   runner.cancel(invocation);
   assert.deepEqual(await reopened, { status: "canceled" }, "cancel settles a re-dispatched invocation");
-  const bad = await runner.execute(invocation, processSpecOf(scriptBlock), {});
+  const bad = await runner.execute(invocation, specOf(scriptBlock), {});
   assert.equal(bad.status, "failed");
   assert.match(bad.reason, /AgentRunner does not run process specs/);
 });
@@ -73,7 +77,7 @@ test("the stdin budget counts UTF-8 bytes, not characters", async () => {
   const text = `${JSON.stringify(inputs)}\n`;
   assert.ok(text.length < 24_576, "precondition: the character count stays under the budget");
   assert.ok(Buffer.byteLength(text, "utf8") > 24_576, "precondition: the byte count exceeds the budget");
-  const result = await runner.execute(invocation, processSpecOf(scriptBlock), { inputs });
+  const result = await runner.execute(invocation, specOf(scriptBlock), { inputs });
   assert.equal(result.status, "failed", "the oversized byte payload is refused before spawn");
   assert.match(result.reason, /bytes, over the 24576-byte stdin budget/);
 });

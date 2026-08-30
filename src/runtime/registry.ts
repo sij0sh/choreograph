@@ -91,7 +91,4 @@ export class RunnerRegistry {
     for (const key of [...this.active.keys()]) await this.cancel(key);
   }
 
-  activeInvocations(): readonly NodeInvocation[] {
-    return [...this.active.values()].map((entry) => entry.handle.invocation);
-  }
 }

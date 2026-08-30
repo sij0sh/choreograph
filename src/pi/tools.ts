@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type, type Static } from "typebox";
+import { Type } from "typebox";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator, ToolResult } from "../runtime/coordinator.ts";
@@ -8,107 +8,6 @@ import { ABORT_TOOL_NAME, HANDOFF_READ_TOOL_NAME, PROMOTE_TOOL_NAME, RETRY_TOOL_
 
 const NO_PARAMETERS = { type: "object", properties: {}, additionalProperties: false } as const;
 
-interface RawRecord { [key: string]: unknown }
-
-function asRecord(value: unknown): RawRecord | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as RawRecord) : undefined;
-}
-
-const CHECKPOINT_FIELDS = new Set(["summary", "evidence", "decisions", "unknowns", "data", "skipped"]);
-
-
-
-
-
-
-
-
-export function normalizeTransitionArguments(args: unknown): Record<string, unknown> {
-  const input = asRecord(args);
-  if (!input) return (args ?? {}) as Record<string, unknown>;
-  const out: RawRecord = { ...input };
-
-  
-  for (const wrapper of ["outcome", "result"] as const) {
-    const inner = asRecord(out[wrapper]);
-    if (inner && out.checkpoint === undefined && out.status === undefined) {
-      delete out[wrapper];
-      for (const [key, value] of Object.entries(inner)) {
-        if (out[key] === undefined) out[key] = value;
-      }
-    } else {
-      delete out[wrapper];
-    }
-  }
-
-  
-  if (out.status === undefined && typeof out.outcomeStatus === "string") out.status = out.outcomeStatus;
-  delete out.outcomeStatus;
-  const checkpoint = asRecord(out.checkpoint);
-  if (checkpoint) {
-    const nested: RawRecord = { ...checkpoint };
-    if (out.status === undefined && typeof nested.status === "string") {
-      out.status = nested.status;
-      delete nested.status;
-    }
-    if (out.met === undefined && nested.met !== undefined) {
-      out.met = nested.met;
-      delete nested.met;
-    }
-    if (out.issues === undefined && nested.issues !== undefined) {
-      out.issues = nested.issues;
-      delete nested.issues;
-    }
-    const data = asRecord(nested.data);
-    if (data) {
-      const liftIfShaped = (field: "met" | "issues", isShaped: (value: unknown) => boolean): void => {
-        if (out[field] === undefined && data[field] !== undefined && isShaped(data[field])) {
-          out[field] = data[field];
-          delete data[field];
-          if (Object.keys(data).length === 0) delete nested.data;
-        }
-      };
-      liftIfShaped("met", (value) => Array.isArray(value) && value.every((entry) => typeof entry === "string"));
-      liftIfShaped("issues", (value) =>
-        Array.isArray(value) &&
-        value.every((entry) => {
-          const issue = asRecord(entry);
-          return issue !== undefined && typeof issue.target === "string" && typeof issue.reason === "string";
-        }));
-    }
-    
-    const stray = Object.keys(nested).filter((key) => !CHECKPOINT_FIELDS.has(key));
-    if (stray.length > 0) {
-      const data = asRecord(nested.data) ?? {};
-      const dataOut: RawRecord = { ...data };
-      for (const key of stray) {
-        if (dataOut[key] === undefined) dataOut[key] = nested[key];
-        delete nested[key];
-      }
-      nested.data = dataOut;
-    }
-    if (typeof nested.summary !== "string" || !nested.summary.trim()) {
-      if (nested.data !== undefined) {
-        const derived = JSON.stringify(nested.data) ?? "";
-        nested.summary = derived.length > 512 ? `${derived.slice(0, 509)}...` : derived;
-      }
-    }
-    out.checkpoint = nested;
-  }
-
-  
-  if (typeof out.met === "string") {
-    out.met = out.met.split(/[\s,]+/).filter((part) => part.length > 0);
-  }
-  if (Array.isArray(out.met)) {
-    out.met = out.met.map((entry) => {
-      if (typeof entry !== "string") return entry;
-      const trimmed = entry.trim();
-      return ID_PATTERN.test(trimmed) ? trimmed : trimmed.replaceAll("_", "-").toLowerCase();
-    });
-  }
-  return out;
-}
 
 export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordinator, workflows: readonly Workflow[], workflowsRoot: string): void {
   const visible = workflows.filter((workflow) => workflow.piVisibility);
@@ -305,9 +204,8 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
       "Exact shape: { status, met?, checkpoint: { summary, evidence?, decisions?, unknowns?, data? }, issues? }.",
       "Copy `met` criterion ids verbatim from the position's required criteria; list every required id on completion.",
       `Caps: evidence/decisions/unknowns at most ${LIMITS.checkpointListItems} items of ${LIMITS.checkpointItemBytes} bytes each; summary at most ${LIMITS.checkpointSummaryBytes / 1024} KiB; the checkpoint at most ${LIMITS.checkpointBytes / 1024} KiB.`,
-      "There are no other fields; position-specific output goes inside checkpoint.data. If summary is omitted but data is present, summary is derived from data. Rejections report every violation at once.",
+      "There are no other fields; position-specific output goes inside checkpoint.data. Rejections report every violation at once.",
     ].join(" "),
-    prepareArguments: normalizeTransitionArguments as (args: unknown) => Static<typeof transitionParameters>,
     parameters: transitionParameters,
     async execute(_id, params, signal, _update, ctx) {
       return runtime.transition(params, signal, ctx);

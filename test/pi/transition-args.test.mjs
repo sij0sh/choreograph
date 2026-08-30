@@ -1,103 +1,79 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeTransitionArguments } from "../../src/pi/tools.ts";
+import { Value } from "typebox/value";
+import { mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
+import { registerWorkflowTools } from "../../src/pi/tools.ts";
+import { workflow, task } from "../engine/helpers.mjs";
 
-test("moves nested met, status, and issues out of checkpoint to the top level", () => {
-  const out = normalizeTransitionArguments({
-    checkpoint: { status: "completed", met: ["a", "b"], summary: "done", unknowns: ["risky"] },
-  });
-  assert.equal(out.status, "completed");
-  assert.deepEqual(out.met, ["a", "b"]);
-  assert.equal(out.issues, undefined);
-  assert.deepEqual(out.checkpoint, { summary: "done", unknowns: ["risky"] });
+function transitionSchema() {
+  const tools = new Map();
+  const pi = {
+    registerTool: (tool) => tools.set(tool.name, tool),
+    getActiveTools: () => [],
+    setActiveTools: () => {},
+    appendEntry: () => {},
+    sendUserMessage: async () => {},
+  };
+  const runtime = new RuntimeCoordinator(pi, [], () => "# fallback", mkdtempSync(join(tmpdir(), "transition-schema-")));
+  registerWorkflowTools(pi, runtime, [workflow([task("only")])], mkdtempSync(join(tmpdir(), "transition-schema-wf-")));
+  return tools.get("workflow_transition").parameters;
+}
+
+const schema = transitionSchema();
+
+const valid = {
+  status: "completed",
+  met: ["done"],
+  checkpoint: { summary: "the position is complete", data: { plan: { version: 1 } } },
+};
+
+test("a well-formed transition passes the schema", () => {
+  assert.equal(Value.Check(schema, valid), true);
+  assert.equal(Value.Check(schema, { status: "needs-work", checkpoint: { summary: "broken" } }), true);
+  assert.equal(Value.Check(schema, { status: "blocked", checkpoint: { summary: "stuck" } }), true);
 });
 
-test("unwraps an outcome wrapper object", () => {
-  const out = normalizeTransitionArguments({
-    outcome: { status: "completed", met: ["a"], checkpoint: { summary: "s" } },
-  });
-  assert.equal(out.status, "completed");
-  assert.deepEqual(out.met, ["a"]);
-  assert.deepEqual(out.checkpoint, { summary: "s" });
+test("wrapper objects such as outcome or result are rejected", () => {
+  assert.equal(Value.Check(schema, { outcome: valid }), false, "additionalProperties: false refuses the wrapper");
+  assert.equal(Value.Check(schema, { result: valid }), false);
 });
 
-test("relocates stray checkpoint fields into checkpoint.data", () => {
-  const out = normalizeTransitionArguments({
-    status: "completed",
-    checkpoint: { summary: "s", majorWins: ["x"], data: { kept: 1 } },
-  });
-  assert.deepEqual(out.checkpoint, { summary: "s", data: { kept: 1, majorWins: ["x"] } });
+test("unknown top-level fields are rejected", () => {
+  assert.equal(Value.Check(schema, { ...valid, outcomeStatus: "completed" }), false);
+  assert.equal(Value.Check(schema, { ...valid, note: "extra" }), false);
 });
 
-test("splits a comma-separated met string and normalizes near-miss ids", () => {
-  const out = normalizeTransitionArguments({
-    status: "completed",
-    met: "Scope_Clear, target-known",
-    checkpoint: { summary: "s" },
-  });
-  assert.deepEqual(out.met, ["scope-clear", "target-known"]);
+test("nested outcome objects inside checkpoint are rejected", () => {
+  assert.equal(Value.Check(schema, { status: "completed", checkpoint: { summary: "s", outcome: { met: ["done"] } } }), false);
 });
 
-test("a well-formed call passes through unchanged", () => {
-  const call = { status: "needs-work", checkpoint: { summary: "s", data: { plan: { version: 1 } } }, issues: [{ target: "root", reason: "broken" }] };
-  assert.deepEqual(normalizeTransitionArguments(call), call);
+test("met must be an array of criterion ids", () => {
+  assert.equal(Value.Check(schema, { status: "completed", met: "done", checkpoint: { summary: "s" } }), false, "a string met is rejected");
+  assert.equal(Value.Check(schema, { status: "completed", met: ["Bad_Id"], checkpoint: { summary: "s" } }), false, "ids must match ^[a-z][a-z0-9-]*$");
+  assert.equal(Value.Check(schema, { status: "completed", met: ["done", "done"], checkpoint: { summary: "s" } }), false, "ids must be unique");
 });
 
-test("derives summary from checkpoint.data when summary is omitted", () => {
-  const out = normalizeTransitionArguments({
-    status: "completed",
-    checkpoint: { data: { verdicts: [{ id: "v1", verdict: "PROVEN" }] } },
-  });
-  assert.equal(out.checkpoint.summary, JSON.stringify({ verdicts: [{ id: "v1", verdict: "PROVEN" }] }));
+test("checkpoint.summary is required", () => {
+  assert.equal(Value.Check(schema, { status: "completed", checkpoint: {} }), false);
+  assert.equal(Value.Check(schema, { status: "completed", checkpoint: { data: { a: 1 } } }), false, "data does not stand in for summary");
 });
 
-test("a derived summary keeps an existing summary untouched and clips long data", () => {
-  const untouched = normalizeTransitionArguments({
-    status: "completed",
-    checkpoint: { summary: "s", data: { a: 1 } },
-  });
-  assert.equal(untouched.checkpoint.summary, "s");
-
-  const long = normalizeTransitionArguments({
-    status: "completed",
-    checkpoint: { data: { blob: "x".repeat(600) } },
-  });
-  assert.equal(long.checkpoint.summary.length, 512);
-  assert.ok(long.checkpoint.summary.endsWith("..."));
+test("unknown checkpoint fields are rejected", () => {
+  assert.equal(Value.Check(schema, { status: "completed", checkpoint: { summary: "s", skipped: true } }), false);
 });
 
-test("lifts met and issues out of checkpoint.data when the top level omits them", () => {
-  const out = normalizeTransitionArguments({
-    status: "needs-work",
-    checkpoint: { summary: "s", data: { issues: [{ target: "root/frame", reason: "broken" }] } },
-  });
-  assert.deepEqual(out.issues, [{ target: "root/frame", reason: "broken" }]);
-  assert.deepEqual(out.checkpoint, { summary: "s" }, "the emptied data object is dropped");
-
-  const completed = normalizeTransitionArguments({
-    status: "completed",
-    checkpoint: { summary: "s", data: { met: ["a", "b"], result: 3 } },
-  });
-  assert.deepEqual(completed.met, ["a", "b"]);
-  assert.deepEqual(completed.checkpoint, { summary: "s", data: { result: 3 } });
+test("status is required and restricted to the three outcomes", () => {
+  assert.equal(Value.Check(schema, { checkpoint: { summary: "s" } }), false);
+  assert.equal(Value.Check(schema, { status: "skipped", checkpoint: { summary: "s" } }), false);
 });
 
-test("does not lift met or issues when the top level already provides them", () => {
-  const out = normalizeTransitionArguments({
-    status: "completed",
-    met: ["top"],
-    checkpoint: { summary: "s", data: { met: ["nested"] } },
-  });
-  assert.deepEqual(out.met, ["top"]);
-  assert.deepEqual(out.checkpoint, { summary: "s", data: { met: ["nested"] } });
-});
-
-test("leaves malformed nested met or issues in place", () => {
-  const out = normalizeTransitionArguments({
-    status: "completed",
-    checkpoint: { summary: "s", data: { met: "not-a-list", issues: [{ wrong: "shape" }] } },
-  });
-  assert.equal(out.met, undefined);
-  assert.equal(out.issues, undefined);
-  assert.deepEqual(out.checkpoint, { summary: "s", data: { met: "not-a-list", issues: [{ wrong: "shape" }] } });
+test("issues entries require target and reason", () => {
+  assert.equal(Value.Check(schema, { status: "needs-work", checkpoint: { summary: "s" }, issues: [{ target: "root/frame" }] }), false);
+  assert.equal(
+    Value.Check(schema, { status: "needs-work", checkpoint: { summary: "s" }, issues: [{ target: "root/frame", reason: "broken" }] }),
+    true,
+  );
 });

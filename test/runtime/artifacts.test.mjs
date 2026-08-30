@@ -7,7 +7,6 @@ import { start, transition } from "../../src/engine/interpreter.ts";
 import { completed, cp, loop, memoryStore, script, sequence, task, workflow } from "../engine/helpers.mjs";
 import { isArtifactRef } from "../../src/domain/artifacts.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
-import { processSpecOf } from "../../src/domain/node.ts";
 import { ArtifactStore } from "../../src/runtime/artifact-store.ts";
 import { inlineRefs, refLoaderFor, resolveBinding, resolveScriptInputs } from "../../src/runtime/artifacts.ts";
 import { inputSection } from "../../src/runtime/prompts-inputs.ts";
@@ -345,13 +344,6 @@ test("$item values resolve their references for scripts and prompts", () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-});
-
-test("processSpecOf preserves script inputs for the runner", () => {
-  const block = script("probe", { inputs: { prior: { from: "frame", select: "/data/id" } }, spec: { stdout: "json" } });
-  const spec = processSpecOf(block, "/workflow-dir");
-  assert.deepEqual(spec.inputs, { prior: { from: "frame", select: "/data/id" } });
-  assert.equal(processSpecOf(script("bare", { spec: { stdout: "json" } })).inputs, undefined);
 });
 
 test("script inputs resolve through declared bindings before execution", () => {

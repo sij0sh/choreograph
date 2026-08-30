@@ -66,9 +66,3 @@ export function processSpecFor(script: ScriptSpec, blockId: string, workflowDir?
   };
 }
 
-export function processSpecOf(block: import("./workflow.ts").ScriptBlock, workflowDir?: string): ProcessNodeSpec {
-  return {
-    ...processSpecFor(block.script, block.id, workflowDir),
-    ...(block.inputs ? { inputs: block.inputs } : {}),
-  };
-}

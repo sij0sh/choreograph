@@ -3,7 +3,6 @@ type DeliveryTarget = {
   readonly key: string;
   readonly message: string;
   readonly isLive: () => boolean;
-  readonly beforeSend?: () => Promise<void>;
 }
 
 interface DeliveryDeps {
@@ -26,7 +25,6 @@ export class DeliveryCoordinator {
 
   async deliver(target: DeliveryTarget): Promise<boolean> {
     if (this.sentDelivery?.runId !== target.runId || this.sentDelivery.key !== target.key) {
-      await target.beforeSend?.();
       if (!target.isLive()) return false;
       try {
         await this.deps.send(target.message);

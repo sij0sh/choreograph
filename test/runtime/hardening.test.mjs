@@ -225,11 +225,9 @@ test("transitions that exceed the memory bound are rejected without state change
   assert.ok(prompt, "the run stays active at the last valid position");
 });
 
-test("an abort while delivery is pending suppresses the continuation message", async () => {
+test("a delivery to a run that is no longer live is skipped and leaves no marker", async () => {
   const { DeliveryCoordinator } = await import("../../src/runtime/delivery.ts");
-  let live = true;
-  let releaseBeforeSend;
-  const beforeSendGate = new Promise((resolve) => { releaseBeforeSend = resolve; });
+  let live = false;
   const sent = [];
   const notices = [];
   const coordinator = new DeliveryCoordinator({
@@ -237,20 +235,17 @@ test("an abort while delivery is pending suppresses the continuation message", a
     commitDelivered: () => {},
     notify: (message, level) => notices.push({ message, level }),
   });
-  const delivery = coordinator.deliver({
+  const target = {
     runId: "r1",
     key: "root/second#attempt-1",
     message: "Continue workflow `r1` at root/second.",
     isLive: () => live,
-    beforeSend: async () => { await beforeSendGate; },
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  live = false; // the run aborts while beforeSend is still pending
-  releaseBeforeSend();
-  const delivered = await delivery;
-  assert.equal(delivered, false);
+  };
+  assert.equal(await coordinator.deliver(target), false);
   assert.equal(sent.length, 0, "the send is never invoked once the run is no longer live");
-  assert.equal(coordinator.sentDelivery, null, "no delivery marker is recorded");
+  live = true;
+  assert.equal(await coordinator.deliver(target), true, "the delivery retries once the run is live again");
+  assert.equal(sent.length, 1);
 });
 
 test("loop aggregates keep one shape regardless of output size", () => {
