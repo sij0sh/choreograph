@@ -73,7 +73,6 @@ test("an accepted exit completes the node, records the result, and advances", ()
   assert.equal(applied.state.stack.at(-1).blockId, "deliver");
   const execution = applied.state.plans["root/investigate"];
   assert.deepEqual(execution.results["fetch-data"].data, { value: 1 });
-  assert.equal(execution.resultOperators["fetch-data"], "fetch");
   assert.equal(applied.state.invocations["root/investigate/fetch-data"].status, "succeeded");
   assert.equal(applied.state.checkpoints["root/investigate/fetch-data"], undefined, "successful plan nodes keep one result shape");
 });

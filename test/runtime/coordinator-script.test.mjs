@@ -634,7 +634,7 @@ test("a capture file that cannot be read fails the step through its repair polic
   const wf = {
     ...workflow([
       script("build", {
-        recovery: { max_attempts: 1, strategy: ["block"] },
+        recovery: { maxAttempts: 1 },
         spec: { inheritEnv: ["PATH"], files: [{ name: "report", path: "missing.txt" }] },
       }),
       task("deliver"),

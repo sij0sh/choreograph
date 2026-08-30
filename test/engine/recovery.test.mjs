@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { start, transition } from "../../src/engine/interpreter.ts";
-import { completed, cp, loop, needsWork, task, workflow } from "./helpers.mjs";
+import { completed, cp, needsWork, task, workflow } from "./helpers.mjs";
 
 const OPERATORS = new Map([
   ["inspect", { id: "inspect", path: "operators/inspect.md", description: "Inspect code." }],
@@ -33,125 +33,79 @@ function seededPlan(wf, nodes) {
   return state;
 }
 
-test("a node retries before any other recovery action", () => {
+test("a node retries in place and stores the failure as the prior attempt", () => {
   const wf = planWorkflow([]);
-  let state = seededPlan(wf, [node("probe"), node("map", "trace")]);
+  const state = seededPlan(wf, [node("probe"), node("map", "trace")]);
   const retry = transition(wf, state, { type: "outcome", outcome: needsWork(cp("thin evidence"), [{ target: "probe", reason: "no direct evidence" }]) });
-  assert.ok(retry.ok);
+  assert.ok(retry.ok, retry.ok ? "" : retry.error);
   assert.equal(retry.effect.kind, "deliver");
-  assert.equal(retry.state.stack.at(-1).nodeId, "probe");
-  assert.equal(retry.state.stack.at(-1).attempt, 2);
+  const leaf = retry.state.stack.at(-1);
+  assert.equal(leaf.nodeId, "probe");
+  assert.equal(leaf.attempt, 2);
+  assert.equal(retry.state.checkpoints["root/investigate/probe"].summary, "thin evidence", "the needs-work checkpoint stays at the current key as the prior attempt");
 });
 
-test("a node escalates to replan after exhausting retries", () => {
+test("a node parks after exhausting its retries", () => {
   const wf = planWorkflow([]);
   let state = seededPlan(wf, [node("probe"), node("map", "trace")]);
   state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("first try")) }).state;
-  const replanned = transition(wf, state, { type: "outcome", outcome: needsWork(cp("second try")) });
-  assert.ok(replanned.ok);
-  const leaf = replanned.state.stack.at(-1);
-  assert.equal(leaf.kind, "plan");
-  assert.equal(leaf.mode, "create", "recovery returns to plan creation");
-  const execution = Object.values(replanned.state.plans)[0];
-  assert.equal(execution.revision, 2);
-  assert.equal(execution.replans, 1);
-  assert.deepEqual(Object.keys(execution.results), [], "nothing was completed to retain");
+  const parked = transition(wf, state, { type: "outcome", outcome: needsWork(cp("second try")) });
+  assert.ok(parked.ok);
+  assert.equal(parked.effect.kind, "stay", "the second failure parks the node");
+  const leaf = parked.state.stack.at(-1);
+  assert.equal(leaf.kind, "node");
+  assert.equal(leaf.nodeId, "probe", "the run never leaves the current node");
+  assert.equal(parked.state.checkpoints["root/investigate/probe"].summary, "second try");
 });
 
-test("replan retains completed results and the new plan can depend on them", () => {
-  const wf = planWorkflow([]);
+test("issues[] never rewinds completed work", () => {
+  const wf = planWorkflow([task("verify", { recovery: { maxAttempts: 1 } })]);
   let state = seededPlan(wf, [node("probe"), node("map", "trace")]);
-  state = transition(wf, state, { type: "outcome", outcome: passNode("probe") }).state;
-  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("map failed")) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("map failed again")) }).state;
-  const execution = Object.values(state.plans)[0];
-  assert.deepEqual(Object.keys(execution.results), ["probe"], "the completed result survives the replan");
-  state = transition(wf, state, { type: "outcome", outcome: planOf([node("remap", "trace", { dependsOn: ["probe"] }), node("seal")]) }).state;
-  assert.equal(state.stack.at(-1).nodeId, "remap");
-  const after = Object.values(state.plans)[0];
-  assert.deepEqual(Object.keys(after.results), ["probe"], "retained results persist into the new revision");
-});
-
-test("replan has a hard bound and then blocks with a resumable checkpoint", () => {
-  const wf = planWorkflow([]);
-  let state = seededPlan(wf, [node("probe"), node("map", "trace")]);
-  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("one")) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("two")) }).state;
-  assert.equal(Object.values(state.plans)[0].replans, 1);
-  state = transition(wf, state, { type: "outcome", outcome: planOf([node("fresh"), node("seal")]) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("three")) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("four")) }).state;
-  assert.equal(Object.values(state.plans)[0].replans, 2);
-  state = transition(wf, state, { type: "outcome", outcome: planOf([node("fresh2"), node("seal2")]) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("five")) }).state;
-  const blocked = transition(wf, state, { type: "outcome", outcome: needsWork(cp("six")) });
-  assert.ok(blocked.ok);
-  assert.equal(blocked.effect.kind, "stay", "the replan bound forces a blocked stay");
-  assert.equal(blocked.state.status, "active");
-  assert.ok(blocked.state.checkpoints[blocked.state.stack.at(-1).key], "blocking leaves a resumable checkpoint");
-});
-
-test("a verifier invalidates targeted results and their dependents, then resumes inside the plan", () => {
-  const wf = planWorkflow([
-    task("verify", {
-      recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate", "block"], scope: "investigate" },
-    }),
-  ]);
-  let state = seededPlan(wf, [
-    node("probe"),
-    node("map", "trace", { dependsOn: ["probe"] }),
-    node("confirm", "trace", { dependsOn: ["map"] }),
-    node("independent"),
-  ]);
   state = transition(wf, state, { type: "outcome", outcome: passNode("probe") }).state;
   state = transition(wf, state, { type: "outcome", outcome: passNode("map") }).state;
-  state = transition(wf, state, { type: "outcome", outcome: passNode("confirm") }).state;
-  state = transition(wf, state, { type: "outcome", outcome: passNode("independent") }).state;
-  assert.equal(state.stack.at(-1).blockId, "verify", "the verifier follows the plan");
-
-  const invalidation = transition(wf, state, {
+  assert.equal(state.stack.at(-1).blockId, "verify");
+  const parked = transition(wf, state, {
     type: "outcome",
     outcome: needsWork(cp("probe evidence is weak"), [{ target: "probe", reason: "missing direct evidence" }]),
   });
-  assert.ok(invalidation.ok, invalidation.ok ? "" : invalidation.error);
-  const leaf = invalidation.state.stack.at(-1);
-  assert.equal(leaf.kind, "node");
-  assert.equal(leaf.nodeId, "probe", "execution resumes at the earliest invalidated node");
-  const execution = Object.values(invalidation.state.plans)[0];
-  assert.deepEqual(Object.keys(execution.results), ["independent"], "dependents invalidate transitively");
-  assert.equal(execution.invalidations, 1);
+  assert.ok(parked.ok, parked.ok ? "" : parked.error);
+  assert.equal(parked.effect.kind, "stay", "the verifier parks on its first failure instead of rewinding");
+  assert.deepEqual(Object.keys(parked.state.plans["root/investigate"].results), ["probe", "map"], "completed node results are untouched");
+  assert.equal(parked.state.stack.at(-1).blockId, "verify", "the stack stays at the current position");
 });
 
-test("the verifier runs again after the repaired plan completes", () => {
-  const wf = planWorkflow([
-    task("verify", {
-      recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate", "block"], scope: "investigate" },
-    }),
-  ]);
-  let state = seededPlan(wf, [node("probe"), node("map", "trace", { dependsOn: ["probe"] })]);
-  state = transition(wf, state, { type: "outcome", outcome: passNode("probe") }).state;
-  state = transition(wf, state, { type: "outcome", outcome: passNode("map") }).state;
-  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("weak"), [{ target: "probe", reason: "thin" }]) }).state;
-  assert.equal(state.stack.at(-1).nodeId, "probe");
-  state = transition(wf, state, { type: "outcome", outcome: passNode("probe") }).state;
-  state = transition(wf, state, { type: "outcome", outcome: passNode("map") }).state;
-  assert.equal(state.stack.at(-1).blockId, "verify", "the sequence re-delivers the verifier after the plan");
-});
-
-test("needs-work can invalidate an earlier task checkpoint and re-run it", () => {
-  const wf = workflow([
-    task("gather"),
-    task("verify", { recovery: { maxAttempts: 2, maxReplans: 0, strategy: ["invalidate", "block"] } }),
-  ]);
+test("a task retries and then parks with a resumable checkpoint", () => {
+  const wf = workflow([task("gather"), task("deliver")]);
   let state = start(wf, { runId: "r1" }).state;
+  const retry = transition(wf, state, { type: "outcome", outcome: needsWork(cp("not gathered yet")) });
+  assert.ok(retry.ok);
+  assert.equal(retry.effect.kind, "deliver");
+  assert.equal(retry.state.stack.at(-1).blockId, "gather");
+  assert.equal(retry.state.stack.at(-1).attempt, 2);
+  assert.equal(retry.state.checkpoints["root/gather"].summary, "not gathered yet", "the prior attempt summary is stored before the retry");
+  const parked = transition(wf, retry.state, { type: "outcome", outcome: needsWork(cp("still stuck")) });
+  assert.ok(parked.ok);
+  assert.equal(parked.effect.kind, "stay");
+  assert.ok(parked.state.checkpoints["root/gather"], "parking leaves a resumable checkpoint");
+});
+
+test("a later outcome replaces the prior attempt checkpoint", () => {
+  const wf = workflow([task("gather"), task("deliver")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("first failure")) }).state;
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("gathered")) }).state;
-  const invalidation = transition(wf, state, {
-    type: "outcome",
-    outcome: needsWork(cp("gather output is stale"), [{ target: "gather", reason: "missed the main module" }]),
-  });
-  assert.ok(invalidation.ok, invalidation.ok ? "" : invalidation.error);
-  assert.equal(invalidation.state.stack.at(-1).blockId, "gather", "the run rewinds to the invalidated task");
-  assert.equal(Object.keys(invalidation.state.checkpoints).length, 0, "the stale checkpoint is removed");
+  assert.equal(state.checkpoints["root/gather"].summary, "gathered", "the completion replaces the prior attempt checkpoint");
+});
+
+test("max_attempts extends the retry budget", () => {
+  const wf = workflow([task("gather", { recovery: { maxAttempts: 3 } }), task("deliver")]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("one")) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("two")) }).state;
+  assert.equal(state.stack.at(-1).attempt, 3);
+  const parked = transition(wf, state, { type: "outcome", outcome: needsWork(cp("three")) });
+  assert.ok(parked.ok);
+  assert.equal(parked.effect.kind, "stay");
 });
 
 test("plan creation retries and then blocks", () => {
@@ -167,111 +121,12 @@ test("plan creation retries and then blocks", () => {
   assert.ok(blocked.state.checkpoints["root/investigate"]);
 });
 
-test("plan-create attempts accumulate across retries and replans, then block", () => {
-  const wf = planWorkflow([], { plan: { recovery: { maxAttempts: 3, maxReplans: 2, strategy: ["retry", "replan"] } } });
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed")) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: planOf([node("probe"), node("map", "trace")]) }).state;
-  const trace = [];
-  let last;
-  for (let i = 0; i < 6; i += 1) {
-    last = transition(wf, state, { type: "outcome", outcome: needsWork(cp(`attempt ${i + 1}`)) });
-    assert.ok(last.ok, last.ok ? "" : last.error);
-    state = last.state;
-    const leaf = state.stack.at(-1);
-    trace.push(leaf.kind === "plan" ? `create@${leaf.attempt}` : `${leaf.kind}@${leaf.attempt}`);
-  }
-  assert.deepEqual(trace, ["node@2", "node@3", "create@2", "create@3", "create@4", "create@4"]);
-  assert.equal(last.effect.kind, "stay", "the combined budget ends in a blocked stay");
-  assert.equal(Object.values(state.plans)[0].replans, 2);
-});
-
-test("needs-work without matching targets falls through to block", () => {
-  const wf = planWorkflow([
-    task("verify", { recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate", "replan", "block"], scope: "investigate" } }),
-  ]);
+test("a parked node keeps the plan resumable and completes on the retry", () => {
+  const wf = planWorkflow([]);
   let state = seededPlan(wf, [node("probe"), node("map", "trace")]);
-  state = transition(wf, state, { type: "outcome", outcome: passNode("probe") }).state;
-  state = transition(wf, state, { type: "outcome", outcome: passNode("map") }).state;
-  const replanned = transition(wf, state, {
-    type: "outcome",
-    outcome: needsWork(cp("everything looks wrong"), [{ target: "ghost-node", reason: "not a result" }]),
-  });
-  assert.ok(replanned.ok);
-  assert.equal(replanned.state.stack.at(-1).mode, "create", "unmatched invalidation falls through to replan");
-  assert.equal(Object.values(replanned.state.plans)[0].replans, 1);
-});
-
-test("invalidate owns the current plan's target and preserves earlier completed work", () => {
-  const recovery = { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate"] };
-  const earlier = { kind: "plan", id: "earlier", operators: ["inspect"], recovery };
-  const current = { kind: "plan", id: "current", operators: ["inspect"], recovery };
-  const wf = workflow([task("seed"), earlier, current], { operators: OPERATORS });
-  const twoNodes = [node("node-a"), node("node-b", "inspect", { dependsOn: ["node-a"] })];
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("seed")) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: planOf([{ ...twoNodes[0] }, { ...twoNodes[1] }]) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: passNode("node-a") }).state;
-  state = transition(wf, state, { type: "outcome", outcome: passNode("node-b") }).state;
-  state = transition(wf, state, { type: "outcome", outcome: planOf([{ ...twoNodes[0] }, { ...twoNodes[1] }]) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: passNode("node-a") }).state;
-  const before = { earlier: Object.keys(state.plans["root/earlier"].results), current: Object.keys(state.plans["root/current"].results) };
-  assert.deepEqual(before.earlier, ["node-a", "node-b"]);
-  assert.deepEqual(before.current, ["node-a"]);
-
-  const invalidation = transition(wf, state, {
-    type: "outcome",
-    outcome: needsWork(cp("node-a is stale"), [{ target: "node-a", reason: "stale data" }]),
-  });
-  assert.ok(invalidation.ok, invalidation.ok ? "" : invalidation.error);
-  assert.deepEqual(Object.keys(invalidation.state.plans["root/earlier"].results), ["node-a", "node-b"], "the earlier completed plan is untouched");
-  assert.deepEqual(Object.keys(invalidation.state.plans["root/current"].results), [], "the current plan's stale result and its dependent are removed");
-  assert.equal(invalidation.state.plans["root/current"].invalidations, 1);
-  assert.equal(invalidation.state.plans["root/earlier"].invalidations, 0);
-  const leaf = invalidation.state.stack.at(-1);
-  assert.equal(leaf.kind, "node");
-  assert.equal(leaf.nodeId, "node-a", "the run resumes at the invalidated node of the current plan");
-});
-
-
-test("invalidate falls back to the global search for targets outside the current plan", () => {
-  const px = { kind: "plan", id: "px", operators: ["inspect"], recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate"] } };
-  const verifier = task("verify", { recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate"], scope: "px" } });
-  const wf = workflow([task("seed"), px, verifier], { operators: OPERATORS });
-  const twoNodes = [node("node-a"), node("node-b", "inspect", { dependsOn: ["node-a"] })];
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("seed")) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: planOf([{ ...twoNodes[0] }, { ...twoNodes[1] }]) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: passNode("node-a") }).state;
-  state = transition(wf, state, { type: "outcome", outcome: passNode("node-b") }).state;
-  assert.equal(state.stack.at(-1).blockId, "verify");
-  const invalidation = transition(wf, state, {
-    type: "outcome",
-    outcome: needsWork(cp("earlier work is wrong"), [{ target: "node-a", reason: "bad evidence" }]),
-  });
-  assert.ok(invalidation.ok, invalidation.ok ? "" : invalidation.error);
-  assert.equal(invalidation.state.plans["root/px"].invalidations, 1, "the fallback targets the scoped plan from a task position");
-  const leaf = invalidation.state.stack.at(-1);
-  assert.equal(leaf.kind, "node");
-  assert.equal(leaf.nodeId, "node-a");
-});
-
-test("invalidating the items producer rewinds the whole loop", () => {
-  const review = loop("review", "for-each", { body: { recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate", "block"] } } });
-  const wf = workflow([task("gather"), review, task("deliver")], {
-    inputEdges: { review: ["gather"] },
-  });
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("gathered", { files: ["a", "b"] })) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed a")) }).state;
-  assert.equal(state.stack.at(-1).key, "root/review/loop[2]/review-step");
-
-  const rewound = transition(wf, state, { type: "outcome", outcome: needsWork(cp("files were stale"), [{ target: "gather", reason: "the item list came from a partial read" }]) });
-  assert.ok(rewound.ok, rewound.ok ? "" : rewound.error);
-  const leaf = rewound.state.stack.at(-1);
-  assert.equal(leaf.kind, "task");
-  assert.equal(leaf.blockId, "gather", "the run rewinds to the producer before the loop");
-  assert.equal(rewound.state.loops["root/review"], undefined, "the loop state is cleared on rewind");
-  assert.equal(rewound.state.checkpoints["root/review/loop[1]/review-step"], undefined, "scoped iteration checkpoints are cleared");
-  assert.equal(rewound.state.checkpoints["root/review"], undefined, "the loop aggregate is cleared");
+  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("first try")) }).state;
+  const parked = transition(wf, state, { type: "outcome", outcome: needsWork(cp("second try")) }).state;
+  assert.deepEqual(Object.keys(Object.values(parked.plans)[0].results), [], "the failed node has no result");
+  state = transition(wf, parked, { type: "outcome", outcome: passNode("probe") }).state;
+  assert.equal(state.stack.at(-1).nodeId, "map", "the run advances after the node completes");
 });

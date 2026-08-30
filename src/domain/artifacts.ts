@@ -110,15 +110,7 @@ function aggregateOf(state: Execution, key: string): JsonValue | undefined {
       ? execution.results[node.id] as unknown as JsonValue
       : null,
   }));
-  for (const id of Object.keys(execution.results).filter((resultId) => !currentIds.has(resultId)).sort()) {
-    nodes.push({
-      id,
-      operator: execution.resultOperators?.[id] ?? "unknown",
-      objective: "Retained artifact from an earlier plan revision.",
-      result: execution.results[id] as unknown as JsonValue,
-    });
-  }
-  return { version: 1, revision: execution.revision, nodes } as JsonValue;
+  return { version: 1, nodes } as JsonValue;
 }
 
 export function planKeyForBlock(state: Execution, blockId: string): string | undefined {

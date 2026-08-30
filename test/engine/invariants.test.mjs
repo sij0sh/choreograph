@@ -50,12 +50,12 @@ test("invariant: retry and replan budgets are finite", () => {
   assert.equal(blocked.effect.kind, "stay", "the exhausted budget ends in a blocked stay");
 });
 
-test("invariant: tasks describe failure while policy chooses recovery", () => {
-  const wf = workflow([task("only", { recovery: { maxAttempts: 3, maxReplans: 0, strategy: ["block"] } })]);
+test("invariant: tasks describe failure while the policy parks them", () => {
+  const wf = workflow([task("only", { recovery: { maxAttempts: 1 } })]);
   const started = start(wf, { runId: "r1" });
   const result = transition(wf, started.state, { type: "outcome", outcome: { status: "needs-work", checkpoint: cp("stuck"), issues: [{ target: "only", reason: "r" }] } });
   assert.ok(result.ok);
-  assert.equal(result.effect.kind, "stay", "a retry-free policy blocks immediately regardless of issues");
+  assert.equal(result.effect.kind, "stay", "a one-attempt policy parks the position regardless of issues");
 });
 
 

@@ -16,7 +16,7 @@ import type {
 } from "../domain/workflow.ts";
 import { compileContract } from "../domain/contract.ts";
 import { LIMITS } from "../domain/limits.ts";
-import { DEFAULT_PLAN_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
+import { DEFAULT_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
 import {
   FRONTMATTER_KEYS,
   OPERATOR_KEYS,
@@ -408,7 +408,7 @@ function parsePlan(raw: unknown, id: string, label: string, context: CompileCont
   for (const operator of operators) {
     if (!context.operators.has(operator)) throw new Error(`${label}.plan.operators entry "${operator}" has no operator file`);
   }
-  const recovery = parseRecovery(body.repair, `${label}.plan.repair`, DEFAULT_PLAN_RECOVERY) ?? DEFAULT_PLAN_RECOVERY;
+  const recovery = parseRecovery(body.repair, `${label}.plan.repair`) ?? DEFAULT_RECOVERY;
   return { kind: "plan", id, operators, recovery };
 }
 

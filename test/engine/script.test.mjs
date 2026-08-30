@@ -81,7 +81,7 @@ test("json stdout parses into the checkpoint data", () => {
 });
 
 test("invalid json stdout applies the repair policy", () => {
-  const wf = workflow([script("emit", { spec: { stdout: "json" }, recovery: { max_attempts: 2, strategy: ["retry", "block"] } })]);
+  const wf = workflow([script("emit", { spec: { stdout: "json" }, recovery: { maxAttempts: 2 } })]);
   const started = start(wf, { runId: "r1" });
   const next = transition(wf, started.state, {
     type: "process-exit",
@@ -95,7 +95,7 @@ test("invalid json stdout applies the repair policy", () => {
 });
 
 test("exhausted retries park the run at the script with a stay effect", () => {
-  const wf = workflow([script("emit", { spec: { stdout: "json" }, recovery: { maxAttempts: 1, strategy: ["retry", "block"] } })]);
+  const wf = workflow([script("emit", { spec: { stdout: "json" }, recovery: { maxAttempts: 1 } })]);
   const started = start(wf, { runId: "r1" });
   const last = transition(wf, started.state, {
     type: "process-exit",
@@ -109,7 +109,7 @@ test("exhausted retries park the run at the script with a stay effect", () => {
 });
 
 test("timeout exit applies repair and names the timeout", () => {
-  const wf = workflow([script("slow", { recovery: { max_attempts: 1, strategy: ["block"] } })]);
+  const wf = workflow([script("slow", { recovery: { maxAttempts: 1 } })]);
   const started = start(wf, { runId: "r1" });
   const next = transition(wf, started.state, {
     type: "process-exit",
@@ -122,7 +122,7 @@ test("timeout exit applies repair and names the timeout", () => {
 });
 
 test("rejected exit code applies repair and names the code", () => {
-  const wf = workflow([script("failing", { spec: { acceptedExitCodes: [0] }, recovery: { max_attempts: 1, strategy: ["block"] } })]);
+  const wf = workflow([script("failing", { spec: { acceptedExitCodes: [0] }, recovery: { maxAttempts: 1 } })]);
   const started = start(wf, { runId: "r1" });
   const next = transition(wf, started.state, {
     type: "process-exit",
@@ -336,7 +336,7 @@ test("the configured stderr mode is honored in the checkpoint data", () => {
 });
 
 test("stderr that is not valid json in json mode fails the step", () => {
-  const wf = workflow([script("emit", { spec: { stderr: "json" }, recovery: { max_attempts: 1, strategy: ["block"] } })]);
+  const wf = workflow([script("emit", { spec: { stderr: "json" }, recovery: { maxAttempts: 1 } })]);
   const started = start(wf, { runId: "r1" });
   const next = transition(wf, started.state, {
     type: "process-exit",

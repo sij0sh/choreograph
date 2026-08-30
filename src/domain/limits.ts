@@ -9,7 +9,6 @@ export const LIMITS = {
   memoryBytes: 524_288,
   planNodes: 8,
   nodeAttempts: 2,
-  replans: 2,
   jsonDepth: 8,
   checkpointListItems: 8,
   checkpointItemBytes: 512,
@@ -33,9 +32,6 @@ export const LIMITS = {
   generatedSteps: 16,
   generatedDefinitionBytes: 128_000,
 } as const;
-
-export const PLAN_CREATE_ATTEMPT_MAX = LIMITS.nodeAttempts + LIMITS.replans;
-
 
 export const ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 export const NAME_PATTERN = ID_PATTERN;

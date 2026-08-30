@@ -72,7 +72,7 @@ test("a valid plan enters its first node and runs nodes in order", () => {
   const planKey = "root/investigate";
   assert.equal(state.stack.at(-1).kind, "node");
   assert.equal(state.stack.at(-1).nodeId, "probe");
-  assert.equal(state.plans[planKey].revision, 1);
+  assert.deepEqual(state.plans[planKey].results, {}, "the accepted plan starts with empty results");
 
   const probePass = transition(wf, state, {
     type: "outcome",

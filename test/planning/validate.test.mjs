@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { validateDynamicPlan } from "../../src/planning/validate.ts";
-import { firstIncompleteNode, invalidateResults } from "../../src/planning/graph.ts";
+import { firstIncompleteNode } from "../../src/planning/graph.ts";
 
 const OPERATORS = new Map([
   ["inspect", { id: "inspect", path: "operators/inspect.md", description: "Inspect code." }],
@@ -16,7 +16,6 @@ function validate(value, options = {}) {
   return validateDynamicPlan(value, {
     operators: OPERATORS,
     allowedOperators: options.allowed ?? ["inspect", "trace"],
-    retainedResultIds: new Set(options.retained ?? []),
   });
 }
 
@@ -39,26 +38,17 @@ test("nodes must use the block's trusted operators", () => {
   assert.ok(result.errors.some((error) => /trusted operators/.test(error)));
 });
 
-test("dependencies must be earlier or retained", () => {
+test("dependencies must name earlier nodes", () => {
   const forward = validate({ version: 1, nodes: [node("a", "inspect", { dependsOn: ["b"] }), node("b")] });
   assert.ok("errors" in forward);
-  const retained = validate({ version: 1, nodes: [node("a", "inspect", { dependsOn: ["kept"] }), node("b")] }, { retained: ["kept"] });
-  assert.ok("plan" in retained);
   const self = validate({ version: 1, nodes: [node("a", "inspect", { dependsOn: ["a"] }), node("b")] });
   assert.ok("errors" in self);
 });
 
-test("node ids must not collide with retained results", () => {
-  const result = validate({ version: 1, nodes: [node("kept"), node("b")] }, { retained: ["kept"] });
-  assert.ok("errors" in result);
-  assert.ok(result.errors.some((error) => /retained result/.test(error)));
-});
 
 test("firstIncompleteNode finds the first node without a result", () => {
   const execution = {
     blockId: "investigate",
-    revision: 1,
-    replans: 0,
     plan: { version: 1, nodes: [node("a"), node("b"), node("c")] },
     results: { a: { summary: "done" }, c: { summary: "done" } },
   };
@@ -67,30 +57,13 @@ test("firstIncompleteNode finds the first node without a result", () => {
   assert.equal(firstIncompleteNode(finished), undefined);
 });
 
-test("invalidateResults removes transitive dependents in declaration order", () => {
-  const execution = {
-    blockId: "investigate",
-    revision: 1,
-    replans: 0,
-    plan: {
-      version: 1,
-      nodes: [node("a"), node("b", "trace", { dependsOn: ["a"] }), node("c", "trace", { dependsOn: ["b"] }), node("d")],
-    },
-    results: { a: { summary: "1" }, b: { summary: "2" }, c: { summary: "3" }, d: { summary: "4" } },
-  };
-  const { execution: next, removed } = invalidateResults(execution, ["a"]);
-  assert.deepEqual(removed, ["a", "b", "c"], "dependents invalidate transitively");
-  assert.deepEqual(Object.keys(next.results), ["d"], "independent results survive");
-  assert.deepEqual(invalidateResults(execution, ["ghost"]).removed, []);
-});
-
 test("process operator nodes take neither done nor evidence", () => {
   const operators = new Map([
     ...OPERATORS,
     ["fetch", { id: "fetch", path: "operators/fetch.md", description: "Fetch.", script: { argv: ["node", "fetch.mjs"], cwd: ".", timeoutMs: 1_000, acceptedExitCodes: [0], stdout: "json", stderr: "none", maxCaptureBytes: 1_024 } }],
   ]);
   const validateWith = (value) =>
-    validateDynamicPlan(value, { operators, allowedOperators: ["inspect", "trace", "fetch"], retainedResultIds: new Set() });
+    validateDynamicPlan(value, { operators, allowedOperators: ["inspect", "trace", "fetch"] });
   const good = validateWith({ version: 1, nodes: [node("probe"), { id: "fetch-data", operator: "fetch", objective: "Fetch.", dependsOn: ["probe"] }] });
   assert.ok("plan" in good);
   assert.deepEqual(good.plan.nodes[1].done, []);

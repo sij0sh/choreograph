@@ -110,29 +110,6 @@ test("negated value ops fail on missing artifacts rather than skipping", () => {
   assert.equal(state.checkpoints["root/deep"].skipped, true);
 });
 
-test("invalidating the producer rewinds and re-evaluates the guard", () => {
-  const wf = workflow([
-    task("frame", { recovery: { maxAttempts: 2, maxReplans: 2, strategy: ["retry", "block"] } }),
-    task("deep", { guard: guard("frame", "equals", "high", "/data/severity") }),
-    task("deliver", { inputs: { verdict: { from: "deep" } }, recovery: { maxAttempts: 1, maxReplans: 2, strategy: ["invalidate", "block"] } }),
-  ], { inputEdges: { deep: ["frame"], deliver: ["deep"] } });
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed", { severity: "low" })) }).state;
-  assert.equal(state.checkpoints["root/deep"].skipped, true);
-  const result = transition(wf, state, {
-    type: "outcome",
-    outcome: needsWork(cp("wrong"), [{ target: "frame", reason: "severity was misjudged" }]),
-  });
-  assert.ok(result.ok, result.ok ? "" : result.error);
-  // frame invalidates and reruns; its guard consumer rewinds with it
-  assert.equal(result.state.stack.at(-1).blockId, "frame");
-  assert.equal(result.state.checkpoints["root/deep"], undefined);
-  // rerun frame with severity high; the guard now holds and deep runs
-  const rerun = transition(wf, result.state, { type: "outcome", outcome: completed(cp("reframed", { severity: "high" })) });
-  assert.ok(rerun.ok, rerun.ok ? "" : rerun.error);
-  assert.equal(rerun.state.stack.at(-1).blockId, "deep");
-  assert.equal(rerun.state.checkpoints["root/deep"], undefined);
-});
 
 test("skipped checkpoints restore without contract errors", () => {
   const wf = workflow([

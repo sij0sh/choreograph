@@ -7,7 +7,6 @@ import type { DynamicPlan, PlanNode } from "./schema.ts";
 interface PlanValidationInput {
   readonly operators: ReadonlyMap<string, OperatorDescriptor>;
   readonly allowedOperators: readonly string[];
-  readonly retainedResultIds: ReadonlySet<string>;
 }
 
 const PLAN_KEYS = ["version", "nodes"];
@@ -56,7 +55,6 @@ export function validateDynamicPlan(value: unknown, input: PlanValidationInput):
       return;
     }
     if (seen.has(node.id)) errors.push(`${label}.id duplicates ${node.id}`);
-    if (input.retainedResultIds.has(node.id)) errors.push(`${label}.id ${node.id} is already a retained result; new revisions must use new ids for new work`);
     seen.add(node.id);
     const operator = typeof node.operator === "string" ? input.operators.get(node.operator) : undefined;
     if (!operator || !allowed.has(node.operator as string)) {
@@ -90,8 +88,8 @@ export function validateDynamicPlan(value: unknown, input: PlanValidationInput):
       for (const dependency of dependsOn) {
         if (!ID_PATTERN.test(dependency)) {
           errors.push(`${label}.dependsOn entry ${dependency} must match ${ID_PATTERN}`);
-        } else if (!earlier.has(dependency) && !input.retainedResultIds.has(dependency)) {
-          errors.push(`${label}.dependsOn entry ${dependency} must name an earlier node or a retained completed result`);
+        } else if (!earlier.has(dependency)) {
+          errors.push(`${label}.dependsOn entry ${dependency} must name an earlier node in the current plan`);
         }
       }
     }
@@ -117,6 +115,6 @@ export function validateDynamicPlan(value: unknown, input: PlanValidationInput):
   return { plan };
 }
 
-export function planInputFor(workflow: Workflow, allowedOperators: readonly string[], retainedResultIds: ReadonlySet<string>): PlanValidationInput {
-  return { operators: workflow.operators, allowedOperators, retainedResultIds };
+export function planInputFor(workflow: Workflow, allowedOperators: readonly string[]): PlanValidationInput {
+  return { operators: workflow.operators, allowedOperators };
 }

@@ -124,13 +124,9 @@ function pushBlock(workflow: Workflow, state: Execution, stack: Frame[], parentK
     }
     case "plan": {
       const existing = state.plans[key];
-      if (existing && !existing.awaitingPlan && firstIncompleteNode(existing)) {
+      if (existing && firstIncompleteNode(existing)) {
         stack.push({ kind: "plan", blockId: child.id, key, mode: "execute", attempt: 1 });
         return { leaf: false };
-      }
-      if (existing && existing.awaitingPlan) {
-        stack.push({ kind: "plan", blockId: child.id, key, mode: "create", attempt: 1 });
-        return { leaf: true };
       }
       if (existing) return { leaf: false };
       stack.push({ kind: "plan", blockId: child.id, key, mode: "create", attempt: 1 });
@@ -395,15 +391,7 @@ function completedProblems(workflow: Workflow, state: Execution, leaf: Frame, ou
       errors.push("plan creation completion must carry checkpoint.data.plan");
       return errors;
     }
-    const previous = state.plans[leaf.key];
-    const metadata = resultOperatorsFor(previous);
-    if (metadata.error) {
-      errors.push(metadata.error);
-      return errors;
-    }
-    const retained = retainedResultError(workflow, block, previous, metadata.operators);
-    if (retained) errors.push(retained);
-    const validation = validateDynamicPlan(planValue, planInputFor(workflow, block.operators, new Set(Object.keys(previous?.results ?? {}))));
+    const validation = validateDynamicPlan(planValue, planInputFor(workflow, block.operators));
     if ("errors" in validation) errors.push(`invalid plan: ${validation.errors.join("; ")}`);
     return errors;
   }
@@ -532,50 +520,10 @@ function leafEffect(workflow: Workflow, state: Execution, fallback: Effect): Eng
   return { ok: true, state, effect: fallback };
 }
 
-function resultOperatorsFor(previous: PlanExecution | undefined): { readonly operators: Record<string, string>; readonly error?: string } {
-  const operators = { ...(previous?.resultOperators ?? {}) };
-  if (previous) {
-    for (const id of Object.keys(operators)) {
-      if (previous.results[id] === undefined) return { operators, error: `result metadata ${id} has no matching result` };
-    }
-    for (const node of previous.plan.nodes) {
-      if (!Object.hasOwn(previous.results, node.id)) continue;
-      if (operators[node.id] !== undefined && operators[node.id] !== node.operator) {
-        return { operators, error: `result ${node.id} has conflicting producer metadata` };
-      }
-      operators[node.id] = node.operator;
-    }
-  }
-  return { operators };
-}
 
-function hasContractBearingOperator(workflow: Workflow, operators: readonly string[]): boolean {
-  return operators.some((id) => workflow.operators.get(id)?.output !== undefined);
-}
 
 function operatorResultContractError(workflow: Workflow, operator: OperatorDescriptor | undefined, data: JsonValue | undefined, label: string): string | undefined {
   return operator?.script && isArtifactRef(data) ? undefined : contractErrorFor(workflow, operator?.output, data, label);
-}
-
-function retainedResultError(workflow: Workflow, block: PlanBlock, previous: PlanExecution | undefined, resultOperators: Readonly<Record<string, string>>): string | undefined {
-  if (!previous) return undefined;
-  const requiresMetadata = hasContractBearingOperator(workflow, block.operators);
-  for (const [id, result] of Object.entries(previous.results)) {
-    const operatorId = resultOperators[id];
-    if (!operatorId) {
-      if (requiresMetadata) return `retained result ${id} has no producer metadata`;
-      continue;
-    }
-    const operator = workflow.operators.get(operatorId);
-    if (!operator) {
-      if (requiresMetadata) return `retained result ${id} uses an unknown producer ${operatorId}`;
-      continue;
-    }
-    if (!block.operators.includes(operatorId)) return `retained result ${id} uses operator ${operatorId}, which is not trusted by ${block.id}`;
-    const problem = operatorResultContractError(workflow, operator, result.data, `retained result ${id}`);
-    if (problem) return problem;
-  }
-  return undefined;
 }
 
 function completePlanCreation(workflow: Workflow, state: Execution, leaf: Extract<Frame, { kind: "plan" }>, outcome: Extract<TaskOutcome, { status: "completed" }>): EngineResult {
@@ -583,21 +531,12 @@ function completePlanCreation(workflow: Workflow, state: Execution, leaf: Extrac
   if (!block || block.kind !== "plan") return fail(`frame ${leaf.key} does not name a plan block`);
   const planValue = (outcome.checkpoint.data as { plan?: unknown } | undefined)?.plan;
   if (planValue === undefined) return fail("plan creation completion must carry checkpoint.data.plan");
-  const previous = state.plans[leaf.key];
-  const resultMetadata = resultOperatorsFor(previous);
-  if (resultMetadata.error) return fail(resultMetadata.error);
-  const retainedError = retainedResultError(workflow, block, previous, resultMetadata.operators);
-  if (retainedError) return fail(retainedError);
-  const validation = validateDynamicPlan(planValue, planInputFor(workflow, block.operators, new Set(Object.keys(previous?.results ?? {}))));
+  const validation = validateDynamicPlan(planValue, planInputFor(workflow, block.operators));
   if ("errors" in validation) return fail(`invalid plan: ${validation.errors.join("; ")}`);
   const execution: PlanExecution = {
     blockId: block.id,
-    revision: previous ? previous.revision : 1,
-    replans: previous ? previous.replans : 0,
-    invalidations: previous ? previous.invalidations : 0,
     plan: validation.plan,
-    results: previous ? previous.results : {},
-    ...(Object.keys(resultMetadata.operators).length > 0 ? { resultOperators: resultMetadata.operators } : {}),
+    results: {},
   };
   const planKeyed = withCheckpoint(state, leaf.key, stripPlanPayload(outcome.checkpoint));
   const plans = { ...planKeyed.plans, [leaf.key]: execution };
@@ -646,7 +585,6 @@ function completeNode(workflow: Workflow, state: Execution, leaf: NodeFrame, out
     [planKey]: {
       ...execution,
       results: { ...execution.results, [node.id]: result },
-      resultOperators: { ...(execution.resultOperators ?? {}), [node.id]: node.operator },
     },
   };
   return finishAdvance(workflow, enterInvocation(workflow, { ...completedState, plans }, leaf, "succeeded"), state.stack.slice(0, -1));

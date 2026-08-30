@@ -24,9 +24,6 @@ function hasRuntimeManagedProcessData(state: Execution, key: string, data: unkno
   return state.invocations?.[key]?.status === "waiting" || isArtifactRef(data);
 }
 
-function hasContractBearingOperator(workflow: Workflow, operators: readonly string[]): boolean {
-  return operators.some((id) => workflow.operators.get(id)?.output !== undefined);
-}
 
 function validatePair(workflow: Workflow, state: Execution, parent: Frame, child: Frame, plans: Readonly<Record<string, PlanExecution>>): string | undefined {
   const parentBlock = blockOf(workflow, parent.blockId);
@@ -125,42 +122,16 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
       }
     }
     const nodeById = new Map(plan.plan.nodes.map((node) => [node.id, node]));
-    const retained = new Set<string>();
-    const requiresMetadata = hasContractBearingOperator(workflow, block.operators);
-    for (const [metadataId, metadataOperator] of Object.entries(plan.resultOperators ?? {})) {
-      if (!Object.hasOwn(plan.results, metadataId)) return `plan execution ${key}.resultOperators.${metadataId} has no matching result`;
-      const currentNode = nodeById.get(metadataId);
-      if (currentNode && currentNode.operator !== metadataOperator) {
-        return `plan result ${key}/${metadataId} has conflicting producer metadata`;
-      }
-    }
     for (const [resultId, result] of Object.entries(plan.results)) {
       const node = nodeById.get(resultId);
-      const metadataOperator = plan.resultOperators?.[resultId];
-      if (node && metadataOperator !== undefined && metadataOperator !== node.operator) {
-        return `plan result ${key}/${resultId} has conflicting producer metadata`;
-      }
-      const operatorId = node?.operator ?? metadataOperator;
-      if (!operatorId) {
-        if (requiresMetadata) return `retained result ${key}/${resultId} has no producer metadata`;
-        retained.add(resultId);
-        continue;
-      }
-      const operator = workflow.operators.get(operatorId);
-      if (!operator) {
-        if (requiresMetadata) return `retained result ${key}/${resultId} uses an unknown producer ${operatorId}`;
-        retained.add(resultId);
-        continue;
-      }
-      if (!block.operators.includes(operatorId)) {
-        return `retained result ${key}/${resultId} uses operator ${operatorId}, which is not trusted by ${plan.blockId}`;
-      }
+      if (!node) return `plan result ${key}/${resultId} has no matching node in the current plan`;
+      const operator = workflow.operators.get(node.operator);
+      if (!operator) return `plan result ${key}/${resultId} uses unknown operator ${node.operator}`;
       const runtimeArtifact = operator.script !== undefined && isArtifactRef(result.data);
       const problem = runtimeArtifact ? undefined : contractProblem(workflow, operator.output, result.data === undefined ? {} : result.data, `node result ${key}/${resultId}`);
       if (problem) return problem;
-      if (!node) retained.add(resultId);
     }
-    const validation = validateDynamicPlan(plan.plan, planInputFor(workflow, block.operators, retained));
+    const validation = validateDynamicPlan(plan.plan, planInputFor(workflow, block.operators));
     if ("errors" in validation) {
       return `invalid plan for ${key}: ${validation.errors.join("; ")}`;
     }

@@ -2,7 +2,7 @@ import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import { isValidJsonPointer, objectAt, requireString } from "../domain/json.ts";
 import { isAbsolute } from "node:path";
 import { sep } from "node:path";
-import { DEFAULT_PLAN_RECOVERY, DEFAULT_TASK_RECOVERY, type RecoveryAction, type RecoveryPolicy } from "../domain/policy.ts";
+import { DEFAULT_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
 import { GUARD_OPS, VALUE_OPS, type GuardClause, type GuardOp } from "../domain/guard.ts";
 import type { InputBinding } from "../domain/workflow.ts";
 
@@ -10,8 +10,7 @@ export const FRONTMATTER_KEYS = ["description", "steps", "piVisibility", "legalT
 export const STEP_KEYS = ["id", "run", "tools", "done", "repair", "plan", "script", "operator", "inputs", "output", "when", "for_each", "repeat_until"] as const;
 const SCRIPT_KEYS = ["argv", "cwd", "env", "inheritEnv", "timeoutMs", "acceptedExitCodes", "stdout", "stderr", "maxCaptureBytes", "files"] as const;
 export const OPERATOR_KEYS = ["description", "tools", "output", "script"] as const;
-const RECOVERY_KEYS = ["max_attempts", "max_replans", "strategy", "scope"] as const;
-const RECOVERY_ACTIONS: readonly RecoveryAction[] = ["retry", "invalidate", "replan", "block"];
+const RECOVERY_KEYS = ["max_attempts"] as const;
 const VARIABLE_PATTERN = /^[a-z][a-z0-9_-]*$/;
 
 export { MAX_WORKFLOW_BYTES, MAX_INSTRUCTION_BYTES, NAME_PATTERN } from "../domain/limits.ts";
@@ -90,29 +89,12 @@ export function parseInputBindings(raw: unknown, label: string): Record<string, 
   return bindings;
 }
 
-export function parseRecovery(raw: unknown, label: string, defaults: RecoveryPolicy = DEFAULT_TASK_RECOVERY): RecoveryPolicy | undefined {
+export function parseRecovery(raw: unknown, label: string): RecoveryPolicy | undefined {
   if (raw === undefined) return undefined;
   const body = objectAt(raw, label);
   assertKeys(body, RECOVERY_KEYS, label);
-  const maxAttempts = body.max_attempts === undefined ? undefined : positiveIntAt(body.max_attempts, `${label}.max_attempts`, LIMITS.nodeAttempts + 1);
-  const maxReplans = body.max_replans === undefined ? undefined : positiveIntAt(body.max_replans, `${label}.max_replans`, LIMITS.replans);
-  let strategy: readonly RecoveryAction[] | undefined;
-  if (body.strategy !== undefined) {
-    if (!Array.isArray(body.strategy) || body.strategy.length === 0) throw new Error(`${label}.strategy must be a non-empty list`);
-    strategy = body.strategy.map((value, index) => {
-      const action = stringAt(value, `${label}.strategy[${index}]`);
-      if (!RECOVERY_ACTIONS.includes(action as RecoveryAction)) throw new Error(`${label}.strategy[${index}] must be one of: ${RECOVERY_ACTIONS.join(", ")}`);
-      return action as RecoveryAction;
-    });
-  }
-  const scope = body.scope === undefined ? undefined : stringAt(body.scope, `${label}.scope`);
-  if (scope !== undefined && !ID_PATTERN.test(scope)) throw new Error(`${label}.scope must match ^[a-z][a-z0-9-]*$`);
-  return {
-    maxAttempts: maxAttempts ?? defaults.maxAttempts,
-    maxReplans: maxReplans ?? defaults.maxReplans,
-    strategy: strategy ?? defaults.strategy,
-    ...(scope !== undefined ? { scope } : {}),
-  };
+  const maxAttempts = body.max_attempts === undefined ? DEFAULT_RECOVERY.maxAttempts : positiveIntAt(body.max_attempts, `${label}.max_attempts`, LIMITS.nodeAttempts + 1);
+  return { maxAttempts };
 }
 
 export function positiveIntAt(value: unknown, label: string, max: number): number {

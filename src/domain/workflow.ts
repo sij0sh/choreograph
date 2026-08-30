@@ -137,25 +137,3 @@ export function workflowBlocks(workflow: Workflow): readonly Block[] {
   return [...blockIndex(workflow).values()];
 }
 
-export function bindingConsumers(workflow: Workflow, producers: ReadonlySet<string>): ReadonlySet<string> {
-  const consumersOf = new Map<string, string[]>();
-  for (const [consumer, producerIds] of workflow.inputEdges ?? []) {
-    for (const producer of producerIds) {
-      const list = consumersOf.get(producer);
-      if (list) list.push(consumer);
-      else consumersOf.set(producer, [consumer]);
-    }
-  }
-  const affected = new Set<string>();
-  const queue = [...producers];
-  while (queue.length > 0) {
-    const producer = queue.shift()!;
-    for (const consumer of consumersOf.get(producer) ?? []) {
-      if (!affected.has(consumer)) {
-        affected.add(consumer);
-        queue.push(consumer);
-      }
-    }
-  }
-  return affected;
-}

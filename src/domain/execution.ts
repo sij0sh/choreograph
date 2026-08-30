@@ -45,13 +45,8 @@ export type Frame = SequenceFrame | TaskFrame | PlanFrame | NodeFrame | LoopFram
 
 export interface PlanExecution {
   readonly blockId: string;
-  readonly revision: number;
-  readonly replans: number;
-  readonly invalidations: number;
-  readonly awaitingPlan?: boolean;
   readonly plan: DynamicPlan;
   readonly results: Readonly<Record<string, import("../domain/checkpoint.ts").Checkpoint>>;
-  readonly resultOperators?: Readonly<Record<string, string>>;
 }
 
 type ExecutionStatus = "active" | "completed" | "aborted";

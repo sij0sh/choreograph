@@ -68,12 +68,8 @@ steps:
       operators: [inspect-op, trace-op]
       repair:
         max_attempts: 2
-        max_replans: 2
   - id: deliver
     run: steps/frame.md
-    repair:
-      strategy: [invalidate, block]
-      scope: investigate
 `, {
     files: ["steps/frame.md", "steps/discover.md"],
     operators: {
@@ -88,10 +84,8 @@ steps:
   const investigate = byId.get("investigate");
   assert.equal(investigate.kind, "plan");
   assert.deepEqual(investigate.operators, ["inspect-op", "trace-op"]);
-  assert.deepEqual(investigate.recovery, { maxAttempts: 2, maxReplans: 2, strategy: ["retry", "invalidate", "replan", "block"] });
-  const deliver = byId.get("deliver");
-  assert.equal(deliver.kind, "task");
-  assert.deepEqual(deliver.recovery, { maxAttempts: 2, maxReplans: 2, strategy: ["invalidate", "block"], scope: "investigate" });
+  assert.deepEqual(investigate.recovery, { maxAttempts: 2 });
+  assert.equal(byId.get("deliver").recovery, undefined, "steps without repair get no recovery override");
 });
 
 
@@ -175,25 +169,23 @@ steps:
       max_attempts: ${LIMITS.nodeAttempts + 2}
 `);
   assert.throws(() => loadWorkflowManifest(attempts), new RegExp(`between 1 and ${LIMITS.nodeAttempts + 1}`));
-  const replans = workflowDir("replans", `
+  const rejected = workflowDir("rejected", `
 description: x
 steps:
   - run: steps/frame.md
     repair:
-      max_replans: ${LIMITS.replans + 1}
+      max_replans: 1
+      strategy: [retry]
 `);
-  assert.throws(() => loadWorkflowManifest(replans), new RegExp(`between 1 and ${LIMITS.replans}`));
+  assert.throws(() => loadWorkflowManifest(rejected), /unknown steps\[0\]\.repair key/);
   const edge = loadWorkflowManifest(workflowDir("edge", `
 description: x
 steps:
   - run: steps/frame.md
     repair:
       max_attempts: ${LIMITS.nodeAttempts + 1}
-      max_replans: ${LIMITS.replans}
 `));
-  const task = edge.root.children[0];
-  assert.equal(task.recovery.maxAttempts, LIMITS.nodeAttempts + 1);
-  assert.equal(task.recovery.maxReplans, LIMITS.replans);
+  assert.deepEqual(edge.root.children[0].recovery, { maxAttempts: LIMITS.nodeAttempts + 1 });
 });
 
 test("containment and size rules still hold", () => {
@@ -400,7 +392,7 @@ steps:
       stdout: json
       stderr: text
       maxCaptureBytes: 1024
-    repair: { max_attempts: 1, strategy: [block] }
+    repair: { max_attempts: 1 }
     output: report
 `);
   mkdirSync(join(dir, "contracts"), { recursive: true });

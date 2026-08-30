@@ -86,30 +86,33 @@ function createAttemptState() {
   return { wf, state };
 }
 
-test("plan-create attempt four round-trips and stays resumable", () => {
-  const { wf, state: created } = createAttemptState();
-  let state = created;
-  for (let i = 0; i < 5; i += 1) {
-    const stepped = transition(wf, state, { type: "outcome", outcome: needsWork(cp(`nw ${i + 1}`)) });
-    assert.ok(stepped.ok, stepped.ok ? "" : stepped.error);
-    state = stepped.state;
-  }
-  const leaf = state.stack.at(-1);
+test("plan-create attempt three round-trips and stays resumable", () => {
+  const wf = planRecoveryWorkflow();
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed")) }).state;
+  assert.equal(state.stack.at(-1).kind, "plan");
+  assert.equal(state.stack.at(-1).mode, "create");
+  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("nw 1")) }).state;
+  state = transition(wf, state, { type: "outcome", outcome: needsWork(cp("nw 2")) }).state;
+  const parked = transition(wf, state, { type: "outcome", outcome: needsWork(cp("nw 3")) });
+  assert.ok(parked.ok, parked.ok ? "" : parked.error);
+  assert.equal(parked.effect.kind, "stay");
+  const leaf = parked.state.stack.at(-1);
   assert.equal(leaf.kind, "plan");
   assert.equal(leaf.mode, "create");
-  assert.equal(leaf.attempt, 4);
-  const snapshot = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });
+  assert.equal(leaf.attempt, 3);
+  const snapshot = activeSnapshot({ workflow: wf.name, execution: parked.state, delivered: false });
   const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
   assert.equal(parsed.status, "active");
-  assert.equal(parsed.execution.stack.at(-1).attempt, 4);
+  assert.equal(parsed.execution.stack.at(-1).attempt, 3);
   const migrated = validateAgainstWorkflow(wf, parsed.execution);
   assert.ok(migrated.ok, migrated.ok ? "" : migrated.error);
 
-  const beyond = structuredClone(state);
-  beyond.stack[beyond.stack.length - 1] = { ...beyond.stack.at(-1), attempt: 5 };
+  const beyond = structuredClone(parked.state);
+  beyond.stack[beyond.stack.length - 1] = { ...beyond.stack.at(-1), attempt: 4 };
   const rejected = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: beyond, delivered: false }))));
   assert.equal(rejected.status, "invalid");
-  assert.match(rejected.error, /between 0 and 4/);
+  assert.match(rejected.error, /between 0 and 3/);
 });
 
 test("task, node, and execute-plan attempts keep the single-dimension bound", () => {
@@ -206,9 +209,6 @@ test("persisted plan results are validated entry by entry", () => {
   withResults.plans = {
     "root/investigate": {
       blockId: "investigate",
-      revision: 1,
-      replans: 0,
-      invalidations: 0,
       plan: { version: 1, nodes: [{ id: "node-a", operator: "inspect", objective: "o", done: ["a-done"] }] },
       results: { "node-a": 42 },
     },
@@ -216,7 +216,6 @@ test("persisted plan results are validated entry by entry", () => {
   const garbage = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: withResults, delivered: true }))));
   assert.equal(garbage.status, "invalid");
   assert.match(garbage.error, /results\.node-a/);
-
   const validResults = structuredClone(withResults);
   validResults.plans["root/investigate"].results = { "node-a": { summary: "done" } };
   const valid = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: validResults, delivered: true }))));

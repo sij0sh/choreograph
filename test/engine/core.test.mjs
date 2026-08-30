@@ -131,7 +131,7 @@ test("a blocked checkpoint is replaced by the completed one", () => {
   assert.equal(done.state.checkpoints["root/a"].summary, "done");
 });
 
-test("needs-work retries the same position without storing a checkpoint", () => {
+test("needs-work retries the same position and stores a prior-attempt checkpoint", () => {
   const wf = workflow([task("a")]);
   const started = start(wf, { runId: "r1" });
   const retry = transition(wf, started.state, { type: "outcome", outcome: needsWork(cp("not enough evidence"), [{ target: "a", reason: "missing test" }]) });
@@ -139,7 +139,7 @@ test("needs-work retries the same position without storing a checkpoint", () => 
   assert.equal(retry.effect.kind, "deliver");
   assert.equal(retry.state.stack.at(-1).attempt, 2);
   assert.equal(retry.state.stack.at(-1).blockId, "a");
-  assert.equal(Object.keys(retry.state.checkpoints).length, 0);
+  assert.equal(retry.state.checkpoints["root/a"].summary, "not enough evidence", "the retry keeps the prior attempt summary at the current key");
 });
 
 test("needs-work past the attempt bound escalates to a blocked stay", () => {

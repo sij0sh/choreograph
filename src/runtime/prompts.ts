@@ -137,25 +137,12 @@ const PLAN_SCHEMA_SECTION = [
   "On completion, `checkpoint.data.plan` must be a JSON object:",
   '`{ "version": 1, "nodes": [ { "id", "operator", "objective", "dependsOn"?, "evidence"?, "done" } ] }`',
   `- 2 to ${LIMITS.planNodes} nodes; unique ids matching ${ID_PATTERN}; each operator must appear in the registry above.`,
-  "- `dependsOn` names only earlier nodes in declaration order or retained completed node ids.",
+  "- `dependsOn` names only earlier nodes in declaration order.",
   "- `done` lists 1 to " + LIMITS.planNodeListItems + " criterion ids for this node's completion; each entry must match " + ID_PATTERN + " (lowercase ids like `paths-mapped`, never prose sentences).",
   '- Nodes whose operator is marked "(process)" run as a local process with no model turn: they take neither `done` nor `evidence`, and receive their `dependsOn` results as JSON on stdin.',
   `- Unknown keys and plans above ${LIMITS.planBytes / 1024} KiB are rejected.`,
 ].join("\n");
 
-function retainedResults(workflow: Workflow, execution: PlanExecution): string {
-  const lines: string[] = [];
-  for (const node of execution.plan.nodes) {
-    if (!Object.hasOwn(execution.results, node.id)) continue;
-    lines.push(`- \`${node.id}\` [${node.operator}]: ${execution.results[node.id].summary}`);
-  }
-  for (const id of Object.keys(execution.results).filter((resultId) => !execution.plan.nodes.some((node) => node.id === resultId)).sort()) {
-    const operator = execution.resultOperators?.[id];
-    const suffix = operator ? ` [${operator}]` : "";
-    lines.push(`- \`${id}\`${suffix} (retained from an earlier revision): ${execution.results[id].summary}`);
-  }
-  return lines.length ? ["## Retained completed results", ...lines].join("\n") : "";
-}
 
 export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlock, load?: RefValueLoader, tools?: readonly string[], hasHandoffCapsule = false): string {
   const position = currentPosition(workflow, state);
@@ -212,10 +199,6 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
       operatorRoster(workflow, position.plan!.operators),
       PLAN_SCHEMA_SECTION,
     ];
-    if (position.execution) {
-      sections.push(retainedResults(workflow, position.execution));
-      sections.push(`Plan revision ${position.execution.revision}; ${position.execution.replans} replans used.`);
-    }
     sections.push(TRANSITION_CONTRACT);
     return sections.filter((section) => section !== "").join("\n\n");
   }
@@ -227,7 +210,7 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
     .map((dependency) => ({ dependency, result: execution.results[dependency] }))
     .map((entry) => {
       const producer = execution.plan.nodes.find((candidate) => candidate.id === entry.dependency);
-      const operatorId = producer?.operator ?? execution.resultOperators?.[entry.dependency];
+      const operatorId = producer?.operator;
       const producerOperator = operatorId ? workflow.operators?.get(operatorId) : undefined;
       if (!producerOperator?.output) return { ...entry, operator: undefined, value: undefined };
       const value = entry.result.data === undefined ? {} : entry.result.data;
@@ -256,7 +239,7 @@ export function renderPrompt(workflow: Workflow, state: Execution, read: ReadBlo
   const nodeIndex = execution.plan.nodes.findIndex((entry) => entry.id === node.id);
   return [
     ...header,
-    `Node ${nodeIndex + 1}/${execution.plan.nodes.length}: \`${node.id}\` (plan revision ${execution.revision})`,
+    `Node ${nodeIndex + 1}/${execution.plan.nodes.length}: \`${node.id}\``,
     "",
     ...controls,
     "",

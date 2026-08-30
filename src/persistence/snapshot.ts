@@ -1,7 +1,7 @@
 import type { Execution, Frame } from "../domain/execution.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
-import { LIMITS, PLAN_CREATE_ATTEMPT_MAX } from "../domain/limits.ts";
+import { LIMITS } from "../domain/limits.ts";
 import type { PlanExecution } from "../domain/execution.ts";
 import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.ts";
@@ -27,8 +27,9 @@ function invocationsAt(value: unknown, label: string): Record<string, NodeInvoca
     if (!RUNNER_KINDS.includes(item.runner as RunnerKind)) throw new Error(`${label}.${key}.runner must be one of: ${RUNNER_KINDS.join(", ")}`);
     if (!NODE_STATUSES.includes(item.status as NodeStatus)) throw new Error(`${label}.${key}.status must be one of: ${NODE_STATUSES.join(", ")}`);
     const attempt = item.attempt;
-    if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 1 || attempt > PLAN_CREATE_ATTEMPT_MAX) {
-      throw new Error(`${label}.${key}.attempt must be an integer between 1 and ${PLAN_CREATE_ATTEMPT_MAX}`);
+    const attemptMax = LIMITS.nodeAttempts + 1;
+    if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 1 || attempt > attemptMax) {
+      throw new Error(`${label}.${key}.attempt must be an integer between 1 and ${attemptMax}`);
     }
     invocations[key] = { blockId, key: invocationKey, runner: item.runner as RunnerKind, status: item.status as NodeStatus, attempt };
   }
@@ -88,7 +89,7 @@ function frameAt(value: unknown, label: string): Frame {
       return { kind, blockId, key, attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
     case "plan": {
       if (raw.mode !== "create" && raw.mode !== "execute") throw new Error(`${label}.mode must be create or execute`);
-      const attemptMax = raw.mode === "create" ? PLAN_CREATE_ATTEMPT_MAX : LIMITS.nodeAttempts + 1;
+      const attemptMax = LIMITS.nodeAttempts + 1;
       return { kind, blockId, key, mode: raw.mode, attempt: indexAt("attempt", attemptMax) || 1 };
     }
     case "node":
@@ -126,20 +127,9 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
   for (const [key, entry] of Object.entries(raw)) {
     const planRaw = objectAt(entry, `${label}.${key}`);
     for (const field of Object.keys(planRaw)) {
-      if (!["blockId", "revision", "replans", "invalidations", "awaitingPlan", "plan", "results", "resultOperators"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted plan field`);
+      if (!["blockId", "plan", "results"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted plan field`);
     }
-    if (planRaw.awaitingPlan !== undefined && typeof planRaw.awaitingPlan !== "boolean") throw new Error(`${label}.${key}.awaitingPlan must be a boolean`);
     const blockId = requireString(planRaw.blockId, `${label}.${key}.blockId`);
-    const revision = planRaw.revision;
-    const replans = planRaw.replans;
-    const invalidations = planRaw.invalidations ?? 0;
-    if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1) throw new Error(`${label}.${key}.revision must be a positive integer`);
-    if (typeof replans !== "number" || !Number.isInteger(replans) || replans < 0 || replans > LIMITS.replans) {
-      throw new Error(`${label}.${key}.replans must be an integer between 0 and ${LIMITS.replans}`);
-    }
-    if (typeof invalidations !== "number" || !Number.isInteger(invalidations) || invalidations < 0 || invalidations > LIMITS.replans) {
-      throw new Error(`${label}.${key}.invalidations must be an integer between 0 and ${LIMITS.replans}`);
-    }
     const plan = planRaw.plan;
     if (!plan || typeof plan !== "object") throw new Error(`${label}.${key}.plan must be an object`);
     if ((plan as { version?: unknown }).version !== 1) throw new Error(`${label}.${key}.plan.version must be 1`);
@@ -151,21 +141,10 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
       const result = validateCheckpoint(value, `${label}.${key}.results.${id}`);
       results[id] = result;
     }
-    const resultOperatorsRaw = planRaw.resultOperators === undefined ? {} : objectAt(planRaw.resultOperators, `${label}.${key}.resultOperators`);
-    const resultOperators: Record<string, string> = {};
-    for (const [id, operator] of Object.entries(resultOperatorsRaw)) {
-      if (results[id] === undefined) throw new Error(`${label}.${key}.resultOperators.${id} has no matching result`);
-      resultOperators[id] = requireString(operator, `${label}.${key}.resultOperators.${id}`);
-    }
     plans[key] = {
       blockId,
-      revision,
-      replans,
-      invalidations,
-      ...(planRaw.awaitingPlan === true ? { awaitingPlan: true } : {}),
       plan: { version: 1, nodes: nodes as PlanExecution["plan"]["nodes"] },
       results,
-      ...(Object.keys(resultOperators).length > 0 ? { resultOperators } : {}),
     };
   }
   return plans;
