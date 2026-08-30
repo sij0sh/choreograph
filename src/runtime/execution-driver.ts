@@ -3,7 +3,7 @@ import { LIMITS } from "../domain/limits.ts";
 import { processSpecFor } from "../domain/node.ts";
 import type { ArtifactSink } from "../domain/artifacts.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
-import type { Execution } from "../domain/execution.ts";
+import { isParked, type Execution } from "../domain/execution.ts";
 import type { Issue } from "../engine/interpreter.ts";
 import { processLeafAt, transition as engineTransition } from "../engine/interpreter.ts";
 import { activeSnapshot } from "../persistence/snapshot.ts";
@@ -19,9 +19,9 @@ export async function deliverPending(c: CoordinatorInternals): Promise<void> {
   if (c.suppressDelivery || c.state.status !== "active" || c.state.delivered) return;
   const pending = c.state;
   const process = processLeafAt(pending.workflow, pending.execution);
-  if (process && !pending.parked) return;
+  if (process && !isParked(pending.execution)) return;
   const leaf = pending.execution.stack[pending.execution.stack.length - 1];
-  const message = process && pending.parked
+  const message = process && isParked(pending.execution)
     ? [
         controlMessage(pending.execution),
         "",
@@ -89,8 +89,8 @@ export function publishLogs(c: CoordinatorInternals, runId: string, key: string,
   }
 }
 
-export async function drive(c: CoordinatorInternals, active: ActiveState, ctx: UiContext): Promise<Execution> {
-  if (processLeafAt(active.workflow, active.execution) && active.parked) {
+export async function drive(c: CoordinatorInternals, active: ActiveState, ctx: UiContext, rerun = false): Promise<Execution> {
+  if (!rerun && processLeafAt(active.workflow, active.execution) && isParked(active.execution)) {
     await deliverPending(c);
     return active.execution;
   }
@@ -152,27 +152,24 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
       return execution;
     }
     execution = applied.state;
-    const processManifest = c.processHandoffManifest(current, current.execution, applied.state);
     if (applied.effect.kind === "complete") {
-      c.persistManifest(processManifest);
       await c.finishRun(current, ctx, "completed", applied.state);
       return execution;
     }
     const parked = applied.effect.kind === "stay";
-    const next: ActiveState = { ...current, execution: applied.state, delivered: false, ...(parked ? { parked: true } : { parked: undefined }) };
+    const next: ActiveState = { ...current, execution: applied.state, delivered: false };
     const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: false });
     if (!withinMemoryBound(pendingSnapshot)) {
       ctx.ui.notify(`The run's persisted state would exceed ${LIMITS.memoryBytes / 1024} KiB after process ${processKey}; the run is paused. Abort the run or narrow the workflow outputs.`, "error");
       return execution;
     }
     try {
-      c.commit(c.snapshotOf(next, false, processManifest), `process ${processKey} in ${current.workflow.title} run ${current.execution.runId}`);
+      c.commit(c.snapshotOf(next, false), `process ${processKey} in ${current.workflow.title} run ${current.execution.runId}`);
     } catch (error) {
       if (!(error instanceof WorkflowStorageError)) throw error;
       ctx.ui.notify(`${error.message}. The run stays at ${processKey}.`, "error");
       return execution;
     }
-    c.persistManifest(processManifest);
     c.adoptActive(next, ctx);
     if (parked) {
       await deliverPending(c);

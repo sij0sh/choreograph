@@ -10,7 +10,7 @@ import { LIMITS } from "../../src/domain/limits.ts";
 import { ArtifactStore } from "../../src/runtime/artifact-store.ts";
 import { inlineRefs, refLoaderFor, resolveBinding, resolveScriptInputs } from "../../src/runtime/artifacts.ts";
 import { inputSection } from "../../src/runtime/prompts-inputs.ts";
-import { renderPrompt } from "../../src/runtime/prompts.ts";
+import { renderPositionEnvelope } from "../../src/runtime/prompts.ts";
 
 const operators = (output) =>
   new Map([
@@ -125,7 +125,7 @@ test("plan-create prompts gain the overview and declared inputs", () => {
   });
   let state = start(ordered, { runId: "r1" }).state;
   state = transition(ordered, state, { type: "outcome", outcome: completed(cp("framed", { objective: "review" })) }).state;
-  const prompt = renderPrompt(ordered, state, reader({
+  const prompt = renderPositionEnvelope(ordered, state, reader({
     "WORKFLOW.md": "# Overview\nInvariant: cite evidence.",
     "operators/inspect.md": "# Inspect",
   }));
@@ -147,7 +147,7 @@ test("node prompts render full data for contract-bearing dependencies", () => {
     type: "outcome",
     outcome: { status: "completed", met: ["probe-done"], checkpoint: cp("found entry", { entry: "main.ts" }) },
   }).state;
-  const prompt = renderPrompt(wf, state, reader({
+  const prompt = renderPositionEnvelope(wf, state, reader({
     "WORKFLOW.md": "# Overview",
     "operators/inspect.md": "# Inspect\nRead the code.",
   }));
@@ -159,7 +159,7 @@ test("node prompts render full data for contract-bearing dependencies", () => {
 test("prompts stay unchanged for workflows without bindings", () => {
   const wf = workflow([task("frame")]);
   const state = start(wf, { runId: "r1" }).state;
-  const prompt = renderPrompt(wf, state, reader({ "WORKFLOW.md": "# Overview", "steps/frame.md": "# Frame" }));
+  const prompt = renderPositionEnvelope(wf, state, reader({ "WORKFLOW.md": "# Overview", "steps/frame.md": "# Frame" }));
   assert.ok(!prompt.includes("## Inputs"), "no inputs section without bindings");
   assert.match(prompt, /# Frame/);
 });

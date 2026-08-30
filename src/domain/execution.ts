@@ -85,3 +85,8 @@ export function upsertInvocation(
   }
   return invocations;
 }
+/** A run is parked when its leaf position's invocation is waiting on an operator. */
+export function isParked(execution: Execution): boolean {
+  const leaf = execution.stack[execution.stack.length - 1];
+  return leaf !== undefined && execution.invocations?.[leaf.key]?.status === "waiting";
+}

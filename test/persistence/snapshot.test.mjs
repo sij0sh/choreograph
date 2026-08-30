@@ -304,22 +304,20 @@ test("a loop-free v5 snapshot restores identically alongside loop support", () =
   assert.deepEqual(parsed.execution.loops, {});
 });
 
-test("a parked active snapshot round-trips and a parked:false marker is omitted", () => {
+test("active snapshots carry no parked marker; parking lives in the invocation status", () => {
   const { wf, state } = midRunState();
-  const parked = activeSnapshot({ workflow: wf.name, execution: state, delivered: false, parked: true });
-  const parsedParked = parseSnapshot(JSON.parse(JSON.stringify(parked)));
-  assert.equal(parsedParked.status, "active");
-  assert.equal(parsedParked.parked, true, "the parked marker survives the round trip");
+  const data = JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: false })));
+  assert.equal("parked" in data, false, "snapshots carry no parked field");
+  const parsed = parseSnapshot(data);
+  assert.equal(parsed.status, "active");
+  assert.equal("parked" in parsed, false, "the parsed snapshot carries no parked field");
 
-  const plain = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });
-  const data = JSON.parse(JSON.stringify(plain));
-  assert.equal("parked" in data, false, "unparked snapshots carry no parked field");
-  const parsedPlain = parseSnapshot(data);
-  assert.equal(parsedPlain.parked, undefined);
-
-  const rejected = parseSnapshot({ ...data, parked: "yes" });
-  assert.equal(rejected.status, "invalid", "a non-boolean parked marker is rejected");
-});
+  const parkedState = { ...state, invocations: { "root/probe": { blockId: "probe", key: "root/probe", runner: "process", status: "waiting", attempt: 2 } } };
+  const parkedData = JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: parkedState, delivered: false })));
+  assert.equal("parked" in parkedData, false, "a parked run still writes no parked field");
+  const parsedParked = parseSnapshot(parkedData);
+  assert.equal(parsedParked.execution.invocations?.["root/probe"]?.status, "waiting", "the waiting invocation carries the park");
+}, { todo: false });
 
 test("a definition digest and typed invocations round-trip through v5 snapshots", () => {
   const { wf, state } = midRunState();

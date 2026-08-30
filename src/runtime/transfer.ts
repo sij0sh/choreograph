@@ -1,12 +1,11 @@
-import { randomUUID } from "node:crypto";
-import type { HandoffManifestV1 } from "../domain/handoff.ts";
-import { handoffDigest } from "../domain/handoff.ts";
+import { createHash, randomUUID } from "node:crypto";
+import { canonicalJson } from "../domain/json.ts";
 
 export const TRANSFER_ENTRY_TYPE = "choreograph-transfer";
 export const ROLLOVER_COMMAND = "workflow-rollover";
 
-export interface RolloverTransferV1 {
-  readonly v: 1;
+export interface RolloverTransferV2 {
+  readonly v: 2;
   readonly kind: "rollover-prepared";
   readonly transferId: string;
   readonly childSessionId: string;
@@ -15,46 +14,48 @@ export interface RolloverTransferV1 {
   readonly workflow: string;
   readonly terminal: boolean;
   readonly snapshot: unknown;
-  readonly manifest: HandoffManifestV1;
-  readonly previousEpoch: string;
-  readonly seedDigest: string;
+  readonly digest: string;
 }
 
-export interface RolloverCompletedV1 {
-  readonly v: 1;
+export interface RolloverCompletedV2 {
+  readonly v: 2;
   readonly kind: "rollover-completed";
   readonly transferId: string;
   readonly childSessionId: string;
   readonly childSessionFile: string;
-  readonly seedDigest: string;
+  readonly digest: string;
 }
 
-export function createTransfer(fields: Omit<RolloverTransferV1, "v" | "kind" | "transferId" | "childSessionId" | "seedDigest">): RolloverTransferV1 {
+function transferDigest(value: unknown): string {
+  return `sha256-${createHash("sha256").update(canonicalJson(value as never)).digest("hex")}`;
+}
+
+export function createTransfer(fields: Omit<RolloverTransferV2, "v" | "kind" | "transferId" | "childSessionId" | "digest">): RolloverTransferV2 {
   const body = {
-    v: 1 as const,
+    v: 2 as const,
     kind: "rollover-prepared" as const,
     transferId: randomUUID(),
     childSessionId: randomUUID(),
     ...fields,
   };
-  return { ...body, seedDigest: handoffDigest(body) };
+  return { ...body, digest: transferDigest(body) };
 }
 
-export function preparedTransfer(branch: readonly unknown[], transferId?: string): { transfer: RolloverTransferV1; completed?: RolloverCompletedV1 } | undefined {
-  let completed: RolloverCompletedV1 | undefined;
+export function preparedTransfer(branch: readonly unknown[], transferId?: string): { transfer: RolloverTransferV2; completed?: RolloverCompletedV2 } | undefined {
+  let completed: RolloverCompletedV2 | undefined;
   for (let index = branch.length - 1; index >= 0; index -= 1) {
     const entry = branch[index] as { type?: unknown; customType?: unknown; data?: unknown };
     if (entry.type !== "custom" || entry.customType !== TRANSFER_ENTRY_TYPE || !entry.data || typeof entry.data !== "object") continue;
-    const data = entry.data as RolloverTransferV1 | RolloverCompletedV1;
+    const data = entry.data as RolloverTransferV2 | RolloverCompletedV2;
     if (transferId && data.transferId !== transferId) continue;
     if (data.kind === "rollover-completed") {
       completed ??= data;
       continue;
     }
-    if (data.kind === "rollover-prepared" && data.v === 1) {
+    if (data.kind === "rollover-prepared" && data.v === 2) {
       const matching = completed
         && completed.childSessionId === data.childSessionId
-        && completed.seedDigest === data.seedDigest
+        && completed.digest === data.digest
         ? completed
         : undefined;
       return { transfer: data, ...(matching ? { completed: matching } : {}) };
@@ -63,7 +64,7 @@ export function preparedTransfer(branch: readonly unknown[], transferId?: string
   return undefined;
 }
 
-export function validTransferDigest(transfer: RolloverTransferV1): boolean {
-  const { seedDigest: _digest, ...body } = transfer;
-  return handoffDigest(body) === transfer.seedDigest;
+export function validTransferDigest(transfer: RolloverTransferV2): boolean {
+  const { digest: _digest, ...body } = transfer;
+  return transferDigest(body) === transfer.digest;
 }

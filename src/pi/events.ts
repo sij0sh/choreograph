@@ -18,10 +18,5 @@ export function registerLifecycleHandlers(pi: ExtensionAPI, runtime: RuntimeCoor
 
   pi.on("before_agent_start", (event: { systemPrompt: string }) => runtime.handleBeforeAgentStart(event));
 
-  pi.on("context", (event: ContextEvent, ctx: ExtensionContext) => runtime.handleContext(event, ctx));
-
-  pi.on("session_before_compact", (event, ctx) => runtime.handleBeforeCompact(event, ctx));
-  pi.on("session_compact", (event) => runtime.handleCompact(event));
-  (pi as unknown as { on(name: "session_compact_failed", handler: (event: { reason: string; errorMessage?: string; aborted: boolean }) => void): void })
-    .on("session_compact_failed", (event) => runtime.handleCompactFailed(event));
+  pi.on("context", (event: ContextEvent) => runtime.handleContext(event));
 }

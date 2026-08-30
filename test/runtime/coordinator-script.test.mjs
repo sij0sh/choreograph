@@ -136,7 +136,7 @@ test("a parked script persists a waiting invocation in the snapshot", async () =
   );
 });
 
-test("a parked script persists the parked marker in its snapshots", async () => {
+test("a parked script persists a waiting invocation and no parked marker", async () => {
   const h = harness();
   const wf = workflow([script("stuck", { spec: { argv: ["node", "-e", "process.exit(1)"], inheritEnv: ["PATH"] }, recovery: { maxAttempts: 1, strategy: ["block"] } })]);
   const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
@@ -144,10 +144,9 @@ test("a parked script persists the parked marker in its snapshots", async () => 
   await runtime.startWorkflow(h.ctx, wf, "");
   const active = h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active");
   assert.equal("parked" in active[0].data, false, "the pre-run snapshot at the script leaf is not parked");
+  assert.ok(active.every((entry) => !("parked" in entry.data)), "no snapshot carries a parked marker");
   const parked = active.filter((entry) => entry.data.execution.invocations?.["root/stuck"]?.status === "waiting");
-  assert.ok(parked.length >= 1, "the park is snapshotted");
-  assert.ok(parked.every((entry) => entry.data.parked === true), "every park snapshot carries the parked marker");
-  assert.equal(active.at(-1).data.parked, true, "the delivered marker snapshot keeps the parked marker");
+  assert.ok(parked.length >= 1, "the park is snapshotted as a waiting invocation");
   assert.equal(active.at(-1).data.delivered, true, "the park is marked delivered");
 });
 
@@ -174,17 +173,16 @@ test("restore re-executes a script whose persisted invocation is still running",
   revivedHarness.entries.push(...h.entries);
   const last = revivedHarness.entries.filter((entry) => entry.customType === "choreograph").at(-1);
   last.data = structuredClone(last.data);
-  delete last.data.parked;
   last.data.delivered = false;
   last.data.execution.invocations["root/probe"] = { ...last.data.execution.invocations["root/probe"], status: "running" };
   const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read, revivedHarness.storeRoot);
   revived.handleSessionStart(revivedHarness.ctx);
   await settle(revived, revivedHarness);
-  await waitFor(() => readLines(marker) === 2 && revived.state.parked);
+  await waitFor(() => readLines(marker) === 2 && revived.state.execution.invocations?.["root/probe"]?.status === "waiting");
   assert.equal(readLines(marker), 2, "a running script leaf is re-executed instead of inferred as parked");
-  assert.equal(revived.state.parked, true, "the re-executed failure parks again from persisted state");
+  assert.equal(revived.state.execution.invocations?.["root/probe"]?.status, "waiting", "the re-executed failure parks again as a waiting invocation");
   const reparked = revivedHarness.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").at(-1);
-  assert.equal(reparked.data.parked, true, "the re-park persists the marker again");
+  assert.equal(reparked.data.execution.invocations?.["root/probe"]?.status, "waiting", "the re-park persists the waiting invocation again");
 });
 
 test("restore of a parked script run does not re-execute the script", async () => {

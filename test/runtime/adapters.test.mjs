@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { effectiveTools, CONTROL_TOOLS } from "../../src/runtime/capabilities.ts";
 import { statusValue } from "../../src/runtime/status.ts";
-import { readBlockFrom, renderPrompt, rosterPrompt } from "../../src/runtime/prompts.ts";
+import { readBlockFrom, renderPositionEnvelope, renderReportEnvelope, rosterPrompt, controlMessage } from "../../src/runtime/prompts.ts";
 import { completed, cp, loop, sequence, task, workflow } from "../engine/helpers.mjs";
 import { start, transition } from "../../src/engine/interpreter.ts";
 
@@ -64,7 +64,7 @@ function reader(files) {
 test("the task prompt carries instructions, context, criteria, and controls", () => {
   const wf = workflow([task("frame", { done: ["scope-clear"] })]);
   const state = start(wf, { runId: "run-1", target: "runtime" }).state;
-  const prompt = renderPrompt(wf, state, reader({ "WORKFLOW.md": "# Overview\nDo the thing.", "steps/frame.md": "---\nignored: frontmatter\n---\n# Frame\nFrame it." }));
+  const prompt = renderPositionEnvelope(wf, state, reader({ "WORKFLOW.md": "# Overview\nDo the thing.", "steps/frame.md": "---\nignored: frontmatter\n---\n# Frame\nFrame it." }));
   assert.match(prompt, /run-1/);
   assert.match(prompt, /Target: runtime/);
   assert.match(prompt, /# Frame/);
@@ -78,17 +78,17 @@ test("the prompt states the tools granted at the position", () => {
   const state = start(wf, { runId: "r1" }).state;
   const files = { "WORKFLOW.md": "# Overview", "steps/frame.md": "# Frame" };
   const read = reader(files);
-  const narrowed = renderPrompt(wf, state, read, undefined, ["read", "workflow_transition", "workflow_abort", "workflow_retry"]);
+  const narrowed = renderPositionEnvelope(wf, state, read, undefined, ["read", "workflow_transition", "workflow_abort", "workflow_retry"]);
   assert.match(narrowed, /Tools granted at this position: `read`\./);
   assert.ok(!narrowed.includes("`bash`"), "ungranted tools are not listed as granted");
   assert.ok(!narrowed.includes("workflow_retry"), "workflow controls are not reported as file tools");
   assert.match(narrowed, /Tools not listed are unavailable/);
-  const wide = renderPrompt(wf, state, read, undefined, ["read", "bash", "workflow_transition", "workflow_abort"]);
+  const wide = renderPositionEnvelope(wf, state, read, undefined, ["read", "bash", "workflow_transition", "workflow_abort"]);
   assert.match(wide, /Tools granted at this position: `read`, `bash`\./);
   assert.match(wide, /Use bash \(`ls`, `find`, `rg`\) to discover files/);
-  const unlisted = renderPrompt(wf, state, read, undefined, []);
+  const unlisted = renderPositionEnvelope(wf, state, read, undefined, []);
   assert.match(unlisted, /Tools granted at this position: none beyond the workflow controls above\./);
-  const omitted = renderPrompt(wf, state, read);
+  const omitted = renderPositionEnvelope(wf, state, read);
   assert.ok(!omitted.includes("## Tools"), "omitting the tool list omits the section");
 });
 
@@ -98,7 +98,7 @@ test("the plan-create prompt lists operator descriptions but never bodies", () =
   ]);
   const wf = workflow([{ kind: "plan", id: "p", operators: ["inspect"] }], { operators: OPERATORS });
   const state = start(wf, { runId: "r1" }).state;
-  const prompt = renderPrompt(wf, state, reader({ "WORKFLOW.md": "# Overview", "operators/inspect.md": "# Secret operator body" }));
+  const prompt = renderPositionEnvelope(wf, state, reader({ "WORKFLOW.md": "# Overview", "operators/inspect.md": "# Secret operator body" }));
   assert.match(prompt, /`inspect`: Inspect code\./);
   assert.ok(!prompt.includes("Secret operator body"), "planners see descriptions only");
   assert.match(prompt, /checkpoint\.data\.plan/);
@@ -119,7 +119,7 @@ test("the node prompt shows the operator body but not other operators", () => {
     ] } })),
   }).state;
   state = transition(wf, state, { type: "outcome", outcome: { status: "completed", met: ["probe-done"], checkpoint: cp("found entry", { entry: "main.ts" }) } }).state;
-  const prompt = renderPrompt(wf, state, reader({
+  const prompt = renderPositionEnvelope(wf, state, reader({
     "WORKFLOW.md": "# Overview",
     "operators/inspect.md": "# Inspect\nRead the code.",
     "operators/trace.md": "# Trace\nFollow the flow.",
@@ -148,7 +148,7 @@ test("prior checkpoint context follows execution order, not key spelling", () =>
   const wf = workflow([task("zeta"), task("alpha")]);
   let state = start(wf, { runId: "r1" }).state;
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("ZETA-SUMMARY")) }).state;
-  const prompt = renderPrompt(wf, state, reader);
+  const prompt = renderPositionEnvelope(wf, state, reader);
   assert.ok(prompt.includes("ZETA-SUMMARY"), "a checkpoint written before the current position renders regardless of spelling");
 });
 
@@ -160,7 +160,7 @@ test("rule-led bodies render verbatim while real frontmatter still strips", () =
   };
   const wf = workflow([task("frame")]);
   const state = start(wf, { runId: "r1" }).state;
-  const prompt = renderPrompt(wf, state, reader);
+  const prompt = renderPositionEnvelope(wf, state, reader);
   assert.ok(prompt.includes("## Real work"), "a horizontal-rule-led body renders in full");
   assert.ok(prompt.includes("instructions here"));
   assert.ok(prompt.includes("After the rule"));
@@ -170,7 +170,7 @@ test("rule-led bodies render verbatim while real frontmatter still strips", () =
     if (!(path in frontmatterFile)) throw new Error(`missing ${path}`);
     return frontmatterFile[path];
   };
-  const stripped = renderPrompt(wf, state, fmReader);
+  const stripped = renderPositionEnvelope(wf, state, fmReader);
   assert.ok(!stripped.includes("description: fm"), "a real frontmatter mapping still strips");
   assert.ok(stripped.includes("# Body"));
 });
@@ -180,13 +180,13 @@ test("runtime instruction reads enforce the authoring size cap", () => {
   const grownRead = readBlockFrom({ readFileSync: (path) => grown[path] });
   const wf = workflow([task("frame")]);
   const state = start(wf, { runId: "r1" }).state;
-  const prompt = renderPrompt(wf, state, grownRead);
+  const prompt = renderPositionEnvelope(wf, state, grownRead);
   assert.ok(prompt.includes("exceeds 128000 bytes"), "an oversized body yields actionable guidance instead of its content");
   assert.ok(!prompt.includes("xxx"), "the oversized content never renders");
 
   const normal = { "WORKFLOW.md": "# Overview", "steps/frame.md": "# Fine" };
   const normalRead = readBlockFrom({ readFileSync: (path) => normal[path] });
-  const okPrompt = renderPrompt(wf, state, normalRead);
+  const okPrompt = renderPositionEnvelope(wf, state, normalRead);
   assert.ok(okPrompt.includes("# Fine"), "in-bound bodies still render");
 });
 
@@ -194,7 +194,7 @@ test("loop body prompts carry the iteration context and current item", () => {
   const wf = workflow([task("gather"), loop("review"), task("deliver")]);
   let state = start(wf, { runId: "run-2" }).state;
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("gathered", { files: ["alpha.md", "beta.md"] })) }).state;
-  const prompt = renderPrompt(
+  const prompt = renderPositionEnvelope(
     wf,
     state,
     reader({ "WORKFLOW.md": "# Overview", "steps/gather.md": "# Gather", "steps/review-step.md": "# Review one", "steps/deliver.md": "# Deliver" }),
@@ -202,5 +202,60 @@ test("loop body prompts carry the iteration context and current item", () => {
   assert.match(prompt, /## Loop context/);
   assert.match(prompt, /Loop `review` \(for each\), iteration 1 of 2\./);
   assert.match(prompt, /Current item: "alpha\.md"/);
+});
+
+test("prior attempt context renders when the current key holds a checkpoint", () => {
+  const wf = workflow([task("retry-me", { done: ["ok"], recovery: { maxAttempts: 2 } })]);
+  let state = start(wf, { runId: "r1" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: { status: "needs-work", checkpoint: cp("first attempt ended here") } }).state;
+  assert.equal(state.stack.at(-1).attempt, 2, "the engine retries once at the same key");
+  const prompt = renderPositionEnvelope(wf, state, reader({ "WORKFLOW.md": "# Overview", "steps/retry-me.md": "# Retry me" }));
+  assert.match(prompt, /## Prior attempt at this position/, "the current key's checkpoint renders as a prior attempt");
+  assert.match(prompt, /first attempt ended here/);
+  assert.match(prompt, /attempt 2/, "the header states the attempt");
+});
+
+test("prior summaries are always rendered, capped at eight, and ordered oldest to newest", () => {
+  const wf = workflow([task("a"), task("b"), task("c"), task("d"), task("e"), task("f"), task("g"), task("h"), task("i"), task("j"), task("k")]);
+  let state = start(wf, { runId: "r1" }).state;
+  for (const id of ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]) {
+    state = transition(wf, state, { type: "outcome", outcome: completed(cp(`summary-${id}`)) }).state;
+  }
+  const prompt = renderPositionEnvelope(wf, state, reader({ "WORKFLOW.md": "# Overview", "steps/k.md": "# K" }));
+  assert.match(prompt, /## Prior checkpoints/, "prior summaries always render, with or without inputs");
+  const section = prompt.split("## Prior checkpoints")[1].split("##")[0];
+  const entries = section.trim().split("\n").map((line) => line.trim());
+  assert.equal(entries.length, 8, "at most eight prior summaries render");
+  assert.match(entries[0], /summary-c/, "the oldest kept summary renders first");
+  assert.match(entries.at(-1), /summary-j/, "the newest summary renders last");
+  const bytes = Buffer.byteLength(entries.join("\n"), "utf8");
+  assert.ok(bytes <= 8192, `the section stays within the ${8192}-byte budget (got ${bytes})`);
+});
+
+test("budget pressure drops the oldest summaries first", () => {
+  const wf = workflow([task("a"), task("b"), task("c"), task("d"), task("e"), task("f"), task("g"), task("h"), task("i"), task("j")]);
+  let state = start(wf, { runId: "r1" }).state;
+  for (const id of ["a", "b", "c", "d", "e", "f", "g", "h", "i"]) {
+    state = transition(wf, state, { type: "outcome", outcome: completed(cp(`summary-${id} ${"B".repeat(1400)}`)) }).state;
+  }
+  const prompt = renderPositionEnvelope(wf, state, reader({ "WORKFLOW.md": "# Overview", "steps/j.md": "# J" }));
+  const section = prompt.split("## Prior checkpoints")[1].split("##")[0];
+  assert.ok(!section.includes("summary-a"), "the oldest summary drops first under budget pressure");
+  const entries = section.trim().split("\n").map((line) => line.trim());
+  assert.equal(entries.length, 8, "the section caps at eight entries");
+  assert.match(entries.at(-1), /summary-i/, "the newest summary survives");
+  const bytes = Buffer.byteLength(entries.join("\n"), "utf8");
+  assert.ok(bytes <= 8192, `the section stays within the ${8192}-byte budget (got ${bytes})`);
+});
+
+test("control messages name the run, position, and attempt", () => {
+  const wf = workflow([task("frame", { done: ["f"] })]);
+  let state = start(wf, { runId: "run-9" }).state;
+  state = transition(wf, state, { type: "outcome", outcome: { status: "needs-work", checkpoint: cp("missed") } }).state;
+  const message = controlMessage(state);
+  assert.ok(
+    message.startsWith(`Continue workflow \`run-9\` at ${state.stack.at(-1).key} (attempt 2).`),
+    "the boundary message carries run id, position key, and attempt",
+  );
 });
 

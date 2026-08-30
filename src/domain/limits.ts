@@ -18,6 +18,7 @@ export const LIMITS = {
   contractsCount: 16,
   bindingInputs: 8,
   positionInputsBytes: 24_576,
+  positionSummaryBytes: 8_192,
   stackDepth: 24,
   advanceSteps: 10_000,
   scriptArgvItems: 64,
