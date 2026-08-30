@@ -24,6 +24,8 @@ interface ProcessSpec {
   readonly signal?: AbortSignal;
   /** When set, the cwd must resolve (through symlinks) inside this directory. */
   readonly containmentRoot?: string;
+  /** Called synchronously with the child's pid right after spawn. Throwing kills the child and fails the dispatch (fail closed). */
+  readonly onSpawn?: (pid: number) => void;
 }
 
 const GRACE_KILL_MS = 5_000;
@@ -108,6 +110,16 @@ export function runProcess(spec: ProcessSpec): Promise<ProcessResult> {
     } catch (error) {
       finish({ timedOut: false, stdout: "", stderr: `spawn failed: ${error instanceof Error ? error.message : String(error)}`, truncated: false });
       return;
+    }
+    if (spec.onSpawn) {
+      try {
+        if (child.pid === undefined) throw new Error("child pid unavailable");
+        spec.onSpawn(child.pid);
+      } catch (error) {
+        signalTree("SIGKILL");
+        finish({ timedOut: false, stdout: "", stderr: `dispatch admission failed: ${error instanceof Error ? error.message : String(error)}`, truncated: false, spawnError: `dispatch admission failed: ${error instanceof Error ? error.message : String(error)}` });
+        return;
+      }
     }
     if (spec.stdin !== undefined && child.stdin) {
       child.stdin.on("error", () => {

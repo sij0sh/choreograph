@@ -9,6 +9,26 @@ export class WorkflowStorageError extends Error {
   }
 }
 
+/** Raised before an append that would exceed the per-session snapshot entry cap. */
+export class SnapshotCapReached extends Error {
+  readonly limit: number;
+  constructor(limit: number) {
+    super(`the session reached its ${limit}-snapshot cap (LIMITS.snapshotEntriesPerSession)`);
+    this.name = "SnapshotCapReached";
+    this.limit = limit;
+  }
+}
+
+/** Counts choreograph snapshot entries in a session branch (cheap counter input). */
+export function countSnapshotEntries(branch: readonly unknown[]): number {
+  let count = 0;
+  for (const entry of branch) {
+    const item = entry as { type?: unknown; customType?: unknown };
+    if (item.type === "custom" && item.customType === SNAPSHOT_TYPE) count += 1;
+  }
+  return count;
+}
+
 export interface SnapshotStore {
   append(snapshot: unknown): void;
 }

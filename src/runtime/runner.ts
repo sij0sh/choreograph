@@ -5,6 +5,7 @@ import type { Issue } from "../engine/interpreter.ts";
 import { LIMITS } from "../domain/limits.ts";
 import type { ProcessResult } from "./process-runner.ts";
 import { runProcess } from "./process-runner.ts";
+import { writeFence } from "./fence.ts";
 
 export interface RunnerContext {
   readonly signal?: AbortSignal;
@@ -47,6 +48,11 @@ export class ProcessRunner implements Runner {
       maxCaptureBytes: processSpec.spec.maxCaptureBytes,
       stdin: payload.payload,
       signal: ctx.signal,
+      onSpawn: (pid) => {
+        // Durable per-invocation fence before the child can act. A write
+        // failure throws, which kills the child and fails the dispatch closed.
+        writeFence(processSpec.cwd, invocation.key, pid, invocation.attempt);
+      },
     }).then((exit) => resultOf(exit));
   }
 }

@@ -29,6 +29,17 @@ export const LIMITS = {
   scriptTimeoutMaxMs: 600_000,
   scriptExitCodes: 32,
   scriptCaptureMaxBytes: 1_048_576,
+  // Stat-before-read budget for whole-file capture publishes (parity with the streamed cap).
+  // Oversize captures fail deterministically at publish/load/materialize/inline instead of
+  // buffering unbounded bytes on the host event loop.
+  scriptCaptureFileBytes: 1_048_576,
+  // Retention sweep at session/run start: evict oldest run dirs beyond these bounds
+  // (never the active run) so <workflowDir>/.choreograph/runs/ cannot grow without bound.
+  runArtifactsKeepRuns: 20,
+  runArtifactsKeepBytes: 268_435_456,
+  // Snapshot commits per session; rollover-capable hosts roll to a fresh child session,
+  // embedders pause the run, so per-session files stay bounded.
+  snapshotEntriesPerSession: 256,
   scriptCaptureFiles: 4,
 } as const;
 

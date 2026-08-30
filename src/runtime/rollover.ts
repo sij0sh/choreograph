@@ -18,7 +18,7 @@ export function prepareRollover(c: CoordinatorInternals, workflow: Workflow, exe
     snapshot,
   });
   c.pi.appendEntry(TRANSFER_ENTRY_TYPE, transfer);
-  c.commit(rolloverSnapshot(workflow.name, execution.runId, transfer.transferId), `rollover preparation for ${workflow.title} run ${execution.runId}`);
+  c.commit(rolloverSnapshot(workflow.name, execution.runId, transfer.transferId), `rollover preparation for ${workflow.title} run ${execution.runId}`, { bypassCap: true });
   c.state = { status: "rollover-pending", transfer };
   c.setTools();
   c.showStatus(ctx);

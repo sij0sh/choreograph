@@ -8,18 +8,17 @@ import { refLoaderFor } from "./artifacts.ts";
 import { ArtifactStore } from "./artifact-store.ts";
 import type { ArtifactRef } from "../domain/artifacts.ts";
 import type { ProcessResult } from "./process-runner.ts";
-import { dirname, isAbsolute, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { start as engineStart, processLeafAt, transition as engineTransition } from "../engine/interpreter.ts";
-import { upsertInvocation, type Execution } from "../domain/execution.ts";
+import { frameAttempt, isAttemptBearingFrame, upsertInvocation, type Execution } from "../domain/execution.ts";
 import { deepEqual, type JsonValue } from "../domain/json.ts";
 import { lastSegment } from "../domain/keys.ts";
-import type { Checkpoint } from "../domain/checkpoint.ts";
 import { LIMITS } from "../domain/limits.ts";
-import type { Issue, TaskOutcome } from "../engine/interpreter.ts";
+import type { TaskOutcome } from "../engine/interpreter.ts";
 import type { ScriptSpec, Workflow } from "../domain/workflow.ts";
 import { blockOf, workflowBlocks } from "../domain/workflow.ts";
 import type { NodeResult } from "./runner.ts";
-import { latestSnapshot, withinMemoryBound, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
+import { countSnapshotEntries, latestSnapshot, SnapshotCapReached, withinMemoryBound, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
 import { activeSnapshot, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../persistence/validate-stored-execution.ts";
 import { effectiveTools, CONTROL_TOOLS } from "./capabilities.ts";
@@ -30,6 +29,7 @@ import { statusValue } from "./status.ts";
 import { DeliveryCoordinator } from "./delivery.ts";
 import { deliverPending as deliverPendingNow, drive as driveRun, settleAgent as settleAgentNow } from "./execution-driver.ts";
 import { performRollover as performRolloverNow, prepareRollover as prepareRolloverNow } from "./rollover.ts";
+import { sweepRunArtifacts, sweepWorkflowArtifacts } from "./retention.ts";
 import type { CoordinatorInternals } from "./internal.ts";
 
 
@@ -124,6 +124,7 @@ export class RuntimeCoordinator {
   private readonly frozenPrompts = new Map<string, string>();
   private readonly promptRead = (path: string, label: string): string => this.frozenPrompts.get(path) ?? this.read(path, label);
   private state: RunState = { status: "idle" };
+  private snapshotEntries: number | null = null;
   private baselineTools: string[] | null = null;
   private readonly delivery: DeliveryCoordinator;
   private readonly artifactStores = new Map<string, ArtifactStore>();
@@ -147,7 +148,12 @@ export class RuntimeCoordinator {
         await this.pi.sendUserMessage(message, { deliverAs: "followUp" });
       },
       commitDelivered: () => {
-        this.commit(this.snapshotOf(this.state.status === "active" ? this.state : undefined, true), `delivered marker`);
+        try {
+          this.commit(this.snapshotOf(this.state.status === "active" ? this.state : undefined, true), `delivered marker`);
+        } catch (error) {
+          // Best effort: a missing delivered marker only re-delivers after a resume.
+          if (!(error instanceof SnapshotCapReached)) throw error;
+        }
       },
       notify: (message, level) => this.notifyCtx.current?.ui.notify(message, level),
     });
@@ -155,9 +161,16 @@ export class RuntimeCoordinator {
 
   private notifyCtx: { current?: UiContext } = {};
 
-  private commit(snapshot: unknown, operation: string): void {
+  private commit(snapshot: unknown, operation: string, options?: { readonly bypassCap?: boolean }): void {
+    // Bound snapshot history per session: rollover-capable hosts roll to a fresh
+    // child session at the cap; embedders pause the run. The rollover marker
+    // itself bypasses the cap so the handoff can always be recorded.
+    if (!options?.bypassCap && this.snapshotEntries !== null && this.snapshotEntries >= LIMITS.snapshotEntriesPerSession) {
+      throw new SnapshotCapReached(LIMITS.snapshotEntriesPerSession);
+    }
     try {
       this.store.append(snapshot);
+      if (this.snapshotEntries !== null) this.snapshotEntries += 1;
     } catch (cause) {
       throw new WorkflowStorageError(operation, cause);
     }
@@ -271,8 +284,8 @@ export class RuntimeCoordinator {
     await deliverPendingNow(this as unknown as CoordinatorInternals);
   }
 
-  private settleAgent(active: ActiveState, raw: { readonly status: "completed" | "needs-work" | "blocked"; readonly met?: readonly string[]; readonly checkpoint: Checkpoint; readonly issues?: readonly Issue[] }): void {
-    settleAgentNow(this as unknown as CoordinatorInternals, active, raw);
+  private settleAgent(active: ActiveState, outcome: TaskOutcome): void {
+    settleAgentNow(this as unknown as CoordinatorInternals, active, outcome);
   }
 
   private adoptActive(state: ActiveState, ctx: UiContext): void {
@@ -295,6 +308,7 @@ export class RuntimeCoordinator {
 
   private beginRun(workflow: Workflow, target: string, ctx: UiContext): ActiveState {
     const runId = newRunId();
+    sweepWorkflowArtifacts(this.workflows, this.defaultArtifactRoot ?? this.runtimeArtifactRoot, runId, (message, level) => ctx.ui.notify(message, level), workflow);
     const started = engineStart(workflow, { runId, target: target.trim() }, this.artifactStoreFor(workflow, runId));
     if (!started.ok) throw new Error(started.error);
     this.freezePromptSources(workflow);
@@ -333,13 +347,7 @@ export class RuntimeCoordinator {
         isError: true,
       };
     }
-    const raw = params as { status: "completed" | "needs-work" | "blocked"; met?: readonly string[]; checkpoint: Checkpoint; issues?: readonly Issue[] };
-    const outcome: TaskOutcome = {
-      status: raw.status,
-      ...(raw.met !== undefined ? { met: raw.met } : {}),
-      checkpoint: raw.checkpoint,
-      ...(raw.issues !== undefined ? { issues: [...raw.issues] } : {}),
-    };
+    const outcome = params as TaskOutcome;
     const result = engineTransition(current.workflow, current.execution, { type: "outcome", outcome }, this.artifactStoreFor(current.workflow, current.execution.runId));
     if (!result.ok) {
       return {
@@ -349,11 +357,11 @@ export class RuntimeCoordinator {
       };
     }
     if (result.effect.kind === "complete") {
-      this.settleAgent(current, raw);
+      this.settleAgent(current, outcome);
       return this.finishRun(current, ctx, "completed", result.state);
     }
     // A blocked position waits for the user in this session; rolling it over would respawn the same blocker forever.
-    const rollover = this.supportsSessionRollover(ctx) && raw.status !== "blocked";
+    const rollover = this.supportsSessionRollover(ctx) && outcome.status !== "blocked";
     const next: ActiveState = { ...current, execution: result.state, delivered: rollover ? false : result.effect.kind === "stay" };
     const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: next.delivered });
     if (!withinMemoryBound(pendingSnapshot)) {
@@ -363,10 +371,25 @@ export class RuntimeCoordinator {
         isError: true,
       };
     }
-    this.settleAgent(current, raw);
+    this.settleAgent(current, outcome);
     try {
       this.commit(this.snapshotOf(next, next.delivered), `transition of ${current.workflow.title} run ${current.execution.runId} to ${result.state.stack.at(-1)?.key ?? "completion"}`);
     } catch (error) {
+      if (error instanceof SnapshotCapReached) {
+        if (this.supportsSessionRollover(ctx)) {
+          this.prepareRollover(current.workflow, next.execution, pendingSnapshot, false, ctx);
+          return {
+            content: [{ type: "text", text: `Recorded ${outcome.status}. The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap; the workflow continues at ${next.execution.stack.at(-1)?.key} in a fresh session.` }],
+            details: { workflow: current.workflow.name, runId: current.execution.runId, position: next.execution.stack.at(-1)?.key, status: "rollover-pending" },
+            terminate: true,
+          };
+        }
+        return {
+          content: [{ type: "text", text: `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap, so the transition was not committed. The run stays at ${current.execution.stack.at(-1)?.key}. Continue in a fresh session or raise LIMITS.snapshotEntriesPerSession.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, position: current.execution.stack.at(-1)?.key, status: "snapshot-cap" },
+          isError: true,
+        };
+      }
       if (!(error instanceof WorkflowStorageError)) throw error;
       return {
         content: [{ type: "text", text: `${error.message}. The run stays at ${current.execution.stack.at(-1)?.key}.` }],
@@ -378,6 +401,23 @@ export class RuntimeCoordinator {
     this.suppressDelivery = rollover;
     try {
       await this.drive(next, ctx);
+    } catch (error) {
+      if (error instanceof SnapshotCapReached) {
+        if (this.supportsSessionRollover(ctx)) {
+          this.prepareRollover(current.workflow, this.state.status === "active" ? this.state.execution : next.execution, this.snapshotOf(this.state.status === "active" ? this.state : next, false), false, ctx);
+          return {
+            content: [{ type: "text", text: `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap during script execution; the workflow continues in a fresh session.` }],
+            details: { workflow: current.workflow.name, runId: current.execution.runId, status: "rollover-pending" },
+            terminate: true,
+          };
+        }
+        return {
+          content: [{ type: "text", text: `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap during script execution; the run is paused at ${this.state.status === "active" ? this.state.execution.stack.at(-1)?.key : current.execution.stack.at(-1)?.key}. Continue in a fresh session or raise LIMITS.snapshotEntriesPerSession.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, status: "snapshot-cap" },
+          isError: true,
+        };
+      }
+      throw error;
     } finally {
       this.suppressDelivery = false;
     }
@@ -392,7 +432,7 @@ export class RuntimeCoordinator {
       const active = this.state;
       this.prepareRollover(active.workflow, active.execution, this.snapshotOf(active, false), false, ctx);
       return {
-        content: [{ type: "text", text: `Recorded ${raw.status}. The workflow continues at ${active.execution.stack.at(-1)?.key} in a fresh session.` }],
+        content: [{ type: "text", text: `Recorded ${outcome.status}. The workflow continues at ${active.execution.stack.at(-1)?.key} in a fresh session.` }],
         details: { workflow: active.workflow.name, runId: active.execution.runId, position: active.execution.stack.at(-1)?.key, status: "rollover-pending" },
         terminate: true,
       };
@@ -403,11 +443,11 @@ export class RuntimeCoordinator {
           type: "text",
           text:
             result.effect.kind === "stay"
-              ? `Recorded ${raw.status}. The run stays at ${this.state.execution.stack.at(-1)?.key}${raw.status === "blocked" ? " and waits for the user" : ""}; the checkpoint is saved.`
-              : `Recorded ${raw.status}. Continue at ${this.state.execution.stack.at(-1)?.key}; instructions arrive in the next message.`,
+              ? `Recorded ${outcome.status}. The run stays at ${this.state.execution.stack.at(-1)?.key}${outcome.status === "blocked" ? " and waits for the user" : ""}; the checkpoint is saved.`
+              : `Recorded ${outcome.status}. Continue at ${this.state.execution.stack.at(-1)?.key}; instructions arrive in the next message.`,
         },
       ],
-      details: { workflow: this.state.workflow.name, runId: this.state.execution.runId, position: this.state.execution.stack.at(-1)?.key, status: raw.status === "blocked" ? "blocked" : "active" },
+      details: { workflow: this.state.workflow.name, runId: this.state.execution.runId, position: this.state.execution.stack.at(-1)?.key, status: outcome.status === "blocked" ? "blocked" : "active" },
     };
   }
 
@@ -436,6 +476,13 @@ export class RuntimeCoordinator {
     try {
       this.commit(terminalSnapshot(status, current.workflow.name, current.execution.runId, final), `${status === "completed" ? "completion" : "abort"} of ${current.workflow.title} run ${current.execution.runId}`);
     } catch (error) {
+      if (error instanceof SnapshotCapReached) {
+        return {
+          content: [{ type: "text", text: `The run ${status}, but the session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap, so its terminal record was not committed. Continue in a fresh session or raise LIMITS.snapshotEntriesPerSession.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, status: "snapshot-cap" },
+          isError: true,
+        };
+      }
       if (!(error instanceof WorkflowStorageError)) throw error;
       return {
         content: [{ type: "text", text: `${error.message}. The run stays active at ${current.execution.stack.at(-1)?.key}.` }],
@@ -471,13 +518,13 @@ export class RuntimeCoordinator {
     await this.registry.cancelAll();
     const process = processLeafAt(current.workflow, current.execution);
     const leaf = current.execution.stack[current.execution.stack.length - 1];
-    const execution = leaf && (leaf.kind === "task" || leaf.kind === "plan" || leaf.kind === "node")
+    const execution = leaf && isAttemptBearingFrame(leaf)
       ? { ...current.execution, status: "aborted" as const, invocations: upsertInvocation(current.execution, leaf.key, {
           blockId: leaf.blockId,
           key: leaf.key,
           runner: process ? "process" : "agent",
           status: "canceled",
-          attempt: "attempt" in leaf ? leaf.attempt : 1,
+          attempt: frameAttempt(leaf),
         }) }
       : { ...current.execution, status: "aborted" as const };
     return this.finishRun(current, ctx, "aborted", execution);
@@ -500,6 +547,21 @@ export class RuntimeCoordinator {
     try {
       this.commit(this.snapshotOf(next, false), `retry of process ${process.key} in ${current.workflow.title} run ${current.execution.runId}`);
     } catch (error) {
+      if (error instanceof SnapshotCapReached) {
+        if (this.supportsSessionRollover(ctx)) {
+          this.prepareRollover(current.workflow, current.execution, this.snapshotOf(current, false), false, ctx);
+          return {
+            content: [{ type: "text", text: `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap; the run continues in a fresh session, where you can retry process ${process.key}.` }],
+            details: { workflow: current.workflow.name, runId: current.execution.runId, position: current.execution.stack.at(-1)?.key, status: "rollover-pending" },
+            terminate: true,
+          };
+        }
+        return {
+          content: [{ type: "text", text: `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap, so the retry was not recorded. The run stays parked at ${process.key}. Continue in a fresh session or raise LIMITS.snapshotEntriesPerSession.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, position: process.key, status: "snapshot-cap" },
+          isError: true,
+        };
+      }
       if (!(error instanceof WorkflowStorageError)) throw error;
       return {
         content: [{ type: "text", text: `${error.message}. The run stays parked at ${process.key}.` }],
@@ -512,6 +574,23 @@ export class RuntimeCoordinator {
     this.suppressDelivery = rollover;
     try {
       await this.drive(next, ctx, true);
+    } catch (error) {
+      if (error instanceof SnapshotCapReached) {
+        if (this.supportsSessionRollover(ctx)) {
+          this.prepareRollover(current.workflow, this.state.status === "active" ? this.state.execution : current.execution, this.snapshotOf(this.state.status === "active" ? this.state : current, false), false, ctx);
+          return {
+            content: [{ type: "text", text: `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap during script execution; the workflow continues in a fresh session.` }],
+            details: { workflow: current.workflow.name, runId: current.execution.runId, status: "rollover-pending" },
+            terminate: true,
+          };
+        }
+        return {
+          content: [{ type: "text", text: `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap during script execution; the run is paused at ${this.state.status === "active" ? this.state.execution.stack.at(-1)?.key : process.key}. Continue in a fresh session or raise LIMITS.snapshotEntriesPerSession.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, status: "snapshot-cap" },
+          isError: true,
+        };
+      }
+      throw error;
     } finally {
       this.suppressDelivery = false;
     }
@@ -548,6 +627,7 @@ export class RuntimeCoordinator {
 
   restoreRun(ctx: UiContext): void {
     const branch = ctx.sessionManager?.getBranch() ?? [];
+    this.snapshotEntries = countSnapshotEntries(branch);
     const pendingTransfer = preparedTransfer(branch);
     if (pendingTransfer) {
       this.state = { status: "rollover-pending", transfer: pendingTransfer.transfer };
@@ -609,6 +689,7 @@ export class RuntimeCoordinator {
     this.state = { status: "idle" };
     this.baselineTools = null;
     this.isolationRunId = undefined;
+    this.snapshotEntries = 0;
     this.delivery.reset();
     void this.registry.cancelAll();
     this.notifyCtx.current = ctx;
@@ -629,6 +710,7 @@ export class RuntimeCoordinator {
       }
     }
     this.setTools();
+    sweepWorkflowArtifacts(this.workflows, this.defaultArtifactRoot ?? this.runtimeArtifactRoot, undefined, (message, level) => ctx.ui.notify(message, level));
     this.restoreRun(ctx);
     this.setTools();
     this.showStatus(ctx);

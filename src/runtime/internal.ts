@@ -18,7 +18,7 @@ export interface CoordinatorInternals {
   readonly pi: PiFacade;
   readonly workflows: readonly Workflow[];
   now(): number;
-  commit(snapshot: unknown, operation: string): void;
+  commit(snapshot: unknown, operation: string, options?: { readonly bypassCap?: boolean }): void;
   snapshotOf(state: ActiveState | undefined, delivered: boolean): unknown;
   artifactStoreFor(workflow: Workflow, runId: string): ArtifactStore;
   setTools(): void;

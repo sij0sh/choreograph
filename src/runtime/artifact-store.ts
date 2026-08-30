@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { ARTIFACT_MEDIA_TYPES, type ArtifactSink, isArtifactRef, type ArtifactRef } from "../domain/artifacts.ts";
 import { canonicalJson, isJsonValue, type JsonValue } from "../domain/json.ts";
+import { LIMITS } from "../domain/limits.ts";
 
 type LoadResult =
   | { readonly ok: true; readonly content: Buffer }
@@ -62,6 +63,17 @@ export class ArtifactStore {
   }
 
   publishFile(name: string, invocationKey: string, path: string): ArtifactRef {
+    // Budget before buffering: reject oversize captures with a stat instead of
+    // reading whole files into the host heap and blocking the event loop.
+    let size: number;
+    try {
+      size = statSync(path).size;
+    } catch (error) {
+      throw new Error(`capture file "${path}" could not be inspected: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (size > LIMITS.scriptCaptureFileBytes) {
+      throw new Error(`capture file "${path}" is ${size} bytes, over the ${LIMITS.scriptCaptureFileBytes}-byte capture budget (LIMITS.scriptCaptureFileBytes)`);
+    }
     return this.write(name, invocationKey, readFileSync(path), ARTIFACT_MEDIA_TYPES.bytes);
   }
 
@@ -78,6 +90,10 @@ export class ArtifactStore {
     if (!path) return { ok: false, error: `artifact checksum "${ref.checksum}" is not a sha-256 digest` };
     let content: Buffer;
     try {
+      const stat = statSync(path);
+      if (stat.size > LIMITS.scriptCaptureFileBytes) {
+        return { ok: false, error: `artifact ${ref.checksum} is ${stat.size} bytes, over the ${LIMITS.scriptCaptureFileBytes}-byte capture budget (LIMITS.scriptCaptureFileBytes)` };
+      }
       content = readFileSync(path);
     } catch (error) {
       return { ok: false, error: `artifact ${ref.checksum} could not be read: ${error instanceof Error ? error.message : String(error)}` };
@@ -97,7 +113,21 @@ export class ArtifactStore {
     const target = join(workspaceDir, MATERIALIZE_DIR, hex);
     try {
       mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, loaded.content);
+      let existing = -1;
+      try {
+        existing = statSync(target).size;
+      } catch {
+        // Absent target: write it below.
+      }
+      if (existing !== loaded.content.length) {
+        // Content-addressed bytes: a same-size copy is byte-identical, so only a
+        // missing or wrong-sized copy is rewritten. The temp+rename replace means
+        // concurrent readers of the shared workspace see complete-old or
+        // complete-new, never a torn file.
+        const temp = `${target}.tmp-${process.pid}`;
+        writeFileSync(temp, loaded.content);
+        renameSync(temp, target);
+      }
     } catch (error) {
       return { ok: false, error: `artifact ${ref.checksum} could not be materialized: ${error instanceof Error ? error.message : String(error)}` };
     }
@@ -110,7 +140,13 @@ export class ArtifactStore {
     const target = join(this.rootDir, OBJECTS_DIR, checksum.slice("sha256-".length));
     try {
       mkdirSync(dirname(target), { recursive: true });
-      if (!readAndCompare(target, content)) writeFileSync(target, content);
+      if (!readAndCompare(target, content)) {
+        // Atomic replace so a crash mid-write cannot leave a permanently torn
+        // object that parks runs via the checksum path.
+        const temp = `${target}.tmp-${process.pid}`;
+        writeFileSync(temp, content);
+        renameSync(temp, target);
+      }
     } catch (error) {
       throw new Error(`artifact "${name}" could not be stored: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -126,6 +162,9 @@ export class ArtifactStore {
 
 function readAndCompare(path: string, content: Buffer): boolean {
   try {
+    // Size short-circuit: mismatched size cannot have equal content, which
+    // bounds the dedupe re-read to the incoming content's length.
+    if (statSync(path).size !== content.length) return false;
     return readFileSync(path).equals(content);
   } catch {
     return false;

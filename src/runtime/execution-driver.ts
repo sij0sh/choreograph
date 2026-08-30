@@ -2,13 +2,18 @@ import { dirname } from "node:path";
 import { LIMITS } from "../domain/limits.ts";
 import { processSpecFor } from "../domain/node.ts";
 import type { ArtifactSink } from "../domain/artifacts.ts";
-import type { Checkpoint } from "../domain/checkpoint.ts";
-import { isParked, type Execution } from "../domain/execution.ts";
-import type { Issue } from "../engine/interpreter.ts";
-import { processLeafAt, transition as engineTransition } from "../engine/interpreter.ts";
+import {
+  frameAttempt,
+  isAgentDispatchFrame,
+  isParked,
+  type AgentDispatchFrame,
+  type Execution,
+} from "../domain/execution.ts";
+import { processLeafAt, transition as engineTransition, type TaskOutcome } from "../engine/interpreter.ts";
 import { activeSnapshot } from "../persistence/snapshot.ts";
-import { withinMemoryBound, WorkflowStorageError } from "../persistence/store.ts";
+import { withinMemoryBound, SnapshotCapReached, WorkflowStorageError } from "../persistence/store.ts";
 import { resolveScriptInputs } from "./artifacts.ts";
+import { consultFence, removeFence } from "./fence.ts";
 import { controlMessage } from "./prompts.ts";
 import { captureScriptFiles } from "./script-capture.ts";
 import type { NodeResult } from "./runner.ts";
@@ -32,20 +37,20 @@ export async function deliverPending(c: CoordinatorInternals): Promise<void> {
     : controlMessage(pending.execution);
   const delivered = await c.delivery.deliver({
     runId: pending.execution.runId,
-    key: leaf ? `${leaf.key}#attempt-${"attempt" in leaf ? leaf.attempt : 1}` : "start",
+    key: leaf ? `${leaf.key}#attempt-${frameAttempt(leaf)}` : "start",
     message,
     isLive: () => c.state === pending,
   });
   if (delivered && c.state === pending) c.state = { ...pending, delivered: true };
 }
 
-export function dispatchAgent(c: CoordinatorInternals, active: ActiveState, leaf: Execution["stack"][number]): void {
+export function dispatchAgent(c: CoordinatorInternals, active: ActiveState, leaf: AgentDispatchFrame): void {
   const invocation = active.execution.invocations?.[leaf.key] ?? {
     blockId: leaf.blockId,
     key: leaf.key,
     runner: "agent" as const,
     status: "running" as const,
-    attempt: "attempt" in leaf ? leaf.attempt : 1,
+    attempt: frameAttempt(leaf),
   };
   c.registry.dispatch(invocation, { runner: "agent", blockId: leaf.blockId });
 }
@@ -53,7 +58,7 @@ export function dispatchAgent(c: CoordinatorInternals, active: ActiveState, leaf
 export function settleAgent(
   c: CoordinatorInternals,
   active: ActiveState,
-  raw: { readonly status: "completed" | "needs-work" | "blocked"; readonly met?: readonly string[]; readonly checkpoint: Checkpoint; readonly issues?: readonly Issue[] },
+  raw: TaskOutcome,
 ): void {
   const key = active.execution.stack.at(-1)?.key;
   if (!key) return;
@@ -72,7 +77,7 @@ export function settleAgent(
         reason: raw.status,
         summary: raw.checkpoint.summary,
         ...(data !== undefined ? { data } : {}),
-        ...(raw.issues !== undefined ? { issues: [...raw.issues] } : {}),
+        ...(raw.status === "needs-work" && raw.issues !== undefined ? { issues: [...raw.issues] } : {}),
       };
   c.registry.complete(key, result);
 }
@@ -104,7 +109,7 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
     const process = processLeafAt(current.workflow, current.execution);
     if (!process) {
       const agentLeaf = current.execution.stack[current.execution.stack.length - 1];
-      if (agentLeaf && (agentLeaf.kind === "task" || agentLeaf.kind === "plan" || agentLeaf.kind === "node")) {
+      if (agentLeaf && isAgentDispatchFrame(agentLeaf)) {
         dispatchAgent(c, current, agentLeaf);
       }
       await deliverPending(c);
@@ -114,9 +119,19 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
     const leaf = current.execution.stack[current.execution.stack.length - 1];
     const recorded = current.execution.invocations?.[processKey];
     const reexecution = recorded !== undefined && recorded.status !== "running";
-    const attempt = reexecution ? recorded.attempt + 1 : recorded?.attempt ?? (leaf && "attempt" in leaf ? leaf.attempt : 1);
-    const invocation = { ...(recorded ?? { blockId: process.blockId, key: processKey, runner: "process" as const, attempt }), status: "running" as const, attempt };
     const processSpec = processSpecFor(process.script, process.blockId, dirname(current.workflow.overviewPath));
+    let attempt = reexecution ? recorded.attempt + 1 : recorded?.attempt ?? (leaf ? frameAttempt(leaf) : 1);
+    if (recorded?.status === "running") {
+      // Resuming a leaf recorded "running": the durable fence left by the
+      // previous instance admits the re-dispatch or parks the run.
+      const fence = consultFence(processSpec.cwd, processKey);
+      if (fence.status === "alive") {
+        ctx.ui.notify(`Script ${processKey} is still running in another process (pid ${fence.pid}; fence ${fence.path}). The run is parked here; stop that process or wait for it to exit, then call workflow_retry.`, "error");
+        return execution;
+      }
+      if (fence.status === "dead" && attempt < LIMITS.nodeAttempts + 1) attempt += 1;
+    }
+    const invocation = { ...(recorded ?? { blockId: process.blockId, key: processKey, runner: "process" as const, attempt }), status: "running" as const, attempt };
     const store = c.artifactStoreFor(current.workflow, current.execution.runId);
     const sink = store.sinkFor(processKey);
     const resolved = resolveScriptInputs(
@@ -134,6 +149,7 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
       .result;
     if (c.state !== current) return execution;
     if (result.status === "canceled") {
+      removeFence(processSpec.cwd, processKey);
       return execution;
     }
     if (!result.exit) {
@@ -142,6 +158,7 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
     }
     const exit = result.exit;
     if (exit.cancelled) {
+      removeFence(processSpec.cwd, processKey);
       return execution;
     }
     const captured = captureScriptFiles(processKey, processSpec.spec, processSpec.cwd, store, exit);
@@ -166,10 +183,15 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
     try {
       c.commit(c.snapshotOf(next, false), `process ${processKey} in ${current.workflow.title} run ${current.execution.runId}`);
     } catch (error) {
+      if (error instanceof SnapshotCapReached) {
+        // The driver cannot roll over; the transition/retry caller owns that choice.
+        throw error;
+      }
       if (!(error instanceof WorkflowStorageError)) throw error;
       ctx.ui.notify(`${error.message}. The run stays at ${processKey}.`, "error");
       return execution;
     }
+    removeFence(processSpec.cwd, processKey);
     c.adoptActive(next, ctx);
     if (parked) {
       await deliverPending(c);
