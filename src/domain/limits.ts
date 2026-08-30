@@ -37,6 +37,13 @@ export const LIMITS = {
   // (never the active run) so <workflowDir>/.choreograph/runs/ cannot grow without bound.
   runArtifactsKeepRuns: 20,
   runArtifactsKeepBytes: 268_435_456,
+  // Materialize-copy retention: scripts consume copies from <cwd>/.choreograph/artifacts/
+  // and evicted copies re-materialize on demand, so the newest bytes within this budget
+  // are kept and older copies are swept at the session/run-start cadence.
+  materializeKeepBytes: 67_108_864,
+  // Copies written within this window are never evicted: a script dispatched with the
+  // copy as input may still be reading it (bounded by the max script timeout).
+  materializeGraceMs: 600_000,
   // Snapshot commits per session; rollover-capable hosts roll to a fresh child session,
   // embedders pause the run, so per-session files stay bounded.
   snapshotEntriesPerSession: 256,
