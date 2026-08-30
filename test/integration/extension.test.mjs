@@ -72,15 +72,15 @@ test("registration exposes commands and exactly four workflow tools", () => {
   assert.equal(ext.tools.get("workflow_start").parameters.properties.name.enum.length, 1);
 });
 
-test("workflow_start rejects a blank target", async () => {
+test("workflow_start defaults a blank target to the entire project", async () => {
   const ext = buildExtension(LEGACY);
   const ctx = ext.ctx();
   ext.handlers.get("session_start")(undefined, ctx);
-  const rejected = await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "   " }, undefined, () => {}, ctx);
-  assert.ok(rejected.isError);
-  assert.equal(rejected.details.status, "missing-target");
-  const missing = await ext.tools.get("workflow_start").execute("id", { name: "demo-run" }, undefined, () => {}, ctx);
-  assert.ok(missing.isError);
+  const started = await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "   " }, undefined, () => {}, ctx);
+  assert.ok(!started.isError);
+  await settle(ext.handlers, ctx);
+  const prompt = ext.handlers.get("before_agent_start")({ systemPrompt: "base" });
+  assert.match(prompt.systemPrompt, /Target: the entire project/);
 });
 
 test("a full run executes through the Pi surface", async () => {
