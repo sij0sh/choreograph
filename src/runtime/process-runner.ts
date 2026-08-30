@@ -11,6 +11,8 @@ export interface ProcessResult {
   readonly stderr: string;
   readonly truncated: boolean;
   readonly spawnError?: string;
+  /** Set when settlement was forced (deadline or post-exit drain) because an escaped descendant held the pipes. */
+  readonly deadlineNote?: string;
 }
 
 interface ProcessSpec {
@@ -29,6 +31,13 @@ interface ProcessSpec {
 }
 
 const GRACE_KILL_MS = 5_000;
+/**
+ * Forced-settle drains (C17): after the child's 'exit', a late 'close' gets
+ * this long before we finish without it; the absolute deadline is
+ * timeoutMs + GRACE_KILL_MS + EXIT_DRAIN_MS, so an escaped descendant holding
+ * the pipes can never wedge the promise past a bounded, spawn-anchored time.
+ */
+const EXIT_DRAIN_MS = 1_000;
 
 type Containment = { readonly real: string } | { readonly error: string };
 
@@ -54,6 +63,8 @@ export function runProcess(spec: ProcessSpec): Promise<ProcessResult> {
     let captured = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let grace: ReturnType<typeof setTimeout> | undefined;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let drain: ReturnType<typeof setTimeout> | undefined;
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     let child: ReturnType<typeof spawn> | undefined;
@@ -71,11 +82,19 @@ export function runProcess(spec: ProcessSpec): Promise<ProcessResult> {
       signalTree("SIGTERM");
       grace = setTimeout(() => signalTree("SIGKILL"), GRACE_KILL_MS);
     };
+    /** Frees the pipes so an escaped descendant holding them cannot keep this process's event loop alive. */
+    const detachStreams = (): void => {
+      child?.stdout?.destroy();
+      child?.stderr?.destroy();
+      child?.stdin?.destroy();
+    };
     const finish = (result: ProcessResult): void => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       if (grace) clearTimeout(grace);
+      if (deadline) clearTimeout(deadline);
+      if (drain) clearTimeout(drain);
       spec.signal?.removeEventListener("abort", onAbort);
       resolveResult(result);
     };
@@ -121,6 +140,18 @@ export function runProcess(spec: ProcessSpec): Promise<ProcessResult> {
         return;
       }
     }
+    deadline = setTimeout(() => {
+      if (settled) return;
+      detachStreams();
+      finish({
+        timedOut,
+        ...(cancelled ? { cancelled: true } : {}),
+        stdout: text(stdoutChunks),
+        stderr: text(stderrChunks),
+        truncated: true,
+        deadlineNote: "settlement forced at the absolute deadline; an escaped descendant may hold the pipes",
+      });
+    }, spec.timeoutMs + GRACE_KILL_MS + EXIT_DRAIN_MS);
     if (spec.stdin !== undefined && child.stdin) {
       child.stdin.on("error", () => {
         /* The child may exit without reading stdin; EPIPE here is not a failure. */
@@ -143,6 +174,27 @@ export function runProcess(spec: ProcessSpec): Promise<ProcessResult> {
         truncated,
         spawnError: error instanceof Error ? error.message : String(error),
       });
+    });
+    // 'exit' fires when the child process dies even if stdio is still open
+    // (an escaped descendant can hold the pipes). Give 'close' one short drain
+    // to deliver the remaining capture, then settle with the exit code; the
+    // absolute deadline above stays the backstop.
+    child.on("exit", (code, signal) => {
+      if (settled) return;
+      drain = setTimeout(() => {
+        if (settled) return;
+        detachStreams();
+        finish({
+          code: code ?? undefined,
+          signal: signal ?? undefined,
+          timedOut,
+          ...(cancelled ? { cancelled: true } : {}),
+          stdout: text(stdoutChunks),
+          stderr: text(stderrChunks),
+          truncated,
+          deadlineNote: "settled after the child exited; an escaped descendant held the pipes open",
+        });
+      }, EXIT_DRAIN_MS);
     });
     child.on("close", (code, signal) => {
       finish({

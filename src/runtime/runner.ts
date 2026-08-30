@@ -103,7 +103,7 @@ function stdinOf(inputs: Readonly<Record<string, JsonValue>> | undefined): { rea
 
 function resultOf(exit: ProcessResult): NodeResult {
   if (exit.cancelled) return { status: "canceled", exit };
-  if (exit.timedOut) return { status: "failed", reason: "timed out", exit };
+  if (exit.timedOut) return { status: "failed", reason: exit.deadlineNote ? `timed out (${exit.deadlineNote})` : "timed out", exit };
   if (exit.spawnError !== undefined) return { status: "failed", reason: exit.spawnError, exit };
   if (exit.code === undefined) return { status: "failed", reason: `terminated by signal ${exit.signal ?? "unknown"}`, exit };
   return { status: exit.code === 0 ? "succeeded" : "failed", reason: exit.code === 0 ? undefined : `exited with code ${exit.code}`, exit };
