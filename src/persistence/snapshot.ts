@@ -240,7 +240,11 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
     }
     return { v: 6, status: "rollover-pending", workflow: snapshot.workflow, runId: snapshot.runId, transferId: snapshot.transferId };
   }
-  if (snapshot.status !== "active") return null;
+  // corr-c14: an unknown string status means a corrupt choreograph snapshot;
+  // report it instead of dropping the run silently. A missing or non-string
+  // status keeps returning null so foreign session entries stay skipped.
+  if (typeof snapshot.status !== "string") return null;
+  if (snapshot.status !== "active") return { status: "invalid", error: `unknown snapshot status ${JSON.stringify(snapshot.status)}` };
   if (snapshot.v !== 7) {
     return { status: "invalid", error: "snapshot version must be 7; snapshots from earlier engine versions are not resumable; start the workflow again" };
   }
