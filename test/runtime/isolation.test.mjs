@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isolateWorkflowContext } from "../../src/runtime/isolation.ts";
+import { createContextIsolator, isolateWorkflowContext } from "../../src/runtime/isolation.ts";
 import { controlPrefix } from "../../src/runtime/prompts.ts";
 import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
 import { completed, cp, task, workflow } from "../engine/helpers.mjs";
@@ -58,8 +58,8 @@ test("the latest boundary wins when a run delivers several", () => {
 });
 
 test("a boundary for a different run never matches", () => {
-  const other = user("Continue workflow `other-run` at a.");
-  const messages = [user("request"), other, assistant("work")];
+  const foreign = [user("request"), user("Continue workflow `other-run` at a."), assistant("work")];
+  assert.equal(isolate(foreign, RUN), undefined);
   assert.equal(isolateWorkflowContext(messages, RUN), undefined);
 });
 
@@ -133,4 +133,44 @@ test("handleContext keeps everything before delivery", async () => {
 
   await runtime.transition({ status: "completed", checkpoint: cp("done") }, undefined, h.ctx);
   assert.equal(runtime.handleContext({ messages: [user("anything")] }), undefined, "not yet delivered: safe fallback");
+});
+
+test("the memoized isolator repeats the same slice across events", () => {
+  const isolate = createContextIsolator();
+  const messages = [user("request"), boundary("task-a"), assistant("work")];
+  const first = isolate(messages, RUN);
+  assert.deepEqual(isolate(messages, RUN), first);
+});
+
+test("the memoized isolator follows a newer appended boundary", () => {
+  const isolate = createContextIsolator();
+  const messages = [user("request"), boundary("task-a"), assistant("work")];
+  isolate(messages, RUN);
+  messages.push(boundary("task-b"), assistant("next"));
+  assert.deepEqual(isolate(messages, RUN), [boundary("task-b"), assistant("next")]);
+});
+
+test("a truncated (compacted) array forces a full rescan", () => {
+  const isolate = createContextIsolator();
+  const messages = [user("request"), boundary("task-a"), assistant("work"), boundary("task-b"), assistant("more")];
+  isolate(messages, RUN);
+  messages.length = 3;
+  assert.deepEqual(isolate(messages, RUN), [boundary("task-a"), assistant("work")]);
+});
+
+test("a memoized miss stays undefined while foreign turns append", () => {
+  const isolate = createContextIsolator();
+  const messages = [user("request"), assistant("work")];
+  assert.equal(isolate(messages, RUN), undefined);
+  messages.push(assistant("more"), toolResult("output"));
+  assert.equal(isolate(messages, RUN), undefined);
+});
+
+test("a runId switch forces a full rescan", () => {
+  const isolate = createContextIsolator();
+  const first = [user("request"), boundary("task-a"), assistant("work")];
+  assert.deepEqual(isolate(first, RUN), first.slice(1));
+  const other = user("Continue workflow `other-run` at a.");
+  assert.equal(isolate([user("request"), other, assistant("work")], "other-run"), undefined);
+  assert.deepEqual(isolate(first, RUN), first.slice(1));
 });
