@@ -18,8 +18,8 @@ import type { TaskOutcome } from "../engine/interpreter.ts";
 import type { ScriptSpec, Workflow } from "../domain/workflow.ts";
 import { blockOf, workflowBlocks } from "../domain/workflow.ts";
 import type { NodeResult } from "./runner.ts";
-import { countSnapshotEntries, latestSnapshot, SnapshotCapReached, withinMemoryBound, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
-import { activeSnapshot, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
+import { countSnapshotEntries, latestSnapshot, SnapshotByteBudgetReached, SnapshotCapReached, snapshotBytesInBranch, withinMemoryBound, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
+import { activeSnapshot, deliveredTombstone, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../persistence/validate-stored-execution.ts";
 import { effectiveTools, CONTROL_TOOLS } from "./capabilities.ts";
 import { readBlockFrom, renderPositionEnvelope, renderReportEnvelope, rosterPrompt, summaryMessage, summaryPrefix } from "./prompts.ts";
@@ -112,6 +112,15 @@ const strictRead = (path: string): string | undefined => {
   }
 };
 
+/** Byte-cap wording shared by every snapshot-byte pause and rollover message (fx5a). */
+const byteCapPhrase = (error: SnapshotByteBudgetReached): string =>
+  `The session's snapshot log reached ${error.bytes} of ${error.budget} bytes`;
+const byteCapPhraseLower = (error: SnapshotByteBudgetReached): string =>
+  `the session's snapshot log reached ${error.bytes} of ${error.budget} bytes`;
+
+/** Per-commit serialized byte sizes kept for observability; a bounded ring, never a session leak. */
+const SNAPSHOT_BYTE_LOG_MAX = 1024;
+
 export class RuntimeCoordinator {
   readonly workflows: readonly Workflow[];
   readonly visibleWorkflows: readonly Workflow[];
@@ -125,6 +134,8 @@ export class RuntimeCoordinator {
   private readonly promptRead = (path: string, label: string): string => this.frozenPrompts.get(path) ?? this.read(path, label);
   private state: RunState = { status: "idle" };
   private snapshotEntries: number | null = null;
+  private snapshotBytes = 0;
+  private readonly snapshotByteLog: number[] = [];
   private baselineTools: string[] | null = null;
   private readonly delivery: DeliveryCoordinator;
   private readonly artifactStores = new Map<string, ArtifactStore>();
@@ -150,10 +161,13 @@ export class RuntimeCoordinator {
       },
       commitDelivered: () => {
         try {
-          this.commit(this.snapshotOf(this.state.status === "active" ? this.state : undefined, true), `delivered marker`);
+          // fx5b: an O(1) tombstone replaces the full-state delivered commit; readers
+          // accept both formats. No active state keeps the legacy fallback.
+          const active = this.state.status === "active" ? this.state : undefined;
+          this.commit(active ? deliveredTombstone(active.execution.runId) : this.snapshotOf(undefined, true), `delivered marker`);
         } catch (error) {
           // Best effort: a missing delivered marker only re-delivers after a resume.
-          if (!(error instanceof SnapshotCapReached)) throw error;
+          if (!(error instanceof SnapshotCapReached) && !(error instanceof SnapshotByteBudgetReached)) throw error;
         }
       },
       notify: (message, level) => this.notifyCtx.current?.ui.notify(message, level),
@@ -162,16 +176,35 @@ export class RuntimeCoordinator {
 
   private notifyCtx: { current?: UiContext } = {};
 
+  /** Total serialized snapshot payload bytes committed this session (fx5a observability). */
+  get committedSnapshotBytes(): number {
+    return this.snapshotBytes;
+  }
+
+  /** Recent per-commit serialized byte sizes, oldest first; feeds the dx-c5 delta research. */
+  get snapshotCommitBytes(): readonly number[] {
+    return this.snapshotByteLog;
+  }
+
   private commit(snapshot: unknown, operation: string, options?: { readonly bypassCap?: boolean }): void {
     // Bound snapshot history per session: rollover-capable hosts roll to a fresh
-    // child session at the cap; embedders pause the run. The rollover marker
-    // itself bypasses the cap so the handoff can always be recorded.
-    if (!options?.bypassCap && this.snapshotEntries !== null && this.snapshotEntries >= LIMITS.snapshotEntriesPerSession) {
-      throw new SnapshotCapReached(LIMITS.snapshotEntriesPerSession);
+    // child session at either cap; embedders pause the run. The rollover marker
+    // itself bypasses both caps so the handoff can always be recorded.
+    const bytes = Buffer.byteLength(JSON.stringify(snapshot), "utf8");
+    if (!options?.bypassCap) {
+      if (this.snapshotEntries !== null && this.snapshotEntries >= LIMITS.snapshotEntriesPerSession) {
+        throw new SnapshotCapReached(LIMITS.snapshotEntriesPerSession);
+      }
+      if (this.snapshotBytes + bytes > LIMITS.snapshotBytesPerSession) {
+        throw new SnapshotByteBudgetReached(LIMITS.snapshotBytesPerSession, this.snapshotBytes + bytes);
+      }
     }
     try {
       this.store.append(snapshot);
       if (this.snapshotEntries !== null) this.snapshotEntries += 1;
+      this.snapshotBytes += bytes;
+      this.snapshotByteLog.push(bytes);
+      if (this.snapshotByteLog.length > SNAPSHOT_BYTE_LOG_MAX) this.snapshotByteLog.shift();
     } catch (cause) {
       throw new WorkflowStorageError(operation, cause);
     }
@@ -391,6 +424,21 @@ export class RuntimeCoordinator {
           isError: true,
         };
       }
+      if (error instanceof SnapshotByteBudgetReached) {
+        if (this.supportsSessionRollover(ctx)) {
+          this.prepareRollover(current.workflow, next.execution, pendingSnapshot, false, ctx);
+          return {
+            content: [{ type: "text", text: `Recorded ${outcome.status}. ${byteCapPhrase(error)}; the workflow continues at ${next.execution.stack.at(-1)?.key} in a fresh session.` }],
+            details: { workflow: current.workflow.name, runId: current.execution.runId, position: next.execution.stack.at(-1)?.key, status: "rollover-pending" },
+            terminate: true,
+          };
+        }
+        return {
+          content: [{ type: "text", text: `${byteCapPhrase(error)} (LIMITS.snapshotBytesPerSession), so the transition was not committed. The run stays at ${current.execution.stack.at(-1)?.key}. Continue in a fresh session or raise LIMITS.snapshotBytesPerSession.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, position: current.execution.stack.at(-1)?.key, status: "snapshot-byte-cap", snapshotBytes: error.bytes, snapshotBytesBudget: error.budget },
+          isError: true,
+        };
+      }
       if (!(error instanceof WorkflowStorageError)) throw error;
       return {
         content: [{ type: "text", text: `${error.message}. The run stays at ${current.execution.stack.at(-1)?.key}.` }],
@@ -415,6 +463,21 @@ export class RuntimeCoordinator {
         return {
           content: [{ type: "text", text: `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap during script execution; the run is paused at ${this.state.status === "active" ? this.state.execution.stack.at(-1)?.key : current.execution.stack.at(-1)?.key}. Continue in a fresh session or raise LIMITS.snapshotEntriesPerSession.` }],
           details: { workflow: current.workflow.name, runId: current.execution.runId, status: "snapshot-cap" },
+          isError: true,
+        };
+      }
+      if (error instanceof SnapshotByteBudgetReached) {
+        if (this.supportsSessionRollover(ctx)) {
+          this.prepareRollover(current.workflow, this.state.status === "active" ? this.state.execution : next.execution, this.snapshotOf(this.state.status === "active" ? this.state : next, false), false, ctx);
+          return {
+            content: [{ type: "text", text: `${byteCapPhrase(error)} during script execution; the workflow continues in a fresh session.` }],
+            details: { workflow: current.workflow.name, runId: current.execution.runId, status: "rollover-pending" },
+            terminate: true,
+          };
+        }
+        return {
+          content: [{ type: "text", text: `${byteCapPhrase(error)} (LIMITS.snapshotBytesPerSession) during script execution; the run is paused at ${this.state.status === "active" ? this.state.execution.stack.at(-1)?.key : current.execution.stack.at(-1)?.key}. Continue in a fresh session or raise LIMITS.snapshotBytesPerSession.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, status: "snapshot-byte-cap", snapshotBytes: error.bytes, snapshotBytesBudget: error.budget },
           isError: true,
         };
       }
@@ -456,6 +519,18 @@ export class RuntimeCoordinator {
     return driveRun(this as unknown as CoordinatorInternals, active, ctx, rerun);
   }
 
+  /**
+   * Stop the run in memory when a terminal commit fails (C10). A user-visible
+   * failed abort must leave nothing dispatchable: the in-memory run goes idle
+   * even though the terminal record failed to persist.
+   */
+  private stopLocalRun(run: ActiveState, ctx: UiContext): void {
+    this.state = { status: "idle" };
+    this.artifactStores.delete(run.execution.runId);
+    this.setTools();
+    this.showStatus(ctx);
+  }
+
   private async finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Execution): Promise<ToolResult> {
     if (status === "completed" && this.supportsSessionRollover(ctx)) {
       try {
@@ -482,15 +557,34 @@ export class RuntimeCoordinator {
       this.commit(terminalSnapshot(status, current.workflow.name, current.execution.runId, final), `${status === "completed" ? "completion" : "abort"} of ${current.workflow.title} run ${current.execution.runId}`);
     } catch (error) {
       if (error instanceof SnapshotCapReached) {
+        const stopped = status === "aborted";
+        if (stopped) this.stopLocalRun(current, ctx);
         return {
-          content: [{ type: "text", text: `The run ${status}, but the session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap, so its terminal record was not committed. Continue in a fresh session or raise LIMITS.snapshotEntriesPerSession.` }],
+          content: [{ type: "text", text: stopped
+            ? `The run was aborted, but the session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap, so the terminal record was not committed. The run is stopped locally and the abort is not persisted.`
+            : `The run ${status}, but the session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap, so its terminal record was not committed. Continue in a fresh session or raise LIMITS.snapshotEntriesPerSession.` }],
           details: { workflow: current.workflow.name, runId: current.execution.runId, status: "snapshot-cap" },
           isError: true,
         };
       }
+      if (error instanceof SnapshotByteBudgetReached) {
+        const stopped = status === "aborted";
+        if (stopped) this.stopLocalRun(current, ctx);
+        return {
+          content: [{ type: "text", text: stopped
+            ? `The run was aborted, but ${byteCapPhraseLower(error)} (LIMITS.snapshotBytesPerSession), so the terminal record was not committed. The run is stopped locally and the abort is not persisted.`
+            : `The run ${status}, but ${byteCapPhraseLower(error)} (LIMITS.snapshotBytesPerSession), so its terminal record was not committed. Continue in a fresh session or raise LIMITS.snapshotBytesPerSession.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, status: "snapshot-byte-cap", snapshotBytes: error.bytes, snapshotBytesBudget: error.budget },
+          isError: true,
+        };
+      }
       if (!(error instanceof WorkflowStorageError)) throw error;
+      const stopped = status === "aborted";
+      if (stopped) this.stopLocalRun(current, ctx);
       return {
-        content: [{ type: "text", text: `${error.message}. The run stays active at ${current.execution.stack.at(-1)?.key}.` }],
+        content: [{ type: "text", text: stopped
+          ? `${error.message}. The run was aborted and is stopped locally, but its terminal record failed to persist.`
+          : `${error.message}. The run stays active at ${current.execution.stack.at(-1)?.key}.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, status: "storage-failed" },
         isError: true,
       };
@@ -571,6 +665,21 @@ export class RuntimeCoordinator {
           isError: true,
         };
       }
+      if (error instanceof SnapshotByteBudgetReached) {
+        if (this.supportsSessionRollover(ctx)) {
+          this.prepareRollover(current.workflow, current.execution, this.snapshotOf(current, false), false, ctx);
+          return {
+            content: [{ type: "text", text: `${byteCapPhrase(error)}; the run continues in a fresh session, where you can retry process ${process.key}.` }],
+            details: { workflow: current.workflow.name, runId: current.execution.runId, position: process.key, status: "rollover-pending" },
+            terminate: true,
+          };
+        }
+        return {
+          content: [{ type: "text", text: `${byteCapPhrase(error)} (LIMITS.snapshotBytesPerSession), so the retry was not recorded. The run stays parked at ${process.key}. Continue in a fresh session or raise LIMITS.snapshotBytesPerSession.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, position: process.key, status: "snapshot-byte-cap", snapshotBytes: error.bytes, snapshotBytesBudget: error.budget },
+          isError: true,
+        };
+      }
       if (!(error instanceof WorkflowStorageError)) throw error;
       return {
         content: [{ type: "text", text: `${error.message}. The run stays parked at ${process.key}.` }],
@@ -596,6 +705,21 @@ export class RuntimeCoordinator {
         return {
           content: [{ type: "text", text: `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap during script execution; the run is paused at ${this.state.status === "active" ? this.state.execution.stack.at(-1)?.key : process.key}. Continue in a fresh session or raise LIMITS.snapshotEntriesPerSession.` }],
           details: { workflow: current.workflow.name, runId: current.execution.runId, status: "snapshot-cap" },
+          isError: true,
+        };
+      }
+      if (error instanceof SnapshotByteBudgetReached) {
+        if (this.supportsSessionRollover(ctx)) {
+          this.prepareRollover(current.workflow, this.state.status === "active" ? this.state.execution : current.execution, this.snapshotOf(this.state.status === "active" ? this.state : current, false), false, ctx);
+          return {
+            content: [{ type: "text", text: `${byteCapPhrase(error)} during script execution; the workflow continues in a fresh session.` }],
+            details: { workflow: current.workflow.name, runId: current.execution.runId, status: "rollover-pending" },
+            terminate: true,
+          };
+        }
+        return {
+          content: [{ type: "text", text: `${byteCapPhrase(error)} (LIMITS.snapshotBytesPerSession) during script execution; the run is paused at ${this.state.status === "active" ? this.state.execution.stack.at(-1)?.key : process.key}. Continue in a fresh session or raise LIMITS.snapshotBytesPerSession.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, status: "snapshot-byte-cap", snapshotBytes: error.bytes, snapshotBytesBudget: error.budget },
           isError: true,
         };
       }
@@ -637,6 +761,7 @@ export class RuntimeCoordinator {
   restoreRun(ctx: UiContext): void {
     const branch = ctx.sessionManager?.getBranch() ?? [];
     this.snapshotEntries = countSnapshotEntries(branch);
+    this.snapshotBytes = snapshotBytesInBranch(branch);
     const pendingTransfer = preparedTransfer(branch);
     if (pendingTransfer) {
       this.state = { status: "rollover-pending", transfer: pendingTransfer.transfer };
@@ -699,6 +824,8 @@ export class RuntimeCoordinator {
     this.baselineTools = null;
     this.isolationRunId = undefined;
     this.snapshotEntries = 0;
+    this.snapshotBytes = 0;
+    this.snapshotByteLog.length = 0;
     this.delivery.reset();
     void this.registry.cancelAll();
     this.notifyCtx.current = ctx;

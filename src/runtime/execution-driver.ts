@@ -11,7 +11,7 @@ import {
 } from "../domain/execution.ts";
 import { processLeafAt, transition as engineTransition, type TaskOutcome } from "../engine/interpreter.ts";
 import { activeSnapshot } from "../persistence/snapshot.ts";
-import { withinMemoryBound, SnapshotCapReached, WorkflowStorageError } from "../persistence/store.ts";
+import { withinMemoryBound, SnapshotByteBudgetReached, SnapshotCapReached, WorkflowStorageError } from "../persistence/store.ts";
 import { resolveScriptInputs } from "./artifacts.ts";
 import { consultFence, removeFence } from "./fence.ts";
 import { controlMessage } from "./prompts.ts";
@@ -183,7 +183,7 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
     try {
       c.commit(c.snapshotOf(next, false), `process ${processKey} in ${current.workflow.title} run ${current.execution.runId}`);
     } catch (error) {
-      if (error instanceof SnapshotCapReached) {
+      if (error instanceof SnapshotCapReached || error instanceof SnapshotByteBudgetReached) {
         // The driver cannot roll over; the transition/retry caller owns that choice.
         throw error;
       }
