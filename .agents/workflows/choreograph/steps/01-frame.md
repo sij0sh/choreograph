@@ -10,8 +10,8 @@ written.
 4. Choose a block kind per step. Use a `run:` task for model work with a
    Markdown instruction, a `plan:` block for model-planned work from named
    operators, a `script:` step for a deterministic local process that needs no
-   model turn, and a `for_each` or `repeat_until` loop for bounded repetition
-   of task or script steps.
+   model turn, and a `for_each` loop (one task body, `maxItems` 1 to 8) for
+   bounded repetition over a bound list.
 5. Design the handoffs. For each step that produces structured output, name its output contract and name every downstream consumer of that artifact. WHEN a step consumes an earlier artifact, name the producer.
 6. WHEN a step should run only under a condition on an earlier artifact, give it a `when:` guard naming the producer, an optional `select` JSON Pointer, a closed `op`, and a `value` where the op needs one. Guards make "not applicable" an engine-decided skip instead of a failed or fabricated completion.
 

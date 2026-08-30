@@ -47,7 +47,7 @@ steps:
 
 Rules:
 - Every block id MUST be unique across the workflow.
-- Each step entry MUST use exactly one of `run`, `plan`, `script`, `for_each`, or `repeat_until`; a process-operator step uses `operator` instead.
+- Each step entry MUST use exactly one of `run`, `plan`, `script`, or `for_each`.
 - Omit `legalTools` so every position keeps the session's full toolset. Add `tools` on a task or operator only when that phase needs a narrower ceiling.
 - A `plan:` block MUST list only operator ids that have files.
 - `inputs.from` MUST name a block declared earlier in `steps` order.
@@ -76,8 +76,8 @@ Rules:
   list; `gt`/`gte`/`lt`/`lte` take a finite number.
 - A missing artifact or unresolvable pointer makes every value op false
   (including negations). Use `exists`/`not-exists` to key off presence.
-- A guard registers a dependency edge, so invalidating the producer
-  re-evaluates the guard on the next pass.
+- The engine evaluates the guard whenever the block becomes current: at
+  start and after each transition.
 
 ## Script steps
 
@@ -106,53 +106,28 @@ Rules:
 
 ## Loops
 
-A loop repeats its body under a hard cap. `for_each` consumes a bound list;
-`repeat_until` re-runs until a `when` guard holds.
+A `for_each` loop runs one task body once per item, under a hard cap.
 
 ```yaml
 - id: review-files
   for_each:
     items: { from: gather, select: /data/files }
     body:
-      steps:
-        - run: steps/review-one.md
-          id: read-one
-          inputs: { item: { from: "$item" } }
-        - id: check-one
-          script: { argv: [node, check-one.mjs], stdout: json }
-          inputs: { report: { from: read-one } }
+      run: steps/review-one.md
+      id: review-one
+      inputs: { item: { from: "$item" } }
     maxItems: 8
-- id: fix-until-green
-  repeat_until:
-    body: { run: steps/apply-fix.md }
-    when: { from: apply-fix, select: /data/exitCode, op: equals, value: 0 }
-    maxIterations: 3
 ```
 
 Rules:
-- The cap (`maxItems`/`maxIterations`) is a required integer from 1 to 8.
-- A body holds one `run` step, or a `steps:` list of 1 to 8 task, script, or
-  process-operator entries. Loops and plans are not accepted inside a body.
-- Body steps may bind `$item` (for_each only) or any earlier body step.
-- `repeat_until` is do-while: the guard is evaluated after each iteration; cap
-  exhaustion finishes the loop with `exhausted: true` in its aggregate.
-- The loop writes one aggregate checkpoint: mode, iterations, the `exhausted`
-  flag, and per-iteration outputs. Downstream steps bind `{ from: <loop-id> }`.
-
-## Process operators
-
-In any step list, including a loop body, an `operator:` entry invokes a
-process operator (an operator whose frontmatter declares `script:`) as a
-bounded local step:
-
-```yaml
-- id: fetch-status
-  operator: deploy-status
-  inputs: { brief: { from: observe } }
-```
-
-It accepts `inputs`, `repair`, and `when`, and inherits the operator's
-`output` contract. Model operators cannot use this step form.
+- `maxItems` is a required integer from 1 to 8. The loop finishes when the
+  items run out or the cap is reached.
+- The body holds exactly one `run` step. It accepts `inputs` and may bind
+  `$item`; it rejects `tools`, `done`, `output`, `plan`, `script`, and
+  nested loops.
+- The loop writes one aggregate checkpoint:
+  `{ mode: "for-each", iterations, results: [{ item, outputs }] }`.
+  Downstream steps bind `{ from: <loop-id> }`.
 
 ## Contracts
 
@@ -204,10 +179,10 @@ Rules:
 - `select` is a JSON Pointer (RFC 6901) applied to the producer's artifact.
 - Task producers expose their latest checkpoint.
 - Plan producers expose the engine-generated aggregate
-  `{ version, revision, nodes: [{ id, operator, objective, result }] }`;
-  a pending node's `result` is `null`.
-- Declared inputs replace prior checkpoint summaries, so bind every artifact
-  the step needs.
+  `{ version, nodes: [{ id, operator, objective, result }] }`; a pending
+  node's `result` is `null`.
+- Declared inputs deliver the full artifacts, so bind every artifact the
+  step needs; summaries alone are not data.
 
 ## Operators
 
