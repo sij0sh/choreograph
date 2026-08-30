@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator, ToolResult } from "../runtime/coordinator.ts";
-import { START_TOOL_NAME, WorkflowCompileError } from "../runtime/coordinator.ts";
+import { DEFAULT_TARGET, START_TOOL_NAME, WorkflowCompileError } from "../runtime/coordinator.ts";
 import { ABORT_TOOL_NAME, RETRY_TOOL_NAME, TRANSITION_TOOL_NAME } from "../runtime/capabilities.ts";
 
 const NO_PARAMETERS = { type: "object", properties: {}, additionalProperties: false } as const;
@@ -21,7 +21,7 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
       parameters: Type.Object(
         {
           name: Type.Unsafe<string>({ type: "string", enum: visible.map((workflow) => workflow.name), description: "The workflow to start." }),
-          target: Type.Optional(Type.String({ maxLength: 4096, description: "Required in practice: the concrete subject the workflow should focus on (files, area, question, or defect); at most 4,096 bytes. Calls with a blank target are rejected." })),
+          target: Type.Optional(Type.String({ maxLength: 4096, description: `Optional: the concrete subject the workflow should focus on (files, area, question, or defect); at most 4,096 bytes. Omit or leave blank to target ${DEFAULT_TARGET}.` })),
         },
         { additionalProperties: false },
       ),
@@ -30,14 +30,7 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
         if (!workflow) {
           return { content: [{ type: "text", text: `Unknown workflow: ${params.name}` }], details: { workflow: params.name, status: "unknown" }, isError: true } satisfies ToolResult;
         }
-        const target = typeof params.target === "string" ? params.target.trim() : "";
-        if (!target) {
-          return {
-            content: [{ type: "text", text: `A workflow needs a non-empty target. Name the concrete subject to work on (files, area, question, or defect) and retry.` }],
-            details: { workflow: params.name, status: "missing-target" },
-            isError: true,
-          } satisfies ToolResult;
-        }
+        const target = typeof params.target === "string" ? params.target.trim() : DEFAULT_TARGET;
         let run;
         try {
           run = await runtime.startWorkflow(ctx, workflow, target, signal);
