@@ -6,6 +6,7 @@ import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { blockOf, isCheckpointContractBlock, isTaskFrameBlock } from "../domain/workflow.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
+import type { PlanNode } from "../planning/schema.ts";
 import { loopStateForFrame } from "./run-state-schema.ts";
 
 type ValidationResult = { ok: true; execution: Execution } | { ok: false; error: string };
@@ -82,21 +83,30 @@ function validateLeaf(workflow: Workflow, state: Execution, leaf: Frame): string
 }
 
 function validateCheckpoints(workflow: Workflow, state: Execution): string | undefined {
+  // Loop-invariant plan-node index, built once per validateAgainstWorkflow call
+  // (c3 repair): one enumeration of every plan's nodes, then an O(1) keyed
+  // lookup per checkpoint key. The guarded set keeps the old .find
+  // first-match order if composed keys ever collide.
+  const nodeByCheckpointKey = new Map<string, PlanNode>();
+  for (const [planKey, plan] of Object.entries(state.plans)) {
+    for (const node of plan.plan.nodes) {
+      const checkpointKey = `${planKey}/${node.id}`;
+      if (!nodeByCheckpointKey.has(checkpointKey)) nodeByCheckpointKey.set(checkpointKey, node);
+    }
+  }
   for (const [key, checkpoint] of Object.entries(state.checkpoints)) {
     const last = lastSegment(key);
     const block = blockOf(workflow, last);
-    const nodeEntry = Object.entries(state.plans)
-      .flatMap(([planKey, plan]) => plan.plan.nodes.map((node) => ({ planKey, node })))
-      .find(({ planKey, node }) => `${planKey}/${node.id}` === key);
-    if (!block && !nodeEntry) return `checkpoint key ${key} does not belong to any block in the current workflow`;
+    const node = nodeByCheckpointKey.get(key);
+    if (!block && !node) return `checkpoint key ${key} does not belong to any block in the current workflow`;
     if (checkpoint.skipped === true) continue;
     if (block && isCheckpointContractBlock(block)) {
       const runtimeManaged = block.kind === "script" && hasRuntimeManagedProcessData(state, key, checkpoint.data);
       const problem = runtimeManaged ? undefined : contractError(workflow, block.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
       if (problem) return problem;
     }
-    if (nodeEntry) {
-      const operator = workflow.operators.get(nodeEntry.node.operator);
+    if (node) {
+      const operator = workflow.operators.get(node.operator);
       const problem = contractError(workflow, operator?.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
       if (problem) return problem;
     }
