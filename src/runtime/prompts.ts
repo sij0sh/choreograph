@@ -94,12 +94,11 @@ const TRANSITION_CONTRACT = [
  */
 function priorSummaries(state: Execution, positionKey: string): string {
   const order = state.checkpointOrder ?? Object.keys(state.checkpoints);
-  const prior = order.filter((key) => key !== positionKey && !key.startsWith(`${positionKey}/`));
-  if (prior.length === 0) return "";
   const newestFirst: string[] = [];
   let used = 0;
-  for (let index = prior.length - 1; index >= 0 && newestFirst.length < PRIOR_SUMMARY_LIMIT; index -= 1) {
-    const key = prior[index]!;
+  for (let index = order.length - 1; index >= 0 && newestFirst.length < PRIOR_SUMMARY_LIMIT; index -= 1) {
+    const key = order[index]!;
+    if (key === positionKey || key.startsWith(`${positionKey}/`)) continue;
     const line = `- \`${lastSegment(key)}\`: ${clip(state.checkpoints[key]?.summary ?? "unavailable", PRIOR_SUMMARY_ITEM_BYTES)}`;
     const bytes = Buffer.byteLength(line, "utf8") + 1;
     if (used + bytes > LIMITS.positionSummaryBytes) break;
