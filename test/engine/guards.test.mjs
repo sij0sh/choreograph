@@ -108,14 +108,29 @@ test("a false plan guard clears any stale plan execution", () => {
   assert.equal(Object.keys(state.plans).length, 0);
 });
 
-test("negated value ops fail on missing artifacts rather than skipping", () => {
+test("value ops over missing operands reject the transition with an error (c2)", () => {
   const wf = workflow([
     task("frame"),
     task("deep", { guard: guard("frame", "not-equals", "high", "/data/severity") }),
   ]);
-  let state = start(wf, { runId: "r1" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("framed", { note: "no severity" })) }).state;
-  assert.equal(state.checkpoints["root/deep"].skipped, true);
+  const state = start(wf, { runId: "r1" }).state;
+  const result = transition(wf, state, { type: "outcome", outcome: completed(cp("framed", { note: "no severity" })) });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /guard for deep could not resolve/);
+  assert.match(result.error, /data\/severity not found for not-equals/);
+  // The state is unchanged: no skip was recorded.
+  assert.equal(Object.keys(state.checkpoints).length, 1);
+});
+
+test("ordering ops over non-finite operands reject the transition with an error (c2)", () => {
+  const wf = workflow([
+    task("frame"),
+    task("deep", { guard: guard("frame", "gte", 1, "/data/severity") }),
+  ]);
+  const state = start(wf, { runId: "r1" }).state;
+  const result = transition(wf, state, { type: "outcome", outcome: completed(cp("framed", { severity: "high" })) });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /op "gte" needs a finite number; frame\/data\/severity is string "high"/);
 });
 
 

@@ -492,11 +492,12 @@ Evaluation rules:
 
 - Task producers expose their latest checkpoint; plan producers expose the
   engine-generated aggregate.
-- A missing producer artifact or an unresolvable pointer makes every value op
-  false, including negations. Use `exists` or `not-exists` to key off
-  presence.
+- A missing producer artifact or an unresolvable pointer fails the transition
+  with an error naming the block, the op, and the pointer; it never silently
+  skips. Use `exists` or `not-exists` to key off presence.
 - `equals` and `not-equals` compare canonical JSON. `in` and `not-in` test
-  membership. The comparison ops require finite numbers on both sides.
+  membership against an array. The comparison ops require finite numbers on
+  both sides; anything else fails the transition with an error.
 
 A skipped block records `{ summary, skipped: true }` and never prompts. A
 skipped plan block also drops its plan execution, so consumers never see a
