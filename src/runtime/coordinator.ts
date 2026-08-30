@@ -332,8 +332,6 @@ export class RuntimeCoordinator {
 
   /**
    * The run's artifact store, rooted under the workflow directory so retention stays per-run.
-   * Workflows without a real directory on disk (synthetic or virtual definitions) keep the
-   * inline-checkpoint behavior.
    */
   private artifactStoreFor(workflow: Workflow, runId: string): ArtifactStore {
     const cached = this.artifactStores.get(runId);
@@ -977,7 +975,7 @@ export class RuntimeCoordinator {
     const process = processLeafAt(current.workflow, current.execution);
     if (!process || !current.parked) {
       return {
-        content: [{ type: "text", text: `workflow_retry applies only when the run is parked at a failed script or process operator node; the run is at ${current.execution.stack.at(-1)?.key}.` }],
+        content: [{ type: "text", text: `workflow_retry applies only when the run is parked at a failed script step; the run is at ${current.execution.stack.at(-1)?.key}.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, position: current.execution.stack.at(-1)?.key, status: "not-script" },
         isError: true,
       };
