@@ -1,9 +1,23 @@
 import { createHash } from "node:crypto";
+import { statSync } from "node:fs";
 import { dirname, relative } from "node:path";
 import { canonicalJson, type JsonValue } from "../domain/json.ts";
+import { LIMITS } from "../domain/limits.ts";
 import { workflowBlocks, type Block, type TaskBlock, type Workflow } from "../domain/workflow.ts";
 
 type InstructionReader = (path: string) => string | undefined;
+
+/**
+ * True when the file exists on disk and grew past the bound; undefined when stat
+ * failed (missing or a virtual path), leaving the decision to the reader.
+ */
+function statOverBound(path: string, bound: number): boolean | undefined {
+  try {
+    return statSync(path).size > bound;
+  } catch {
+    return undefined;
+  }
+}
 
 /** A frozen workflow definition: a content digest plus the frozen prompt sources by their workflow-relative paths. */
 export interface FrozenDefinition {
@@ -25,6 +39,12 @@ export function freezeDefinition(workflow: Workflow, read: InstructionReader, wo
   const add = (path: string, label: string): void => {
     const key = rel(path);
     if (contents[key] !== undefined) return;
+    // Stat-first bound (fx2): a file grown past the instruction bound after discovery
+    // is rejected at O(1) with discovery's wording, naming the file and the bound,
+    // instead of being read and hashed in full on every start/resume retry.
+    if (statOverBound(path, LIMITS.instructionFileBytes) === true) {
+      throw new Error(`${label} "${key}" exceeds ${LIMITS.instructionFileBytes} bytes`);
+    }
     const content = read(path);
     if (content === undefined) throw new Error(`${label} "${key}" is not readable; compilation cannot freeze it`);
     contents[key] = content;

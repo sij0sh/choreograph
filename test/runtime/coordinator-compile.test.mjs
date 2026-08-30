@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RuntimeCoordinator, WorkflowCompileError } from "../../src/runtime/coordinator.ts";
@@ -77,5 +77,53 @@ test("restoreRun refuses to resume when the definition no longer compiles", asyn
 
   assert.ok(notices.some((message) => /Cannot resume/.test(message) && /no longer compiles/.test(message) && /not readable/.test(message)), `expected a resume refusal notice, got ${JSON.stringify(notices)}`);
   assert.equal(h.sent.length, sentBeforeRestore, "a refused resume must not deliver messages");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Pin of a compliant fixture's digest: any change to compliant freeze output breaks
+// resume against existing session files, so the exact value is load-bearing (fx2).
+const STABLE_DIGEST = "0dd3a0d29161e181a6ad9da2ee3c30de16e1381e23f3312d3eb2ab62fe26ffa9";
+
+test("startWorkflow refuses fast when a definition file grew past the bound after discovery (fx2)", async () => {
+  const dir = workflowDir("grew-past-bound");
+  const wf = loadWorkflowManifest(dir);
+  const h = harness();
+  const reads = [];
+  const read = (path) => {
+    reads.push(path);
+    return readFileSync(path, "utf8");
+  };
+  const runtime = new RuntimeCoordinator(h.pi, [wf], read);
+
+  writeFileSync(join(dir, "steps", "frame.md"), "# " + "x".repeat(200_000));
+
+  await assert.rejects(
+    () => runtime.startWorkflow(h.ctx, wf, "t"),
+    (error) => {
+      assert.ok(error instanceof WorkflowCompileError, `expected WorkflowCompileError, got ${error?.name}`);
+      assert.match(error.message, /steps[\\/]frame\.md/, "the error names the file");
+      assert.match(error.message, /exceeds 128000 bytes/, "the error names the bound, mirroring discovery");
+      assert.match(error.message, /did not start/);
+      return true;
+    },
+  );
+  assert.ok(!reads.some((path) => path.endsWith("frame.md")), "the grown file is rejected from its stat size without a full read");
+
+  await assert.rejects(() => runtime.startWorkflow(h.ctx, wf, "retry"), /exceeds 128000 bytes/);
+  assert.ok(!reads.some((path) => path.endsWith("frame.md")), "a retry re-rejects at O(1) instead of re-reading");
+
+  writeFileSync(join(dir, "steps", "frame.md"), "# Frame instructions\n");
+  const run = await runtime.startWorkflow(h.ctx, wf, "restored");
+  assert.ok(run, "a failed over-bound freeze does not poison the cache; a compliant file starts");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a compliant definition keeps its digest byte-identical (fx2)", async () => {
+  const dir = workflowDir("stable-digest");
+  const wf = loadWorkflowManifest(dir);
+  const h = harness();
+  const runtime = new RuntimeCoordinator(h.pi, [wf]);
+  const run = await runtime.startWorkflow(h.ctx, wf, "t");
+  assert.equal(run?.execution.definitionDigest, STABLE_DIGEST, "the stat bound must not change compliant freeze output");
   rmSync(dir, { recursive: true, force: true });
 });
