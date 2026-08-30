@@ -5,8 +5,6 @@ import type { Workflow } from "../domain/workflow.ts";
 export const TRANSITION_TOOL_NAME = "workflow_transition";
 export const ABORT_TOOL_NAME = "workflow_abort";
 export const RETRY_TOOL_NAME = "workflow_retry";
-export const RUN_DEFINITION_TOOL_NAME = "workflow_run_definition";
-export const PROMOTE_TOOL_NAME = "workflow_promote";
 export const HANDOFF_READ_TOOL_NAME = "workflow_handoff_read";
 export const CONTROL_TOOLS: readonly string[] = [TRANSITION_TOOL_NAME, ABORT_TOOL_NAME, HANDOFF_READ_TOOL_NAME];
 

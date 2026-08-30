@@ -62,11 +62,11 @@ async function settle(handlers, ctx) {
   await handlers.get("agent_settled")(undefined, ctx);
 }
 
-test("registration exposes commands and exactly six workflow tools", () => {
+test("registration exposes commands and exactly four workflow tools", () => {
   const ext = buildExtension(LEGACY);
   assert.deepEqual(
     [...ext.tools.keys()].sort(),
-    ["workflow_abort", "workflow_promote", "workflow_retry", "workflow_run_definition", "workflow_start", "workflow_transition"],
+    ["workflow_abort", "workflow_retry", "workflow_start", "workflow_transition"],
   );
   assert.ok(ext.commands.has("demo-run"));
   assert.equal(ext.tools.get("workflow_start").parameters.properties.name.enum.length, 1);

@@ -1,9 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { SessionManager, convertToLlm, serializeConversation, type ExtensionCommandContext, type ExtensionContext, type SessionBeforeCompactEvent, type SessionCompactEvent } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
-import { compileWorkflow } from "../authoring/compile.ts";
-import { DEFINITIONS_ENTRY_TYPE, buildGeneratedWorkflow, parseDefinitionSpec, writePromotedWorkflow, type GeneratedWorkflow, type WorkflowDefinitionSpec } from "../authoring/generated.ts";
-import type { CompiledBlock, CompiledWorkflowV2 } from "../domain/compiled-workflow.ts";
+import { freezeDefinition, type FrozenDefinition } from "../authoring/compile.ts";
 import { AgentRunner, ProcessRunner } from "./runner.ts";
 import { RunnerRegistry } from "./registry.ts";
 import { refLoaderFor, resolveScriptInputs } from "./artifacts.ts";
@@ -11,7 +9,7 @@ import { ArtifactStore } from "./artifact-store.ts";
 import type { ArtifactRef, ArtifactSink } from "../domain/artifacts.ts";
 import type { ProcessResult } from "./process-runner.ts";
 import { processSpecFor } from "../domain/node.ts";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative } from "node:path";
 import { start as engineStart, processLeafAt, transition as engineTransition } from "../engine/interpreter.ts";
 import { upsertInvocation, type Execution } from "../domain/execution.ts";
 import { deepEqual, type JsonValue } from "../domain/json.ts";
@@ -25,7 +23,7 @@ import type { NodeResult } from "./runner.ts";
 import { latestSnapshot, withinMemoryBound, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
 import { activeSnapshot, rolloverSnapshot, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../persistence/validate-stored-execution.ts";
-import { effectiveTools, CONTROL_TOOLS, PROMOTE_TOOL_NAME, RUN_DEFINITION_TOOL_NAME } from "./capabilities.ts";
+import { effectiveTools, CONTROL_TOOLS } from "./capabilities.ts";
 import { controlMessage, readBlockFrom, renderPrompt, rosterPrompt, summaryMessage, summaryPrefix } from "./prompts.ts";
 import { capWorkflowContext, isolateWorkflowContext, EPOCH_MESSAGE_TYPE, HANDOFF_MESSAGE_TYPE, type IsolatableMessage } from "./isolation.ts";
 import { createGenesisHandoff, type HandoffManifestV1 } from "../domain/handoff.ts";
@@ -100,12 +98,19 @@ export class WorkflowCompileError extends Error {
 
 const defaultRead = readBlockFrom({ readFileSync });
 
+/** Reads the real filesystem strictly: a missing required file is undefined, never an error string. */
+const strictRead = (path: string): string | undefined => {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+};
+
 export class RuntimeCoordinator {
   readonly workflows: readonly Workflow[];
   readonly visibleWorkflows: readonly Workflow[];
-  private readonly compiledCache = new Map<string, CompiledWorkflowV2>();
-  private readonly generated = new Map<string, { spec: WorkflowDefinitionSpec; built: GeneratedWorkflow }>();
-  private readonly virtualInstructions = new Map<string, string>();
+  private readonly frozenCache = new Map<string, FrozenDefinition>();
   readonly registry = new RunnerRegistry([new AgentRunner(), new ProcessRunner()]);
   private readonly pi: {
     getActiveTools(): string[];
@@ -118,7 +123,7 @@ export class RuntimeCoordinator {
   private readonly read: ReturnType<typeof readBlockFrom>;
   private readonly injectedReader: boolean;
   private readonly frozenPrompts = new Map<string, string>();
-  private readonly promptRead = (path: string, label: string): string => this.frozenPrompts.get(path) ?? this.virtualInstructions.get(path) ?? this.read(path, label);
+  private readonly promptRead = (path: string, label: string): string => this.frozenPrompts.get(path) ?? this.read(path, label);
   private state: RunState = { status: "idle" };
   private baselineTools: string[] | null = null;
   private readonly delivery: DeliveryCoordinator;
@@ -134,15 +139,15 @@ export class RuntimeCoordinator {
   private reportContext: { workflow: Workflow; runId: string; manifest: HandoffManifestV1 } | undefined;
   private suppressDelivery = false;
 
-  constructor(pi: RuntimeCoordinator["pi"], workflows: readonly Workflow[], read: ReturnType<typeof readBlockFrom> = defaultRead, defaultArtifactRoot?: string) {
+  constructor(pi: RuntimeCoordinator["pi"], workflows: readonly Workflow[], read?: ReturnType<typeof readBlockFrom>, defaultArtifactRoot?: string) {
     this.pi = pi;
     this.workflows = workflows;
     this.visibleWorkflows = workflows.filter((workflow) => workflow.piVisibility);
     this.store = {
       append: (snapshot) => this.pi.appendEntry(SNAPSHOT_TYPE, snapshot),
     };
-    this.read = read;
-    this.injectedReader = read !== defaultRead;
+    this.injectedReader = read !== undefined;
+    this.read = read ?? defaultRead;
     this.defaultArtifactRoot = defaultArtifactRoot;
     this.delivery = new DeliveryCoordinator({
       send: async (message) => {
@@ -180,47 +185,36 @@ export class RuntimeCoordinator {
    */
   private freezePromptSources(workflow: Workflow): void {
     this.frozenPrompts.clear();
-    const compiled = this.generated.get(workflow.name)?.built.compiled ?? this.compiledFor(workflow);
-    if (!compiled) return;
+    const frozen = this.frozenFor(workflow);
     const dir = dirname(workflow.overviewPath);
-    const add = (ref: { path: string; content: string }): void => {
-      this.frozenPrompts.set(resolve(dir, ref.path), ref.content);
+    const set = (path: string): void => {
+      const content = frozen.contents[relative(dir, path)];
+      if (content !== undefined) this.frozenPrompts.set(path, content);
     };
-    add(compiled.overview);
-    for (const operator of Object.values(compiled.operators)) add(operator.content);
-    const visit = (block: CompiledBlock): void => {
-      if (block.kind === "task") add(block.instruction);
-      else if (block.kind === "sequence") for (const child of block.children) visit(child);
-      else if (block.kind === "loop") visit(block.body);
-    };
-    visit(compiled.root);
+    set(workflow.overviewPath);
+    for (const operator of workflow.operators.values()) set(operator.path);
+    for (const block of workflowBlocks(workflow)) {
+      if (block.kind === "task") set(block.instructionPath);
+    }
   }
 
   /**
-   * Compile a workflow's definition lazily and memoize it. Compilation is strict: unreadable
-   * required files fail it. With the default (real-filesystem) reader a strict failure refuses
-   * the run via WorkflowCompileError; only coordinators constructed with an injected reader
-   * (virtual or in-memory definitions, as tests and generated workflows use) fall back to it.
+   * Freeze a workflow's definition lazily and memoize it. An unreadable
+   * required file fails the freeze and refuses the run via WorkflowCompileError.
    */
-  private compiledFor(workflow: Workflow): CompiledWorkflowV2 | undefined {
-    const cached = this.compiledCache.get(workflow.name);
+  private frozenFor(workflow: Workflow): FrozenDefinition {
+    const cached = this.frozenCache.get(workflow.name);
     if (cached) return cached;
-    const dir = dirname(workflow.overviewPath);
-    let compiled: CompiledWorkflowV2;
+    const reader = this.injectedReader
+      ? (path: string): string | undefined => this.read(path, "frozen definition")
+      : strictRead;
     try {
-      compiled = compileWorkflow(workflow, (path) => {
-        try {
-          return readFileSync(path, "utf8");
-        } catch {
-          return undefined;
-        }
-      }, dir);
+      const frozen = freezeDefinition(workflow, reader);
+      this.frozenCache.set(workflow.name, frozen);
+      return frozen;
     } catch (error) {
-      if (!this.injectedReader) throw new WorkflowCompileError(workflow, error);
-      compiled = compileWorkflow(workflow, (path) => this.read(path, "compiled definition"), dir);
+      throw new WorkflowCompileError(workflow, error);
     }
-    this.compiledCache.set(workflow.name, compiled);
-    return compiled;
   }
 
   /**
@@ -348,33 +342,6 @@ export class RuntimeCoordinator {
     return store;
   }
 
-  private registerGenerated(entry: { spec: WorkflowDefinitionSpec; built: GeneratedWorkflow }): void {
-    this.generated.set(entry.built.workflow.name, entry);
-    for (const [path, content] of Object.entries(entry.built.instructions)) this.virtualInstructions.set(path, content);
-  }
-
-  private persistDefinition(spec: WorkflowDefinitionSpec): void {
-    try {
-      this.pi.appendEntry(DEFINITIONS_ENTRY_TYPE, spec);
-    } catch {
-      // Best effort: without the entry, restoring this run reports the
-      // workflow as missing instead of failing later with a digest mismatch.
-    }
-  }
-
-  private restoreDefinitions(branch: readonly unknown[]): void {
-    for (const entry of branch) {
-      const typed = entry as { type?: unknown; customType?: unknown; data?: unknown };
-      if (typed.type !== "custom" || typed.customType !== DEFINITIONS_ENTRY_TYPE) continue;
-      try {
-        const spec = parseDefinitionSpec(typed.data);
-        this.registerGenerated({ spec, built: buildGeneratedWorkflow(spec) });
-      } catch {
-        // Tolerant: definitions from a newer engine or malformed entries are
-        // skipped so they never block session restore.
-      }
-    }
-  }
 
   private replayJournal(branch: readonly unknown[]): void {
     for (const entry of branch) {
@@ -418,7 +385,7 @@ export class RuntimeCoordinator {
     });
   }
 
-  private readonly isWorkflowTool = (name: string): boolean => [START_TOOL_NAME, RUN_DEFINITION_TOOL_NAME, PROMOTE_TOOL_NAME, ...CONTROL_TOOLS].includes(name);
+  private readonly isWorkflowTool = (name: string): boolean => [START_TOOL_NAME, ...CONTROL_TOOLS].includes(name);
   private readonly knownTools = (): string[] => this.pi.getAllTools?.().map((tool) => tool.name) ?? this.pi.getActiveTools();
   private readonly captureBaseline = (): string[] => this.pi.getActiveTools().filter((name) => !this.isWorkflowTool(name));
 
@@ -426,7 +393,7 @@ export class RuntimeCoordinator {
     this.baselineTools ??= this.captureBaseline();
     if (state.status !== "active") {
       const reportTools = this.reportContext && this.knownTools().some((tool) => tool === "workflow_handoff_read") ? ["workflow_handoff_read"] : [];
-      const idle = [...this.baselineTools, ...reportTools, RUN_DEFINITION_TOOL_NAME, PROMOTE_TOOL_NAME];
+      const idle = [...this.baselineTools, ...reportTools];
       return this.visibleWorkflows.length ? [...idle, START_TOOL_NAME] : idle;
     }
     const active = effectiveTools(state.workflow, state.execution, this.baselineTools);
@@ -607,7 +574,6 @@ export class RuntimeCoordinator {
       snapshot: seededSnapshot,
       manifest: nextManifest,
       previousEpoch,
-      generatedDefinition: this.generated.get(workflow.name)?.spec,
     });
     this.pi.appendEntry(TRANSFER_ENTRY_TYPE, transfer);
     this.commit(rolloverSnapshot(workflow.name, execution.runId, transfer.transferId), `rollover preparation for ${workflow.title} run ${execution.runId}`);
@@ -625,8 +591,8 @@ export class RuntimeCoordinator {
     const started = engineStart(workflow, { runId, target: target.trim() }, this.artifactStoreFor(workflow, runId));
     if (!started.ok) throw new Error(started.error);
     this.freezePromptSources(workflow);
-    const digest = this.generated.get(workflow.name)?.built.compiled.digest ?? this.compiledFor(workflow)?.digest;
-    const execution: Execution = digest ? { ...started.state, definitionDigest: digest } : started.state;
+    const digest = this.frozenFor(workflow).digest;
+    const execution: Execution = { ...started.state, definitionDigest: digest };
     const next: ActiveState = { status: "active", workflow, execution, delivered: false };
     const manifest = this.manifestFor(next, ctx);
     this.commit(this.snapshotOf(next, false, manifest), `start of ${workflow.title} run ${next.execution.runId}`);
@@ -653,46 +619,6 @@ export class RuntimeCoordinator {
     return { ...next, execution: finalExecution };
   }
 
-  /**
-   * Compile a runtime-produced definition and start it. The definition is
-   * ephemeral: it lives in the session registry, is frozen with the run
-   * snapshot via its digest, and persists as a definition entry so a reload
-   * can restore the run. It never joins the discovered roster.
-   */
-  async startGenerated(raw: unknown, target: string, ctx: UiContext, signal?: AbortSignal): Promise<ActiveState | null> {
-    if (this.state.status !== "idle") {
-      const description = this.state.status === "active"
-        ? `${this.state.workflow.title} run ${this.state.execution.runId} is already active.`
-        : `Workflow run ${this.state.transfer.runId} is waiting for a session rollover.`;
-      ctx.ui.notify(description, "error");
-      return null;
-    }
-    assertNotCancelled(signal);
-    const spec = parseDefinitionSpec(raw);
-    if (this.workflows.some((workflow) => workflow.name === spec.name)) {
-      throw new Error(`workflow name "${spec.name}" is already used by a discovered workflow`);
-    }
-    const built = buildGeneratedWorkflow(spec);
-    this.registerGenerated({ spec, built });
-    this.persistDefinition(spec);
-    const next = this.beginRun(built.workflow, target, ctx);
-    const finalExecution = await this.drive(next, ctx);
-    return { ...next, execution: finalExecution };
-  }
-
-  /**
-   * Persist a generated definition as a named workflow directory under
-   * workflowsRoot and validate it with the standard discovery parser.
-   * Refuses unknown names, discovered-name collisions, and overwrites.
-   */
-  promoteDefinition(name: string, workflowsRoot: string): { directory: string; spec: WorkflowDefinitionSpec } {
-    if (this.workflows.some((workflow) => workflow.name === name)) {
-      throw new Error(`"${name}" is already a discovered workflow`);
-    }
-    const entry = this.generated.get(name);
-    if (!entry) throw new Error(`no generated workflow named "${name}" exists in this session`);
-    return { directory: writePromotedWorkflow(entry.spec, workflowsRoot), spec: entry.spec };
-  }
 
   async transition(params: unknown, signal: AbortSignal | undefined, ctx: UiContext): Promise<ToolResult> {
     const current = this.requireActive();
@@ -1058,7 +984,6 @@ export class RuntimeCoordinator {
         id: transfer.childSessionId,
         ...(transfer.parentSession ? { parentSession: transfer.parentSession } : {}),
       });
-      if (transfer.generatedDefinition) child.appendCustomEntry(DEFINITIONS_ENTRY_TYPE, transfer.generatedDefinition);
       for (const event of this.journal.all) {
         if (event.runId === transfer.runId) child.appendCustomEntry(EVENT_ENTRY_TYPE, event);
       }
@@ -1104,7 +1029,7 @@ export class RuntimeCoordinator {
       };
       this.pi.appendEntry(TRANSFER_ENTRY_TYPE, completion);
     }
-    const workflow = this.workflows.find((item) => item.name === transfer.workflow) ?? this.generated.get(transfer.workflow)?.built.workflow;
+    const workflow = this.workflows.find((item) => item.name === transfer.workflow);
     const finalExecution = (transfer.snapshot as { execution?: Execution }).execution;
     const childEntries = SessionManager.open(childPath).getEntries();
     const summaryAlreadyRequested = childEntries.some((entry) => {
@@ -1125,7 +1050,7 @@ export class RuntimeCoordinator {
     const state = this.state.status === "active" ? this.state : undefined;
     const transfer = this.state.status === "rollover-pending" ? this.state.transfer : undefined;
     const runId = state?.execution.runId ?? transfer?.runId ?? this.reportContext?.runId;
-    const workflow = state?.workflow ?? this.reportContext?.workflow ?? (transfer ? this.workflows.find((item) => item.name === transfer.workflow) ?? this.generated.get(transfer.workflow)?.built.workflow : undefined);
+    const workflow = state?.workflow ?? this.reportContext?.workflow ?? (transfer ? this.workflows.find((item) => item.name === transfer.workflow) : undefined);
     if (!runId || !workflow) throw new Error("no active workflow handoff store");
     const store = this.artifactStoreFor(workflow, runId);
     const loaded = store.load({ invocationKey: "handoff", output: "requested", checksum, size: 0, mediaType: "application/json" });
@@ -1214,7 +1139,6 @@ export class RuntimeCoordinator {
 
   restoreRun(ctx: UiContext): void {
     const branch = ctx.sessionManager?.getBranch() ?? [];
-    this.restoreDefinitions(branch);
     this.journal.clear();
     this.replayJournal(branch);
     const pendingTransfer = preparedTransfer(branch);
@@ -1237,11 +1161,11 @@ export class RuntimeCoordinator {
     }
     if (snapshot.status !== "active") {
       const manifest = latestHandoffManifest(branch);
-      const workflow = manifest ? this.workflows.find((item) => item.name === manifest.genesis.run.workflow) ?? this.generated.get(manifest.genesis.run.workflow)?.built.workflow : undefined;
+      const workflow = manifest ? this.workflows.find((item) => item.name === manifest.genesis.run.workflow) : undefined;
       if (manifest && workflow) this.reportContext = { workflow, runId: manifest.runId, manifest };
       return;
     }
-    const workflow = this.workflows.find((item) => item.name === snapshot.workflow) ?? this.generated.get(snapshot.workflow)?.built.workflow;
+    const workflow = this.workflows.find((item) => item.name === snapshot.workflow);
     if (!workflow) {
       ctx.ui.notify(`Cannot resume ${snapshot.workflow} run: that workflow no longer exists.`, "warning");
       return;
@@ -1253,7 +1177,7 @@ export class RuntimeCoordinator {
     }
     let expectedDigest: string | undefined;
     try {
-      expectedDigest = this.generated.get(workflow.name)?.built.compiled.digest ?? this.compiledFor(workflow)?.digest;
+      expectedDigest = this.frozenFor(workflow).digest;
     } catch (error) {
       const detail = error instanceof WorkflowCompileError ? error.detail : error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Cannot resume ${workflow.title} run \`${snapshot.execution.runId}\`: its definition no longer compiles (${detail}). Restore the files, then start the workflow again.`, "warning");

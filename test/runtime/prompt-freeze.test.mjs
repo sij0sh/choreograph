@@ -1,12 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
 import { loadWorkflowManifest } from "../../src/authoring/parser.ts";
-import { buildGeneratedWorkflow, parseDefinitionSpec, DEFINITIONS_ENTRY_TYPE } from "../../src/authoring/generated.ts";
-import { completed, cp } from "../engine/helpers.mjs";
 
 function harness() {
   const sent = [];
@@ -101,23 +99,4 @@ test("operator prompts are served frozen", async () => {
   assert.match(prompt, /# Inspect operator v1/);
   writeFileSync(join(dir, "operators", "inspect.md"), "---\ndescription: Inspect things.\n---\n# Inspect EDITED-MID-RUN\n");
   assert.equal(promptOf(runtime, h.ctx), prompt, "an operator file edit mid-run must not change the next prompt");
-});
-
-test("generated workflows still render from their virtual frozen instructions", async () => {
-  const built = buildGeneratedWorkflow(parseDefinitionSpec({
-    name: "gen-probe",
-    description: "Generated probe.",
-    steps: [{ id: "scan", instruction: "# Scan generated\nDo the scan." }],
-  }));
-  const h = harness();
-  const runtime = new RuntimeCoordinator(h.pi, [], undefined, h.storeRoot);
-  await runtime.startGenerated(JSON.parse(JSON.stringify({
-    name: "gen-probe",
-    description: "Generated probe.",
-    steps: [{ id: "scan", instruction: "# Scan generated\nDo the scan." }],
-  })), "t", h.ctx);
-  await runtime.handleAgentSettled(h.ctx);
-  const prompt = promptOf(runtime, h.ctx);
-  assert.match(prompt, /# Scan generated/);
-  assert.ok(built.compiled.digest);
 });

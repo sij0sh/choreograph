@@ -108,7 +108,7 @@ test("session start keeps the narrowed active set and offers the idle tools", ()
   const runtime = coordinator(h, [wf]);
   const warnings = runtime.handleSessionStart(h.ctx);
   assert.deepEqual(warnings.unknownTools, []);
-  assert.deepEqual([...h.activeTools], ["read", "bash", "workflow_run_definition", "workflow_promote", "workflow_start"]);
+  assert.deepEqual([...h.activeTools], ["read", "bash", "workflow_start"]);
 });
 
 test("reload of an active run restores the persisted baseline tools", async () => {

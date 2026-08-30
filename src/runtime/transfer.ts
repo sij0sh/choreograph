@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { WorkflowDefinitionSpec } from "../authoring/generated.ts";
 import type { HandoffManifestV1 } from "../domain/handoff.ts";
 import { handoffDigest } from "../domain/handoff.ts";
 
@@ -18,7 +17,6 @@ export interface RolloverTransferV1 {
   readonly snapshot: unknown;
   readonly manifest: HandoffManifestV1;
   readonly previousEpoch: string;
-  readonly generatedDefinition?: WorkflowDefinitionSpec;
   readonly seedDigest: string;
 }
 
