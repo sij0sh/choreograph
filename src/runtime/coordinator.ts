@@ -23,7 +23,7 @@ import { activeSnapshot, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/
 import { validateAgainstWorkflow } from "../persistence/validate-stored-execution.ts";
 import { effectiveTools, CONTROL_TOOLS } from "./capabilities.ts";
 import { readBlockFrom, renderPositionEnvelope, renderReportEnvelope, rosterPrompt, summaryMessage, summaryPrefix } from "./prompts.ts";
-import { isolateWorkflowContext, type IsolatableMessage } from "./isolation.ts";
+import { createContextIsolator, type IsolatableMessage } from "./isolation.ts";
 import { preparedTransfer, ROLLOVER_COMMAND, type RolloverTransferV2 } from "./transfer.ts";
 import { statusValue } from "./status.ts";
 import { DeliveryCoordinator } from "./delivery.ts";
@@ -131,6 +131,7 @@ export class RuntimeCoordinator {
   private runtimeArtifactRoot: string | undefined;
   private readonly defaultArtifactRoot: string | undefined;
   private isolationRunId: string | undefined;
+  private readonly contextIsolator = createContextIsolator();
   private suppressDelivery = false;
 
   constructor(pi: RuntimeCoordinator["pi"], workflows: readonly Workflow[], read?: ReturnType<typeof readBlockFrom>, defaultArtifactRoot?: string) {
@@ -736,7 +737,7 @@ export class RuntimeCoordinator {
   handleContext<T extends IsolatableMessage>(event: { messages: readonly T[] }): { messages: T[] } | undefined {
     const runId = this.state.status === "active" && this.state.delivered ? this.state.execution.runId : this.isolationRunId;
     if (!runId) return undefined;
-    const isolated = isolateWorkflowContext(event.messages, runId);
+    const isolated = this.contextIsolator(event.messages, runId);
     return isolated ? { messages: isolated } : undefined;
   }
 }

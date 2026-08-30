@@ -4,13 +4,32 @@ type ContentPart = { type: string; text?: string };
 
 export type IsolatableMessage = { role: string; content?: string | readonly ContentPart[] };
 
-function messageText(message: IsolatableMessage): string | undefined {
-  if (typeof message.content === "string") return message.content;
-  if (Array.isArray(message.content)) {
-    return message.content
-      .filter((part) => part.type === "text" && typeof part.text === "string")
-      .map((part) => part.text)
-      .join("\n");
+function startsWithAny(text: string, prefixes: readonly string[]): boolean {
+  return prefixes.some((prefix) => text.startsWith(prefix));
+}
+
+// A prefix match on the joined content is decided entirely by the first text
+// part (filter preserves order), so no full-text materialization is needed.
+function isBoundary(message: IsolatableMessage, prefixes: readonly string[]): boolean {
+  if (message.role !== "user") return false;
+  const content = message.content;
+  if (typeof content === "string") return startsWithAny(content, prefixes);
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      if (part.type === "text" && typeof part.text === "string") return startsWithAny(part.text, prefixes);
+    }
+  }
+  return false;
+}
+
+function scanForBoundary<T extends IsolatableMessage>(
+  messages: readonly T[],
+  prefixes: readonly string[],
+  top: number,
+  floor: number,
+): number | undefined {
+  for (let index = top; index >= floor; index -= 1) {
+    if (isBoundary(messages[index], prefixes)) return index;
   }
   return undefined;
 }
@@ -22,13 +41,37 @@ function messageText(message: IsolatableMessage): string | undefined {
  */
 export function isolateWorkflowContext<T extends IsolatableMessage>(messages: readonly T[], runId: string): T[] | undefined {
   const prefixes = [controlPrefix(runId), summaryPrefix(runId)];
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message.role !== "user") continue;
-    const text = messageText(message);
-    if (text !== undefined && prefixes.some((prefix) => text.startsWith(prefix))) {
-      return messages.slice(index);
+  const index = scanForBoundary(messages, prefixes, messages.length - 1, 0);
+  return index === undefined ? undefined : messages.slice(index);
+}
+
+type BoundaryMemo = { runId: string; length: number; boundary: number | undefined };
+
+/**
+ * Memoizing isolator for the per-LLM-call context event: repeated calls visit
+ * only messages appended since the previous call instead of the full tail
+ * (cumulative Theta(T) visits instead of Theta(T^2)). The memo is keyed by the
+ * message-array length; a shrink is a truncation/compaction and a runId switch
+ * is a transfer/adopt, and both force a full rescan.
+ */
+export function createContextIsolator(): <T extends IsolatableMessage>(messages: readonly T[], runId: string) => T[] | undefined {
+  let memo: BoundaryMemo | undefined;
+  return <T extends IsolatableMessage>(messages: readonly T[], runId: string): T[] | undefined => {
+    const prefixes = [controlPrefix(runId), summaryPrefix(runId)];
+    const remembered = memo;
+    let boundary: number | undefined;
+    if (!remembered || remembered.runId !== runId || messages.length < remembered.length) {
+      boundary = scanForBoundary(messages, prefixes, messages.length - 1, 0);
+    } else {
+      // Same runId, no shrink: a newer boundary can only sit in the appended tail.
+      boundary = scanForBoundary(messages, prefixes, messages.length - 1, remembered.length);
+      if (boundary === undefined && remembered.boundary !== undefined) {
+        boundary = isBoundary(messages[remembered.boundary], prefixes)
+          ? remembered.boundary
+          : scanForBoundary(messages, prefixes, messages.length - 1, 0);
+      }
     }
-  }
-  return undefined;
+    memo = { runId, length: messages.length, boundary };
+    return boundary === undefined ? undefined : messages.slice(boundary);
+  };
 }
