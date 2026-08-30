@@ -99,11 +99,11 @@ function loopContext(workflow: Workflow, state: Execution, positionKey: string):
   const block = blockOf(workflow, frame.blockId);
   const loopState = state.loops[frame.key];
   if (block?.kind !== "loop" || !loopState) return "";
-  const total = block.mode === "for-each" ? loopState.items?.length ?? 0 : block.maxIterations;
-  const item = block.mode === "for-each" && loopState.items && loopState.items[loopState.iteration - 1] !== undefined
+  const total = loopState.items?.length ?? 0;
+  const item = loopState.items && loopState.items[loopState.iteration - 1] !== undefined
     ? `\nCurrent item: ${clip(canonicalJson(loopState.items[loopState.iteration - 1]), 512)}`
     : "";
-  return [`## Loop context`, `Loop \`${block.id}\` (${block.mode.replace("-", " ")}), iteration ${loopState.iteration} of ${total}.${item}`].join("\n");
+  return [`## Loop context`, `Loop \`${block.id}\` (for each), iteration ${loopState.iteration} of ${total}.${item}`].join("\n");
 }
 
 function operatorRoster(workflow: Workflow, allowed: readonly string[]): string {

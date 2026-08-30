@@ -191,7 +191,7 @@ test("runtime instruction reads enforce the authoring size cap", () => {
 });
 
 test("loop body prompts carry the iteration context and current item", () => {
-  const wf = workflow([task("gather"), loop("review", "for-each"), task("deliver")]);
+  const wf = workflow([task("gather"), loop("review"), task("deliver")]);
   let state = start(wf, { runId: "run-2" }).state;
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("gathered", { files: ["alpha.md", "beta.md"] })) }).state;
   const prompt = renderPrompt(
@@ -204,14 +204,3 @@ test("loop body prompts carry the iteration context and current item", () => {
   assert.match(prompt, /Current item: "alpha\.md"/);
 });
 
-test("repeat-until prompts carry the iteration and cap without an item", () => {
-  const wf = workflow([loop("until-green", "repeat-until", { maxIterations: 3 }), task("deliver")]);
-  const state = start(wf, { runId: "run-3" }).state;
-  const prompt = renderPrompt(
-    wf,
-    state,
-    reader({ "WORKFLOW.md": "# Overview", "steps/until-green-step.md": "# Fix", "steps/deliver.md": "# Deliver" }),
-  );
-  assert.match(prompt, /iteration 1 of 3/);
-  assert.ok(!prompt.includes("Current item:"), "repeat-until has no items");
-});

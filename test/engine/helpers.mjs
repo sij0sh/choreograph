@@ -51,16 +51,14 @@ export function sequence(id, children) {
   return { kind: "sequence", id, children };
 }
 
-export function loop(id, mode, options = {}) {
+export function loop(id, options = {}) {
   const bodyStep = task(options.bodyId ?? `${id}-step`, options.body ?? {});
   return {
     kind: "loop",
     id,
-    mode,
-    body: sequence(`${id}-body`, [bodyStep]),
+    body: bodyStep,
     maxIterations: options.maxIterations ?? 8,
-    ...(mode === "for-each" ? { itemsBinding: options.itemsBinding ?? { from: "gather", select: "/data/files" } } : {}),
-    ...(mode === "repeat-until" ? { condition: options.condition ?? { from: bodyStep.id, select: "/data/exitCode", op: "equals", value: 0 } } : {}),
+    itemsBinding: options.itemsBinding ?? { from: "gather", select: "/data/files" },
   };
 }
 

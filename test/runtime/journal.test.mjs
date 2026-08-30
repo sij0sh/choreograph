@@ -378,7 +378,7 @@ test("runtime emits ready, skipped, loop iteration, loop completion, and artifac
   const wf = workflow([
     task("gather"),
     task("optional", { guard: { from: "gather", select: "/data/runOptional", op: "equals", value: true } }),
-    loop("review", "for-each"),
+    loop("review"),
     task("deliver"),
   ], { overviewPath: join(tempDir(), "WORKFLOW.md") });
   const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
@@ -443,23 +443,21 @@ test("inspect keeps completed run history and restores it without an active run"
   assert.equal(runtime2.inspect("missing-run"), undefined);
 });
 
-test("loop events include iterations traversed entirely through skipped body steps", async () => {
+test("a guarded loop records a control skip without loop events", async () => {
   const h = harness();
   const wf = workflow([
     task("gather"),
-    loop("review", "for-each", {
-      body: { guard: { from: "gather", select: "/data/runBody", op: "equals", value: true } },
-    }),
+    { ...loop("review"), guard: { from: "gather", select: "/data/runReview", op: "equals", value: true } },
     task("deliver"),
   ], { overviewPath: join(tempDir(), "WORKFLOW.md") });
   const runtime = new RuntimeCoordinator(h.pi, [wf], h.read, h.storeRoot);
   runtime.handleSessionStart(h.ctx);
   await runtime.startWorkflow(h.ctx, wf, "");
-  await runtime.transition({ status: "completed", checkpoint: cp("gathered", { files: ["a", "b"], runBody: false }) }, undefined, h.ctx);
+  await runtime.transition({ status: "completed", checkpoint: cp("gathered", { files: ["a"], runReview: false }) }, undefined, h.ctx);
   const events = h.entries.filter((entry) => entry.customType === "choreograph-events").map((entry) => entry.data);
-  const iterations = events.filter((event) => event.type === "loop-iteration-started" && event.key === "root/review");
-  assert.deepEqual(iterations.map((event) => [event.iteration, event.total]), [[1, 2], [2, 2]]);
-  assert.ok(events.some((event) => event.type === "node-skipped" && event.key === "root/review/loop[1]/review-step"));
-  assert.ok(events.some((event) => event.type === "node-skipped" && event.key === "root/review/loop[2]/review-step"));
-  assert.ok(events.some((event) => event.type === "loop-completed" && event.iterations === 2));
+  const skipped = events.find((event) => event.type === "node-skipped" && event.key === "root/review");
+  assert.ok(skipped, "the loop skip is journaled");
+  assert.equal(skipped.runner, "control");
+  assert.ok(!events.some((event) => event.type === "loop-iteration-started"), "a skipped loop never starts iterations");
+  assert.ok(events.some((event) => event.type === "node-ready" && event.key === "root/deliver"));
 });

@@ -10,7 +10,6 @@ import type {
   PlanBlock,
   ScriptBlock,
   ScriptSpec,
-  SequenceBlock,
   TaskBlock,
   Workflow,
 } from "../domain/workflow.ts";
@@ -257,12 +256,6 @@ function parseStepsList(raw: unknown, label: string, context: CompileContext): B
   return raw.map((entry, index) => parseStepEntry(entry, index, `${label}[${index}]`, context));
 }
 
-function bodySequence(context: CompileContext, parentId: string, suffix: string, children: readonly Block[]): SequenceBlock {
-  const id = `${parentId}-${suffix}`;
-  registerId(context, id, `${parentId} body`);
-  return { kind: "sequence", id, children };
-}
-
 function scriptStep(entry: ObjectValue, id: string, label: string, context: CompileContext, script: ScriptSpec, output?: string): ScriptBlock {
   const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
   recordInputEdges(context, id, inputs, label);
@@ -292,22 +285,17 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     if (new Set<string>(STEP_KEYS).has(key)) continue;
     throw new Error(`unknown ${label} key: ${key}`);
   }
-  const loopKeys = (["for_each", "repeat_until"] as const).filter((key) => entry[key] !== undefined);
-  if (loopKeys.length > 1) throw new Error(`${label} declares more than one of: ${loopKeys.join(", ")}`);
-  if (loopKeys.length === 1) {
+  if (entry.for_each !== undefined) {
     const id = stringAt(entry.id, `${label}.id`);
     registerId(context, id, label);
-    for (const key of ["run", "tools", "done", "output", "plan"] as const) {
+    for (const key of ["run", "tools", "done", "output", "plan", "script"] as const) {
       if (entry[key] !== undefined) throw new Error(`${label}.${key} only applies to "run:" tasks`);
-    }
-    for (const key of ["script"] as const) {
-      if (entry[key] !== undefined) throw new Error(`${label}.${key} cannot be combined with "${loopKeys[0]}"`);
     }
     const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
     recordInputEdges(context, id, inputs, label);
     const guard = parseGuard(entry.when, `${label}.when`);
     recordGuardEdge(context, id, guard, `${label}.when`);
-    const block = parseLoop(loopKeys[0], entry[loopKeys[0]], id, label, context);
+    const block = parseLoop(entry.for_each, id, label, context);
     return { ...(guard ? { guard } : {}), ...block, ...(inputs ? { inputs } : {}) };
   }
   const structural = (["plan", "script"] as const).filter((key) => entry[key] !== undefined);
@@ -394,32 +382,12 @@ function parsePlan(raw: unknown, id: string, label: string, context: CompileCont
   return { kind: "plan", id, operators, recovery };
 }
 
-const LOOP_KEYS = ["items", "body", "maxItems", "maxIterations", "when"] as const;
+const LOOP_KEYS = ["items", "body", "maxItems"] as const;
 
-function parseBodySteps(raw: unknown, label: string, context: CompileContext): readonly Block[] {
-  const body = objectAt(raw, label);
-  if (body.steps === undefined) return [parseBodyStep(body, label, context)];
-  if (body.run !== undefined || body.inputs !== undefined) {
-    throw new Error(`${label} declares both "run" and "steps"; a loop body picks one form`);
-  }
-  for (const key of Object.keys(body)) {
-    if (key !== "steps") throw new Error(`${label}.${key} is not accepted; a loop body holds "run" (one step) or "steps" (a list of steps)`);
-  }
-  const steps = parseStepsList(body.steps, `${label}.steps`, context);
-  if (steps.length > LIMITS.checkpointListItems) {
-    throw new Error(`${label}.steps holds ${steps.length} entries; a loop body holds at most ${LIMITS.checkpointListItems}`);
-  }
-  for (const step of steps) {
-    if (step.kind === "loop") throw new Error(`${label}.steps must not nest loops; nested loops are not supported`);
-    if (step.kind === "plan") throw new Error(`${label}.steps must not contain a plan; plans are not accepted inside a loop body`);
-  }
-  return steps;
-}
-
-function parseBodyStep(raw: unknown, label: string, context: CompileContext): TaskBlock {
+function parseBody(raw: unknown, label: string, context: CompileContext): TaskBlock {
   const body = objectAt(raw, label);
   for (const key of Object.keys(body)) {
-    if (key !== "run" && key !== "inputs") throw new Error(`${label}.${key} is not accepted; a loop body holds "run" (one step) or "steps" (a list of steps)`);
+    if (key !== "run" && key !== "inputs") throw new Error(`${label}.${key} is not accepted; a loop body holds one "run" step`);
   }
   const configured = stringAt(body.run, `${label}.run`);
   const path = normalizeInstruction(configured, 0, label, context);
@@ -430,65 +398,32 @@ function parseBodyStep(raw: unknown, label: string, context: CompileContext): Ta
   return { kind: "task", id, instructionPath: path, ...(inputs ? { inputs } : {}) };
 }
 
-function parseLoop(kind: "for_each" | "repeat_until", raw: unknown, id: string, label: string, context: CompileContext): LoopBlock {
-  const body = objectAt(raw, `${label}.${kind}`);
-  assertKeys(body, LOOP_KEYS, `${label}.${kind}`);
-  const bodyContext: CompileContext = { ...context, allowItemInputs: true };
-  const children = parseBodySteps(body.body, `${label}.${kind}.body`, bodyContext);
-  const sequence = bodySequence(context, id, "body", children);
-  if (kind === "for_each") {
-    if (body.when !== undefined) throw new Error(`${label}.for_each.when is only accepted by repeat_until`);
-    const itemsRaw = objectAt(body.items, `${label}.for_each.items`);
-    const itemKeys = Object.keys(itemsRaw);
-    for (const key of itemKeys) {
-      if (key !== "from" && key !== "select") throw new Error(`${label}.for_each.items.${key} is not an accepted binding field`);
-    }
-    const from = stringAt(itemsRaw.from, `${label}.for_each.items.from`);
-    if (!ID_PATTERN.test(from)) throw new Error(`${label}.for_each.items.from must match ^[a-z][a-z0-9-]*$`);
-    let select: string | undefined;
-    if (itemsRaw.select !== undefined) {
-      if (typeof itemsRaw.select !== "string") throw new Error(`${label}.for_each.items.select must be a JSON Pointer such as /data/files`);
-      select = itemsRaw.select;
-      if (!isValidJsonPointer(select)) throw new Error(`${label}.for_each.items.select must be a JSON Pointer such as /data/files`);
-    }
-    const itemsBinding: InputBinding = select === undefined ? { from } : { from, select };
-    if (from === "root" || from === id || !context.ids.has(from)) {
-      throw new Error(`${label}.for_each.items.from names "${from}", which is not an earlier step`);
-    }
-    const producers = context.inputEdges.get(id) ?? [];
-    if (!producers.includes(from)) producers.push(from);
-    context.inputEdges.set(id, producers);
-    const maxItems = positiveIntAt(body.maxItems, `${label}.for_each.maxItems`, LIMITS.checkpointListItems);
-    const recovery = parseRecovery(body.repair, `${label}.for_each.repair`);
-    return {
-      kind: "loop",
-      id,
-      mode: "for-each",
-      body: sequence,
-      itemsBinding,
-      maxIterations: maxItems,
-      ...(recovery ? { recovery } : {}),
-    };
+function parseLoop(raw: unknown, id: string, label: string, context: CompileContext): LoopBlock {
+  const body = objectAt(raw, `${label}.for_each`);
+  assertKeys(body, LOOP_KEYS, `${label}.for_each`);
+  const itemsRaw = objectAt(body.items, `${label}.for_each.items`);
+  const itemKeys = Object.keys(itemsRaw);
+  for (const key of itemKeys) {
+    if (key !== "from" && key !== "select") throw new Error(`${label}.for_each.items.${key} is not an accepted binding field`);
   }
-  if (body.items !== undefined) throw new Error(`${label}.repeat_until.items is only accepted by for_each`);
-  const condition = parseGuard(body.when, `${label}.repeat_until.when`)!;
-  if (condition.from === "root" || condition.from === id || !context.ids.has(condition.from)) {
-    throw new Error(`${label}.repeat_until.when.from names "${condition.from}", which is not an earlier step`);
+  const from = stringAt(itemsRaw.from, `${label}.for_each.items.from`);
+  if (!ID_PATTERN.test(from)) throw new Error(`${label}.for_each.items.from must match ^[a-z][a-z0-9-]*$`);
+  let select: string | undefined;
+  if (itemsRaw.select !== undefined) {
+    if (typeof itemsRaw.select !== "string") throw new Error(`${label}.for_each.items.select must be a JSON Pointer such as /data/files`);
+    select = itemsRaw.select;
+    if (!isValidJsonPointer(select)) throw new Error(`${label}.for_each.items.select must be a JSON Pointer such as /data/files`);
+  }
+  const itemsBinding: InputBinding = select === undefined ? { from } : { from, select };
+  if (from === "root" || from === id || !context.ids.has(from)) {
+    throw new Error(`${label}.for_each.items.from names "${from}", which is not an earlier step`);
   }
   const producers = context.inputEdges.get(id) ?? [];
-  if (!producers.includes(condition.from)) producers.push(condition.from);
+  if (!producers.includes(from)) producers.push(from);
   context.inputEdges.set(id, producers);
-  const maxIterations = positiveIntAt(body.maxIterations, `${label}.repeat_until.maxIterations`, LIMITS.checkpointListItems);
-  const recovery = parseRecovery(body.repair, `${label}.repeat_until.repair`);
-  return {
-    kind: "loop",
-    id,
-    mode: "repeat-until",
-    body: sequence,
-    condition,
-    maxIterations,
-    ...(recovery ? { recovery } : {}),
-  };
+  const bodyTask = parseBody(body.body, `${label}.for_each.body`, { ...context, allowItemInputs: true });
+  const maxItems = positiveIntAt(body.maxItems, `${label}.for_each.maxItems`, LIMITS.checkpointListItems);
+  return { kind: "loop", id, body: bodyTask, itemsBinding, maxIterations: maxItems };
 }
 
 export function loadWorkflowManifest(directory: string): Workflow {

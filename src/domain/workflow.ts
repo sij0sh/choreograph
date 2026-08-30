@@ -39,13 +39,9 @@ export interface PlanBlock {
 export interface LoopBlock {
   readonly kind: "loop";
   readonly id: string;
-  readonly mode: "for-each" | "repeat-until";
-  readonly body: SequenceBlock;
-  readonly itemsBinding?: InputBinding;
-  readonly condition?: GuardClause;
+  readonly body: TaskBlock;
+  readonly itemsBinding: InputBinding;
   readonly maxIterations: number;
-  readonly recovery?: RecoveryPolicy;
-  readonly inputs?: Readonly<Record<string, InputBinding>>;
   readonly guard?: GuardClause;
 }
 

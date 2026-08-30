@@ -277,11 +277,11 @@ export class RuntimeCoordinator {
       const prior = previous?.loops[key];
       if (prior?.iteration === loopState.iteration) continue;
       const block = blockOf(workflow, lastSegment(key));
-      if (!block || block.kind !== "loop") continue;
-      const total = block.mode === "for-each" ? loopState.items?.length ?? block.maxIterations : block.maxIterations;
-      const first = prior === undefined ? 1 : loopState.iteration > prior.iteration ? prior.iteration + 1 : loopState.iteration;
+      if (block?.kind !== "loop") continue;
+      const total = loopState.items?.length ?? block.maxIterations;
+      const first = prior === undefined ? 1 : Math.max(loopState.iteration, prior.iteration + 1);
       for (let iteration = first; iteration <= loopState.iteration; iteration += 1) {
-        this.record({ type: "loop-iteration-started", runId, at: this.now(), key, mode: block.mode, iteration, total: Math.max(iteration, total) });
+        this.record({ type: "loop-iteration-started", runId, at: this.now(), key, mode: "for-each", iteration, total: Math.max(iteration, total) });
       }
     }
     for (const key of next.checkpointOrder) {
@@ -292,15 +292,14 @@ export class RuntimeCoordinator {
       if (previous?.checkpoints[key] === next.checkpoints[key]) continue;
       if (typeof data.iterations !== "number" || !Number.isInteger(data.iterations) || data.iterations < 0) continue;
       const iterations = data.iterations;
-      const total = block.mode === "for-each" ? iterations : block.maxIterations;
       const loopEvents = this.journal.all.filter((event) => event.runId === runId && "key" in event && event.key === key);
       const lastCompletion = loopEvents.findLastIndex((event) => event.type === "loop-completed");
       const currentCycle = loopEvents.slice(lastCompletion + 1);
       for (let iteration = 1; iteration <= iterations; iteration += 1) {
         const recorded = currentCycle.some((event) => event.type === "loop-iteration-started" && event.iteration === iteration);
-        if (!recorded) this.record({ type: "loop-iteration-started", runId, at: this.now(), key, mode: block.mode, iteration, total: Math.max(iteration, total) });
+        if (!recorded) this.record({ type: "loop-iteration-started", runId, at: this.now(), key, mode: "for-each", iteration, total: iterations });
       }
-      this.record({ type: "loop-completed", runId, at: this.now(), key, mode: block.mode, iterations, total: block.mode === "for-each" ? iterations : block.maxIterations, exhausted: data.exhausted === true });
+      this.record({ type: "loop-completed", runId, at: this.now(), key, mode: "for-each", iterations, total: iterations, exhausted: false });
     }
     for (const key of started) {
       const current = after[key]!;

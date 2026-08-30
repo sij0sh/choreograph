@@ -28,7 +28,7 @@ test("the compiled definition is complete, versioned, and deeply frozen", () => 
       task("frame", { tools: ["read"], done: ["framed"], output: "frame-result", guard: { from: "root", op: "exists" } }),
       script("probe"),
       plan("make", ["inspect"]),
-      loop("scan", "for-each"),
+      loop("scan"),
     ],
     {
       tools: ["read", "edit"],
@@ -79,20 +79,18 @@ test("unreadable required files fail compilation", () => {
 
 test("the digest reacts to every change class the old digest ignored", () => {
   const scriptTask = script("probe");
-  const loopPlain = loop("scan", "for-each");
-  const loopTight = loop("scan", "for-each", { maxIterations: 3 });
-  const loopUntil = loop("scan", "repeat-until");
-  const loopOtherBody = loop("scan", "for-each", { body: { done: ["x"] } });
+  const loopPlain = loop("scan");
+  const loopTight = loop("scan", { maxIterations: 3 });
+  const loopOtherBody = loop("scan", { body: { done: ["x"] } });
   const pairs = [
     ["script command", [script("probe", { spec: { argv: ["node", "-e", "2"] } })], [scriptTask]],
     ["script env", [script("probe", { spec: { env: { KEY: "v" } } })], [scriptTask]],
     ["script timeout", [script("probe", { spec: { timeoutMs: 1 } })], [scriptTask]],
     ["loop maxIterations", [loopTight], [loopPlain]],
-    ["loop mode", [loopUntil], [loopPlain]],
     ["loop body", [loopOtherBody], [loopPlain]],
     ["plan operators", [plan("make", ["a", "b"])], [plan("make", ["a"])]],
     ["guard op", [task("second", { guard: { from: "first", op: "exists" } }), task("first")], [task("second", { guard: { from: "first", op: "not-exists" } }), task("first")]],
-    ["recovery", [task("frame", { recovery: { maxAttempts: 5, maxReplans: 1, strategy: ["block"] } })], [task("frame")]],
+    ["recovery", [task("frame", { recovery: { maxAttempts: 5 } })], [task("frame")]],
     ["input binding select", [task("second", { inputs: { x: { from: "first", select: "/a" } } }), task("first")], [task("second", { inputs: { x: { from: "first" } } }), task("first")]],
     ["done criteria", [task("deliver", { done: ["d"] })], [task("deliver")]],
     ["step order", [task("a"), task("b")], [task("b"), task("a")]],

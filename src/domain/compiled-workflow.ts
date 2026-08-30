@@ -12,7 +12,7 @@ export interface ContentRef {
   readonly content: string;
 }
 
-interface CompiledTaskBlock {
+export interface CompiledTaskBlock {
   readonly kind: "task";
   readonly id: string;
   readonly instruction: ContentRef;
@@ -52,13 +52,9 @@ interface CompiledPlanBlock {
 interface CompiledLoopBlock {
   readonly kind: "loop";
   readonly id: string;
-  readonly mode: "for-each" | "repeat-until";
-  readonly body: CompiledSequenceBlock;
-  readonly itemsBinding?: InputBinding;
-  readonly condition?: GuardClause;
+  readonly body: CompiledTaskBlock;
+  readonly itemsBinding: InputBinding;
   readonly maxIterations: number;
-  readonly recovery?: RecoveryPolicy;
-  readonly inputs?: Readonly<Record<string, InputBinding>>;
   readonly guard?: GuardClause;
 }
 

@@ -262,7 +262,7 @@ test("skipped checkpoints round-trip and stay resumable", () => {
 });
 
 test("a mid-loop snapshot round-trips and resumes the exact iteration", () => {
-  const wf = workflow([task("gather"), loop("review", "for-each"), task("deliver")]);
+  const wf = workflow([task("gather"), loop("review"), task("deliver")]);
   let state = start(wf, { runId: "run-9", target: "repo" }).state;
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("gathered", { files: ["a", "b", "c"] })) }).state;
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("reviewed a")) }).state;
@@ -280,47 +280,21 @@ test("a mid-loop snapshot round-trips and resumes the exact iteration", () => {
   assert.equal(next.state.stack.at(-1).key, "root/review/loop[3]/review-step");
 });
 
-test("a mid-loop multi-step body snapshot round-trips and resumes inside the body", () => {
-  const wf = workflow([
-    task("gather"),
-    { kind: "loop", id: "review", mode: "for-each", body: sequence("review-body", [task("read-one"), task("check-one")]), itemsBinding: { from: "gather", select: "/data/files" }, maxIterations: 8 },
-    task("deliver"),
-  ]);
-  let state = start(wf, { runId: "run-10", target: "repo" }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("gathered", { files: ["a", "b"] })) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("read a")) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("check a")) }).state;
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("read b")) }).state;
-  assert.equal(state.stack.at(-1).key, "root/review/loop[2]/check-one");
-  const parsed = parseSnapshot(JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: false }))));
-  assert.deepEqual(parsed.execution, state);
-  assert.deepEqual(parsed.execution.stack.map((frame) => frame.key ?? frame.blockId), ["root", "root/review", "root/review/loop[2]", "root/review/loop[2]/check-one"]);
-  const migrated = validateAgainstWorkflow(wf, parsed.execution);
-  assert.ok(migrated.ok, migrated.ok ? "" : migrated.error);
-  const next = transition(wf, parsed.execution, { type: "outcome", outcome: completed(cp("check b")) }, { sinkFor: () => ({ publishJson: (name, value) => ({ invocationKey: "root/review", output: name, checksum: "sha256-x", size: 1, mediaType: "application/json" }) }) });
-  assert.ok(next.ok, next.ok ? "" : next.error);
-  assert.equal(next.state.checkpoints["root/review"].data.iterations, 2, "the resumed run finishes the loop");
-});
-
 test("loop snapshots reject out-of-range iterations and orphan loop state", () => {
-  const wf = workflow([task("gather"), loop("review", "for-each", { maxIterations: 2 }), task("deliver")]);
+  const wf = workflow([task("gather"), loop("review", { maxIterations: 2 }), task("deliver")]);
   let state = start(wf, { runId: "r1" }).state;
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: ["a"] })) }).state;
   const snapshot = JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: true })));
   snapshot.execution.loops["root/review"].iteration = 9;
-  snapshot.execution.stack[1].scopeId = "loop[9]";
-  snapshot.execution.stack[2].key = "root/review/loop[9]";
-  snapshot.execution.stack[2].index = 0;
   const outOfRange = parseSnapshot(snapshot);
   assert.equal(outOfRange.status, "invalid");
-  assert.match(outOfRange.error, /iteration must be between 1 and 8/);
+  assert.match(outOfRange.error, /iteration must be an integer between 1 and 8/);
   const snapshot2 = JSON.parse(JSON.stringify(activeSnapshot({ workflow: wf.name, execution: state, delivered: true })));
   snapshot2.execution.loops["root/orphan"] = { iteration: 1 };
   const orphan = parseSnapshot(snapshot2);
   assert.equal(orphan.status, "invalid");
   assert.match(orphan.error, /no matching loop frame/);
 });
-
 test("a loop-free v5 snapshot restores identically alongside loop support", () => {
   const { wf, state } = midRunState();
   const snapshot = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });

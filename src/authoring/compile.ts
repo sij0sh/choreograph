@@ -7,6 +7,7 @@ import {
   type CompiledContract,
   type CompiledOperator,
   type CompiledSequenceBlock,
+  type CompiledTaskBlock,
   type CompiledWorkflowV2,
   type ContentRef,
 } from "../domain/compiled-workflow.ts";
@@ -84,13 +85,9 @@ export function compileWorkflow(workflow: Workflow, read: InstructionReader, wor
         return omitUndefined({
           kind: "loop" as const,
           id: loop.id,
-          mode: loop.mode,
-          body: convertBlock(loop.body) as CompiledSequenceBlock,
-          ...(loop.itemsBinding ? { itemsBinding: structuredClone(loop.itemsBinding) } : {}),
-          ...(loop.condition ? { condition: structuredClone(loop.condition) } : {}),
+          body: convertBlock(loop.body) as CompiledTaskBlock,
+          itemsBinding: structuredClone(loop.itemsBinding),
           maxIterations: loop.maxIterations,
-          ...(loop.recovery ? { recovery: structuredClone(loop.recovery) } : {}),
-          ...(loop.inputs ? { inputs: structuredClone(loop.inputs) } : {}),
           ...(loop.guard ? { guard: structuredClone(loop.guard) } : {}),
         });
       }

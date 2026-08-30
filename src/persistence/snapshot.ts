@@ -94,15 +94,8 @@ function frameAt(value: unknown, label: string): Frame {
     }
     case "node":
       return { kind, blockId, key, nodeId: requireString(raw.nodeId, `${label}.nodeId`), attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
-    case "loop": {
-      const scopeId = requireString(raw.scopeId, `${label}.scopeId`);
-      if (!/^loop\[\d+\]$/.test(scopeId)) throw new Error(`${label}.scopeId must look like loop[2]`);
-      const iteration = Number(scopeId.slice(5, -1));
-      if (iteration < 1 || iteration > LIMITS.checkpointListItems) {
-        throw new Error(`${label}.scopeId iteration must be between 1 and ${LIMITS.checkpointListItems}`);
-      }
-      return { kind, blockId, key, scopeId };
-    }
+    case "loop":
+      return { kind, blockId, key };
   }
 }
 
@@ -156,14 +149,12 @@ function loopsAt(value: unknown, label: string): Record<string, Execution["loops
   for (const [key, entry] of Object.entries(raw)) {
     const loopRaw = objectAt(entry, `${label}.${key}`);
     for (const field of Object.keys(loopRaw)) {
-      if (!["iteration", "items", "done", "exhausted"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted loop field`);
+      if (!["iteration", "items"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted loop field`);
     }
     const iteration = loopRaw.iteration;
     if (typeof iteration !== "number" || !Number.isInteger(iteration) || iteration < 1 || iteration > LIMITS.checkpointListItems) {
       throw new Error(`${label}.${key}.iteration must be an integer between 1 and ${LIMITS.checkpointListItems}`);
     }
-    if (loopRaw.done !== undefined && typeof loopRaw.done !== "boolean") throw new Error(`${label}.${key}.done must be a boolean`);
-    if (loopRaw.exhausted !== undefined && typeof loopRaw.exhausted !== "boolean") throw new Error(`${label}.${key}.exhausted must be a boolean`);
     let items: readonly JsonValue[] | undefined;
     if (loopRaw.items !== undefined) {
       if (!Array.isArray(loopRaw.items)) throw new Error(`${label}.${key}.items must be a list`);
@@ -174,8 +165,6 @@ function loopsAt(value: unknown, label: string): Record<string, Execution["loops
     loops[key] = {
       iteration,
       ...(items !== undefined ? { items } : {}),
-      ...(loopRaw.done === true ? { done: true } : {}),
-      ...(loopRaw.exhausted === true ? { exhausted: true } : {}),
     };
   }
   return loops;
@@ -204,11 +193,7 @@ function executionAt(value: unknown, label: string): Execution {
   const invocations = raw.invocations === undefined ? undefined : invocationsAt(raw.invocations, `${label}.invocations`);
   for (const frame of stack) {
     if (frame.kind !== "loop") continue;
-    const loopState = loops[frame.key];
-    if (!loopState) throw new Error(`${label}.loops is missing state for loop frame ${frame.key}`);
-    if (frame.scopeId !== `loop[${loopState.iteration}]`) {
-      throw new Error(`${label}.loops[${frame.key}].iteration does not match frame scope ${frame.scopeId}`);
-    }
+    if (!loops[frame.key]) throw new Error(`${label}.loops is missing state for loop frame ${frame.key}`);
   }
   const activeLoopKeys = new Set(stack.filter((frame) => frame.kind === "loop").map((frame) => frame.key));
   for (const key of Object.keys(loops)) {

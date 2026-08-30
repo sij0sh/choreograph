@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { start, transition } from "../../src/engine/interpreter.ts";
-import { completed, cp, loop, memoryStore, script, sequence, task, workflow } from "../engine/helpers.mjs";
+import { completed, cp, loop, memoryStore, script, task, workflow } from "../engine/helpers.mjs";
 import { isArtifactRef } from "../../src/domain/artifacts.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
 import { ArtifactStore } from "../../src/runtime/artifact-store.ts";
@@ -187,7 +187,7 @@ test("script checkpoints and loop aggregates bind downstream", () => {
 test("$item binds the current loop item inside the body", () => {
   const wf = workflow([
     task("gather"),
-    loop("review", "for-each", { body: { inputs: { item: { from: "$item" }, name: { from: "$item", select: "/name" } } } }),
+    loop("review", { body: { inputs: { item: { from: "$item" }, name: { from: "$item", select: "/name" } } } }),
     task("deliver"),
   ]);
   let state = start(wf, { runId: "r1" }).state;
@@ -216,7 +216,7 @@ test("$item binds the current loop item inside the body", () => {
 });
 
 test("a completed loop aggregate is a downstream binding source", () => {
-  const wf = workflow([task("gather"), loop("review", "for-each"), task("deliver", { inputs: { review: { from: "review", select: "/iterations" } } })]);
+  const wf = workflow([task("gather"), loop("review"), task("deliver", { inputs: { review: { from: "review", select: "/iterations" } } })]);
   const store = memoryStore();
   let state = start(wf, { runId: "r1" }, store).state;
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: ["a", "b"] })) }, store).state;
@@ -240,7 +240,7 @@ test("loop aggregate references resolve downstream transparently", () => {
     const store = ArtifactStore.forRun(root, "r1");
     const wf = workflow([
       task("gather"),
-      loop("review", "for-each"),
+      loop("review"),
       script("consume", { spec: { stdout: "json" }, inputs: { finding: { from: "review", select: "/data/results/0/outputs/review-step" } } }),
     ]);
     let state = start(wf, { runId: "r1" }, store).state;
@@ -278,8 +278,8 @@ test("over-budget body outputs bind the payload, not a reference of a reference"
     const wf = workflow([
       task("gather"),
       {
-        kind: "loop", id: "review", mode: "for-each", maxIterations: 8,
-        body: sequence("review-body", [script("review-step", { spec: { stdout: "json" } })]),
+        kind: "loop", id: "review", maxIterations: 8,
+        body: script("review-step", { spec: { stdout: "json" } }),
         itemsBinding: { from: "gather", select: "/data/files" },
       },
       script("consume", { spec: { stdout: "json" }, inputs: { finding: { from: "review", select: "/data/results/0/outputs/review-step" } } }),
@@ -324,23 +324,25 @@ test("$item values resolve their references for scripts and prompts", () => {
   try {
     const store = ArtifactStore.forRun(root, "r1");
     const wf = workflow([
-      loop("until-green", "repeat-until", { maxIterations: 3, condition: { from: "until-green-step", select: "/data/exitCode", op: "equals", value: 0 } }),
-      loop("review", "for-each", { itemsBinding: { from: "until-green", select: "/data/results" }, body: { inputs: { prior: { from: "$item", select: "/outputs/until-green-step" } } } }),
+      task("seed"),
+      loop("first", { itemsBinding: { from: "seed", select: "/data/files" }, body: { inputs: { one: { from: "$item" } } } }),
+      loop("review", { itemsBinding: { from: "first", select: "/data/results" }, body: { inputs: { prior: { from: "$item", select: "/outputs/first-step" } } } }),
       task("deliver"),
     ]);
     let state = start(wf, { runId: "r1" }, store).state;
-    state = transition(wf, state, { type: "outcome", outcome: completed(cp("try 1", { exitCode: 0 })) }, store).state;
-    const binding = resolveBinding(wf, state, { from: "$item", select: "/outputs/until-green-step" });
+    state = transition(wf, state, { type: "outcome", outcome: completed(cp("seeded", { files: ["a"] })) }, store).state;
+    state = transition(wf, state, { type: "outcome", outcome: completed(cp("first pass", { ok: true })) }, store).state;
+    const binding = resolveBinding(wf, state, { from: "$item", select: "/outputs/first-step" });
     assert.equal(binding.ok, true);
-    assert.equal(binding.value.checksum, state.checkpoints["root/until-green"].data.results[0].outputs["until-green-step"].checksum, "$item carries the upstream reference");
+    assert.equal(binding.value.checksum, state.checkpoints["root/first"].data.results[0].outputs["first-step"].checksum, "$item carries the upstream reference");
 
-    const resolved = resolveScriptInputs(wf, state, wf.root.children[1].body.children[0].inputs, (r) => store.materialize(r, root));
+    const resolved = resolveScriptInputs(wf, state, wf.root.children[2].body.inputs, (r) => store.materialize(r, root));
     assert.equal(resolved.ok, true, resolved.ok ? "" : resolved.error);
     const onDisk = JSON.parse(readFileSync(join(root, resolved.inputs.prior), "utf8"));
-    assert.deepEqual(onDisk, { exitCode: 0 });
+    assert.deepEqual(onDisk, { ok: true });
 
-    const section = inputSection(wf, state, { prior: { from: "$item", select: "/outputs/until-green-step" } }, refLoaderFor(store));
-    assert.match(section, /\{"exitCode":0\}/);
+    const section = inputSection(wf, state, { prior: { from: "$item", select: "/outputs/first-step" } }, refLoaderFor(store));
+    assert.match(section, /\{"ok":true\}/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

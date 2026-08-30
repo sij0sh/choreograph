@@ -252,7 +252,7 @@ test("loop aggregates keep one shape regardless of output size", () => {
   const store = memoryStore();
   const run = (blobSize) => {
     const items = ["a", "b", "c", "d", "e", "f"];
-    const wf = workflow([task("gather"), loop("review", "for-each", { maxIterations: 8 }), task("deliver")]);
+    const wf = workflow([task("gather"), loop("review", { maxIterations: 8 }), task("deliver")]);
     let state = start(wf, { runId: "r1" }, store).state;
     state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: items })) }, store).state;
     let result = { ok: true, state };
@@ -276,7 +276,7 @@ test("loop aggregates keep one shape regardless of output size", () => {
 
 test("loop aggregates over the checkpoint bound are rejected", () => {
   const items = ["a".repeat(2710), "b".repeat(2710), "c".repeat(2710), "d".repeat(2710), "e".repeat(2710), "f".repeat(2710)];
-  const wf = workflow([task("gather"), loop("review", "for-each", { maxIterations: 8 }), task("deliver")]);
+  const wf = workflow([task("gather"), loop("review", { maxIterations: 8 }), task("deliver")]);
   const store = memoryStore();
   let state = start(wf, { runId: "r1" }, store).state;
   state = transition(wf, state, { type: "outcome", outcome: completed(cp("g", { files: items })) }, store).state;

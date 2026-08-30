@@ -2,7 +2,6 @@ import type { ArtifactRef } from "../domain/artifacts.ts";
 import { canonicalJsonBytes, type JsonValue } from "../domain/json.ts";
 import { LIMITS } from "../domain/limits.ts";
 import type { NodeStatus, RunnerKind } from "../domain/node.ts";
-import type { LoopBlock } from "../domain/workflow.ts";
 
 export const EVENT_ENTRY_TYPE = "choreograph-events";
 
@@ -13,7 +12,7 @@ const LOG_STREAMS = ["stdout", "stderr", "progress"] as const;
 
 export type EventRunner = (typeof EVENT_RUNNER_KINDS)[number];
 export type InvocationStatus = NodeStatus | "ready";
-type LoopMode = LoopBlock["mode"];
+type LoopMode = "for-each" | "repeat-until";
 type LogStream = (typeof LOG_STREAMS)[number];
 
 interface RunEventBase {

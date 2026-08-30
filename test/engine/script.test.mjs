@@ -294,30 +294,6 @@ test("a failing output contract rejects the script even when a store is availabl
   assert.equal(next.effect.kind, "deliver", "the contract failure retries instead of publishing");
   assert.equal(store.published.length, 0, "nothing is published for a contract violation");
 });
-
-
-test("a loop with a script body records its aggregate through the process-exit seam", () => {
-  const base = script("x").script;
-  const body = script("apply-fix", { spec: { ...base, stdout: "json", acceptedExitCodes: [0, 1] } });
-  const fix = loop("until-green", "repeat-until", { maxIterations: 3, body, condition: { from: "apply-fix", select: "/data/exitCode", op: "equals", value: 0 } });
-  const wf = workflow([fix, task("deliver")]);
-  const store = memoryStore();
-  let state = start(wf, { runId: "r1" }, store).state;
-  let result = transition(wf, state, exitEvent("root/until-green/loop[1]/apply-fix", 1), store);
-  assert.ok(result.ok, result.ok ? "" : result.error);
-  assert.equal(result.state.stack.at(-1).key, "root/until-green/loop[2]/apply-fix", "a false condition reruns the body");
-  result = transition(wf, result.state, exitEvent("root/until-green/loop[2]/apply-fix", 0), store);
-  assert.ok(result.ok, result.ok ? "" : result.error);
-  assert.equal(result.effect.kind, "deliver");
-  assert.equal(result.state.stack.at(-1).blockId, "deliver");
-  const aggregate = result.state.checkpoints["root/until-green"];
-  assert.equal(aggregate.data.mode, "repeat-until");
-  assert.equal(aggregate.data.iterations, 2);
-  const ref = aggregate.data.results[0].outputs["apply-fix"];
-  assert.equal(ref.output, "1/apply-fix");
-  assert.deepEqual(store.published.at(-1).value, { exitCode: 0 });
-});
-
 test("the configured stderr mode is honored in the checkpoint data", () => {
   const exit = (stderr) => ({ type: "process-exit", key: "root/emit", exit: { code: 0, timedOut: false, stdout: "ok", stderr, truncated: false } });
   const runOnce = (options, event) => {

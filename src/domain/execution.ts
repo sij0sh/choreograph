@@ -30,7 +30,6 @@ export interface LoopFrame {
   readonly kind: "loop";
   readonly blockId: string;
   readonly key: string;
-  readonly scopeId: string;
 }
 
 export interface NodeFrame {
@@ -54,8 +53,6 @@ type ExecutionStatus = "active" | "completed" | "aborted";
 export interface LoopState {
   readonly iteration: number;
   readonly items?: readonly JsonValue[];
-  readonly done?: boolean;
-  readonly exhausted?: boolean;
 }
 
 export interface Execution {
