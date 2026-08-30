@@ -3,7 +3,7 @@ import { jsonPointerGet, type JsonValue } from "./json.ts";
 import type { Workflow } from "./workflow.ts";
 import { blockOf, isBindableBlock, type AuthoredBlock } from "./workflow.ts";
 import type { PlanNode } from "../planning/schema.ts";
-import { lastSegment } from "./keys.ts";
+import { checkpointIndexFor } from "./checkpoint-index.ts";
 import type { Checkpoint } from "./checkpoint.ts";
 import type { InputBinding } from "./workflow.ts";
 import type { ArtifactRef } from "./node.ts";
@@ -85,16 +85,7 @@ export type ArtifactResult =
   | { readonly ok: false; readonly error: string };
 
 function checkpointOf(workflow: Workflow, state: Execution, blockId: string): { key: string; checkpoint: NonNullable<Execution["checkpoints"][string]> } | undefined {
-  const prefix = `${workflow.root.id}/`;
-  const order = state.checkpointOrder ?? Object.keys(state.checkpoints);
-  for (let i = order.length - 1; i >= 0; i -= 1) {
-    const key = order[i];
-    if (key.startsWith(prefix) && lastSegment(key) === blockId) {
-      const checkpoint = state.checkpoints[key];
-      if (checkpoint !== undefined) return { key, checkpoint };
-    }
-  }
-  return undefined;
+  return checkpointIndexFor(state, `${workflow.root.id}/`).newestByBlock.get(blockId);
 }
 
 export function completedPlanNodeOf(
@@ -120,9 +111,8 @@ function aggregateOf(state: Execution, key: string): JsonValue | undefined {
   return { version: 1, nodes } as JsonValue;
 }
 
-function planKeyForBlock(state: Execution, blockId: string): string | undefined {
-  const entry = Object.entries(state.plans).find(([, execution]) => execution.blockId === blockId);
-  return entry ? entry[0] : undefined;
+function planKeyForBlock(workflow: Workflow, state: Execution, blockId: string): string | undefined {
+  return checkpointIndexFor(state, `${workflow.root.id}/`).planKeyByBlock.get(blockId);
 }
 
 function itemOf(state: Execution): JsonValue | undefined {
@@ -145,7 +135,7 @@ function artifactForBlock(workflow: Workflow, state: Execution, block: AuthoredB
         : { ok: true, present: false, reason: "checkpoint" };
     }
     case "plan": {
-      const key = planKeyForBlock(state, block.id);
+      const key = planKeyForBlock(workflow, state, block.id);
       if (key === undefined) {
         const skipped = checkpointOf(workflow, state, block.id)?.checkpoint;
         return skipped?.skipped

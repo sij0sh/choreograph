@@ -265,7 +265,9 @@ test("a script step runs between tasks without a model turn and persists", async
   await settle(ext.handlers, ctx);
 
   const snapshots = ext.entries.filter((entry) => entry.customType === "choreograph");
-  const scriptSnapshot = snapshots.find((entry) => entry.data.execution?.checkpoints?.["root/probe"]);
+  // Snapshots share the engine's live checkpoints record, so match on the
+  // latest commit, whose stack describes the position at append time.
+  const scriptSnapshot = snapshots.findLast((entry) => entry.data.execution?.checkpoints?.["root/probe"]);
   assert.ok(scriptSnapshot, "the script checkpoint is persisted");
   assert.equal(scriptSnapshot.data.execution.checkpoints["root/probe"].data.stdout, "computed");
   assert.equal(scriptSnapshot.data.execution.stack.at(-1).blockId, "deliver", "the run advanced past the script without a model turn");

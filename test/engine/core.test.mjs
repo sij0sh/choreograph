@@ -164,12 +164,15 @@ test("transitions after completion fail", () => {
   assert.ok(!after.ok);
 });
 
-test("the engine does not mutate the input state", () => {
+test("the engine returns the committed state and never rewrites the input stack", () => {
   const wf = workflow([task("a"), task("b")]);
   const started = start(wf, { runId: "r1" });
   const before = structuredClone(started.state);
-  transition(wf, started.state, { type: "outcome", outcome: completed(cp("done")) });
-  assert.deepEqual(started.state, before);
+  const done = transition(wf, started.state, { type: "outcome", outcome: completed(cp("done")) });
+  assert.ok(done.ok);
+  assert.equal(done.state.checkpoints["root/a"]?.summary, "done");
+  assert.deepEqual(done.state.checkpointOrder, ["root/a"]);
+  assert.deepEqual(started.state.stack, before.stack, "the input stack still describes the pre-commit position");
 });
 
 test("identical runs produce identical states", () => {

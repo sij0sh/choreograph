@@ -4,6 +4,7 @@ import { frameAttempt, isAttemptBearingFrame, type Execution, type Frame } from 
 import { DEFAULT_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
 import { blockOf, type Workflow } from "../domain/workflow.ts";
 import { planKeyOf } from "../domain/keys.ts";
+import { noteCheckpointCommitted } from "../domain/checkpoint-index.ts";
 import type { Effect, EngineResult, Issue } from "./interpreter.ts";
 import { enterInvocation } from "./interpreter.ts";
 
@@ -42,9 +43,12 @@ function checkpointContractError(workflow: Workflow, state: Execution, leaf: Fra
 }
 
 function recordCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): Execution {
-  const checkpoints = { ...state.checkpoints, [key]: checkpoint };
-  const checkpointOrder = state.checkpointOrder.includes(key) ? state.checkpointOrder : [...state.checkpointOrder, key];
-  return { ...state, checkpoints, checkpointOrder };
+  const checkpoints = state.checkpoints as Record<string, Checkpoint>;
+  const tracked = Object.hasOwn(checkpoints, key);
+  checkpoints[key] = checkpoint;
+  if (!tracked) (state.checkpointOrder as string[]).push(key);
+  noteCheckpointCommitted(state, key, checkpoint);
+  return { ...state };
 }
 
 export function applyNeedsWork(workflow: Workflow, state: Execution, outcome: Outcome): EngineResult {

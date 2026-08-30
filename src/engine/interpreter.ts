@@ -18,6 +18,7 @@ import { applyNeedsWork } from "./recovery.ts";
 import { contractError as contractErrorFor } from "../domain/contract.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
+import { noteCheckpointCommitted, noteCheckpointRemoved, notePlanKeyCreated, notePlanKeyRemoved } from "../domain/checkpoint-index.ts";
 import { evaluateGuard, skipReason, type GuardClause } from "../domain/guard.ts";
 import type { LoopBlock, OperatorDescriptor, PlanBlock, ScriptBlock, ScriptSpec, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
 import { blockOf, isGuardBearingBlock } from "../domain/workflow.ts";
@@ -162,7 +163,10 @@ function skipBlock(state: Execution, parentKey: string, guard: GuardClause, bloc
   if (!isPlan) return withCp;
   const plans = { ...withCp.plans };
   for (const [planKey, execution] of Object.entries(plans)) {
-    if (execution.blockId === blockId) delete plans[planKey];
+    if (execution.blockId === blockId) {
+      delete plans[planKey];
+      notePlanKeyRemoved(withCp, blockId, planKey);
+    }
   }
   return { ...withCp, plans };
 }
@@ -409,14 +413,13 @@ function blockedProblems(workflow: Workflow, state: Execution, leaf: Frame, outc
   return errors;
 }
 
-function commitCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): Execution["checkpoints"] {
-  return { ...state.checkpoints, [key]: checkpoint };
-}
-
 function withCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): Execution {
-  const checkpoints = commitCheckpoint(state, key, checkpoint);
-  const checkpointOrder = state.checkpointOrder.includes(key) ? state.checkpointOrder : [...state.checkpointOrder, key];
-  return { ...state, checkpoints, checkpointOrder };
+  const checkpoints = state.checkpoints as Record<string, Checkpoint>;
+  const tracked = Object.hasOwn(checkpoints, key);
+  checkpoints[key] = checkpoint;
+  if (!tracked) (state.checkpointOrder as string[]).push(key);
+  noteCheckpointCommitted(state, key, checkpoint);
+  return { ...state };
 }
 
 function planKeyOfNode(node: NodeFrame): string {
@@ -497,6 +500,7 @@ function completePlanCreation(workflow: Workflow, state: Execution, leaf: Extrac
     results: {},
   };
   const planKeyed = withCheckpoint(state, leaf.key, stripPlanPayload(outcome.checkpoint));
+  notePlanKeyCreated(planKeyed, block.id, leaf.key);
   const plans = { ...planKeyed.plans, [leaf.key]: execution };
   const stack: Frame[] = [...state.stack.slice(0, -1), { kind: "plan", blockId: block.id, key: leaf.key, mode: "execute" as const, attempt: 1 }];
   return finishAdvance(workflow, enterInvocation(workflow, { ...planKeyed, plans }, leaf, "succeeded"), stack);
@@ -530,11 +534,15 @@ function completeNode(workflow: Workflow, state: Execution, leaf: NodeFrame, out
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
   }
-  const checkpoints = { ...state.checkpoints };
-  delete checkpoints[leaf.key];
-  const completedState = state.checkpoints[leaf.key] === undefined
-    ? state
-    : { ...state, checkpoints, checkpointOrder: state.checkpointOrder.filter((key) => key !== leaf.key) };
+  const hadCheckpoint = state.checkpoints[leaf.key] !== undefined;
+  if (hadCheckpoint) {
+    delete (state.checkpoints as Record<string, Checkpoint>)[leaf.key];
+    const order = state.checkpointOrder as string[];
+    const at = order.indexOf(leaf.key);
+    if (at >= 0) order.splice(at, 1);
+    noteCheckpointRemoved(state, leaf.key, `${workflow.root.id}/`);
+  }
+  const completedState = hadCheckpoint ? { ...state } : state;
   const plans = {
     ...completedState.plans,
     [planKey]: {

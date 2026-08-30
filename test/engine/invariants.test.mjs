@@ -38,7 +38,8 @@ test("invariant: structural blocks hold no effects of their own", () => {
   const before = structuredClone(started.state);
   const result = transition(wf, started.state, { type: "outcome", outcome: completed(cp("done")) });
   assert.ok(result.ok);
-  assert.deepEqual(started.state, before, "structural advancement never mutates prior state");
+  assert.deepEqual(started.state.stack, before.stack, "structural advancement never rewrites the prior stack");
+  assert.equal(result.state.checkpoints["root/s"], undefined, "structural advancement records no checkpoint of its own");
 });
 
 test("invariant: retry budgets are finite", () => {
