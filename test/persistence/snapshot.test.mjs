@@ -194,6 +194,21 @@ test("pre-version-7 active snapshots report as invalid", () => {
   assert.match(stale.error, /version must be 7/);
 });
 
+test("unknown snapshot statuses report as invalid and name the status (c14)", () => {
+  const corrupt = parseSnapshot({ v: 7, status: "pausing", workflow: "demo", runId: "r1", execution: { status: "active", stack: [{ kind: "task", blockId: "a", key: "root/a", attempt: 1 }] }, delivered: false });
+  assert.equal(corrupt.status, "invalid");
+  assert.match(corrupt.error, /unknown snapshot status "pausing"/);
+  const empty = parseSnapshot({ v: 7, status: "", workflow: "demo", runId: "r1" });
+  assert.equal(empty.status, "invalid");
+  assert.match(empty.error, /unknown snapshot status ""/);
+});
+
+test("missing or non-string statuses still return null so foreign entries stay skipped", () => {
+  assert.equal(parseSnapshot({ v: 7, workflow: "demo", runId: "r1" }), null);
+  assert.equal(parseSnapshot({ v: 7, status: 7, workflow: "demo", runId: "r1" }), null);
+  assert.equal(parseSnapshot({ status: { nested: true } }), null);
+});
+
 test("invalid snapshots never partially resume", () => {
   const invalid = parseSnapshot({ v: 7, status: "active", workflow: "demo", execution: { status: "active", stack: [{ kind: "task" }] }, delivered: false });
   assert.equal(invalid.status, "invalid");

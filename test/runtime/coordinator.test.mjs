@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { RuntimeCoordinator, newRunId } from "../../src/runtime/coordinator.ts";
 import { activeSnapshot, terminalSnapshot } from "../../src/persistence/snapshot.ts";
 import { AgentRunner } from "../../src/runtime/runner.ts";
-import { completed, cp, task, workflow } from "../engine/helpers.mjs";
+import { completed, cp, script, task, workflow } from "../engine/helpers.mjs";
 import { start } from "../../src/engine/interpreter.ts";
 
 function harness(options = {}) {
@@ -338,6 +338,108 @@ test("a send that resolves after abort appends no active snapshot", async () => 
   assert.equal(h.entries.at(-1).data.status, "aborted", "the terminal snapshot is the last entry");
 });
 
+function manualAgentRunner() {
+  const pending = new Map();
+  return {
+    pending,
+    kind: "agent",
+    retrySafety: "idempotent",
+    execute(invocation) {
+      return new Promise((resolve) => pending.set(invocation.key, resolve));
+    },
+    settle(key, result) {
+      const resolve = pending.get(key);
+      if (!resolve) return false;
+      pending.delete(key);
+      resolve(result);
+      return true;
+    },
+    cancel(invocation) {
+      const resolve = pending.get(invocation.key);
+      if (!resolve) return false;
+      pending.delete(invocation.key);
+      resolve({ status: "canceled" });
+      return true;
+    },
+  };
+}
+
+test("abort wins the terminal race and the in-flight transition reports the run ended (c8)", async () => {
+  const h = harness();
+  const wf = simpleWorkflow();
+  const runtime = coordinator(h, [wf]);
+  const runner = manualAgentRunner();
+  runtime.registry.register(runner);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  const transitionPromise = runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  const abortPromise = runtime.abort(undefined, h.ctx);
+  const [transitionResult, abortResult] = await Promise.all([transitionPromise, abortPromise]);
+  const terminal = h.entries.filter((e) => ["completed", "aborted"].includes(e.data?.status));
+  assert.equal(terminal.length, 1, "exactly one terminal snapshot");
+  assert.equal(terminal[0].data.status, "aborted");
+  assert.equal(runtime.state.status, "idle");
+  assert.equal(transitionResult.details.status, "aborted", "the transition reports the true ended state");
+  assert.match(transitionResult.content[0].text, /was aborted while this operation was in flight/);
+  assert.equal(transitionResult.terminate, true);
+  assert.ok(abortResult.terminate, "the abort keeps its terminal response");
+});
+
+test("a completing transition wins the race and the abort reports nothing to abort (c8)", async () => {
+  const h = harness();
+  const wf = simpleWorkflow();
+  const runtime = coordinator(h, [wf]);
+  const runner = manualAgentRunner();
+  runtime.registry.register(runner);
+  runtime.handleSessionStart(h.ctx);
+  await runtime.startWorkflow(h.ctx, wf, "");
+  await runtime.transition({ key: "root/frame", status: "completed", met: ["framed"], checkpoint: cp("framed") }, undefined, h.ctx);
+  // The deliver outcome is already acquiring the terminal lock when the abort
+  // starts; the completion commits and the abort must report no-op instead of
+  // flipping the terminal record to aborted.
+  const transitionPromise = runtime.transition({ key: "root/deliver", status: "completed", checkpoint: cp("delivered") }, undefined, h.ctx);
+  const abortPromise = runtime.abort(undefined, h.ctx);
+  const [transitionResult, abortResult] = await Promise.all([transitionPromise, abortPromise]);
+  const terminal = h.entries.filter((e) => ["completed", "aborted"].includes(e.data?.status));
+  assert.equal(terminal.length, 1, "exactly one terminal snapshot");
+  assert.equal(terminal[0].data.status, "completed");
+  assert.equal(runtime.state.status, "idle");
+  assert.match(transitionResult.content[0].text, /completed\. A summary request arrives in the next message/);
+  assert.match(abortResult.content[0].text, /no longer active; there is nothing to abort/);
+  assert.equal(abortResult.terminate, undefined, "the abort does not claim it ended the run");
+});
+
+test("a script exit resolving during abort commits exactly one terminal snapshot (c8)", async () => {
+  const h = harness();
+  const wf = workflow([script("probe", { spec: { stdout: "json" } })]);
+  const runtime = coordinator(h, [wf]);
+  const pending = new Map();
+  runtime.registry.register({
+    kind: "process",
+    retrySafety: "at-least-once",
+    execute(invocation) {
+      return new Promise((resolve) => pending.set(invocation.key, resolve));
+    },
+    // The script finishes successfully right as the abort cancels it.
+    cancel(invocation) {
+      const resolve = pending.get(invocation.key);
+      if (!resolve) return false;
+      pending.delete(invocation.key);
+      resolve({ status: "succeeded", exit: { code: 0, timedOut: false, stdout: "{}\n", stderr: "", truncated: false } });
+      return true;
+    },
+  });
+  runtime.handleSessionStart(h.ctx);
+  // startWorkflow awaits the process dispatch, so let it park first.
+  const started = runtime.startWorkflow(h.ctx, wf, "");
+  while (!pending.has("root/probe")) await new Promise((resolve) => setImmediate(resolve));
+  await runtime.abort(undefined, h.ctx);
+  await started;
+  const terminal = h.entries.filter((e) => ["completed", "aborted"].includes(e.data?.status));
+  assert.equal(terminal.length, 1, "exactly one terminal snapshot");
+  assert.equal(runtime.state.status, "idle");
+});
+
 test("abort restores idle tools and ignores later transitions", async () => {
   const h = harness();
   const wf = simpleWorkflow();
@@ -434,6 +536,17 @@ test("resume drops invalid snapshots with one warning", () => {
   const runtime = coordinator(h, [wf]);
   runtime.handleSessionStart(h.ctx);
   assert.ok(h.ctx.ui.notices.some((notice) => notice.level === "warning" && /Cannot resume|Dropped/.test(notice.message)));
+  assert.equal(runtime.handleBeforeAgentStart({ systemPrompt: "base" }), undefined, "no run prompt while idle");
+});
+
+test("resume warns on unknown snapshot statuses instead of dropping silently (c14)", () => {
+  const h = harness();
+  const wf = simpleWorkflow();
+  const state = start(wf, { runId: "odd" }).state;
+  h.entries.push({ type: "custom", customType: "choreograph", data: { status: "pausing", v: 7, workflow: wf.name, runId: "odd", execution: state, delivered: true } });
+  const runtime = coordinator(h, [wf]);
+  runtime.handleSessionStart(h.ctx);
+  assert.ok(h.ctx.ui.notices.some((notice) => notice.level === "warning" && /Dropped active workflow run: malformed snapshot \(unknown snapshot status "pausing"\)/.test(notice.message)));
   assert.equal(runtime.handleBeforeAgentStart({ systemPrompt: "base" }), undefined, "no run prompt while idle");
 });
 

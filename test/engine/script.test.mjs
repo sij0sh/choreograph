@@ -88,6 +88,39 @@ test("json stdout parses into the checkpoint data", () => {
   assert.deepEqual(next.state.checkpoints["root/emit"].data, { pass: 7, fail: 0 });
 });
 
+test("script stdout keys win over runtime side outputs (c3)", () => {
+  const wf = workflow([script("emit", { spec: { stdout: "json", stderr: "json" } })]);
+  const started = start(wf, { runId: "r1" });
+  const next = transition(wf, started.state, {
+    type: "process-exit",
+    key: "root/emit",
+    exit: { code: 0, timedOut: false, stdout: '{"status":"ok","stderr":"mine","files":"mine"}\n', stderr: '{"level":"warn"}', truncated: false },
+    files: [{ invocationKey: "root/emit#1", output: "report.json", checksum: "sha256-x", size: 3, mediaType: "application/json" }],
+  });
+  assert.ok(next.ok, next.ok ? "" : next.error);
+  const data = next.state.checkpoints["root/emit"].data;
+  assert.equal(data.stderr, "mine", "the script's own stderr entry survives (corr-c3)");
+  assert.equal(data.files, "mine", "the script's own files entry survives (corr-c3)");
+  assert.equal(data.status, "ok");
+});
+
+test("side outputs land when the script does not use their keys", () => {
+  const wf = workflow([script("emit", { spec: { stdout: "json", stderr: "json" } })]);
+  const started = start(wf, { runId: "r1" });
+  const ref = { invocationKey: "root/emit#1", output: "report.json", checksum: "sha256-x", size: 3, mediaType: "application/json" };
+  const next = transition(wf, started.state, {
+    type: "process-exit",
+    key: "root/emit",
+    exit: { code: 0, timedOut: false, stdout: '{"status":"ok"}\n', stderr: '{"level":"warn"}', truncated: false },
+    files: [ref],
+  });
+  assert.ok(next.ok, next.ok ? "" : next.error);
+  const data = next.state.checkpoints["root/emit"].data;
+  assert.deepEqual(data.stderr, { level: "warn" });
+  assert.deepEqual(data.files, { "report.json": ref });
+  assert.equal(data.status, "ok");
+});
+
 test("invalid json stdout applies the repair policy", () => {
   const wf = workflow([script("emit", { spec: { stdout: "json" }, recovery: { maxAttempts: 2 } })]);
   const started = start(wf, { runId: "r1" });

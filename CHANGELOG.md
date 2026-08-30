@@ -4,6 +4,27 @@ Notable behavior changes to choreograph, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Entries are
 behavioral and reference the commits that introduced them.
 
+## [Unreleased]
+
+### Fixed
+
+- Value guards (`equals`, `not-equals`, `in`, `not-in`, `gt`, `gte`, `lt`,
+  `lte`) fail the transition with an error naming the block, the op, and the
+  pointer when the operand is missing or the comparison is unevaluable; they
+  no longer silently record a skip. `exists`/`not-exists` still key off
+  presence.
+- Script side outputs (stderr, captured files) no longer shadow same-named
+  keys the script itself returned in its stdout JSON; script stdout wins and
+  runtime sides keep their documented keys only where the script did not use
+  them.
+- The abort terminal commit is serialized against the transition epilogue
+  behind a FIFO async mutex; a concurrent transition or script completion can
+  no longer publish a stale run status, and the losing side reports the true
+  ended state. The measured lock wait is bounded below 0.4ms.
+- Restoring a session whose latest choreograph snapshot carries an unknown
+  status now warns with the offending status instead of dropping the run
+  silently; entries without a string status are still skipped as foreign.
+
 ## [0.2.0] - 2026-09-02
 
 A simplification release. The runtime keeps three durable representations: the
