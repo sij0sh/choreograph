@@ -290,6 +290,27 @@ export function rolloverSnapshot(workflow: string, runId: string, transferId: st
   return { v: 6, status: "rollover-pending", workflow, runId, transferId };
 }
 
+/**
+ * O(1) delivered marker (fx5b): records that a run's instructions were delivered
+ * without re-committing the full state. Readers accept both this and the legacy
+ * full active snapshot with `delivered: true`.
+ */
+export type DeliveredTombstone = {
+  readonly v: 1;
+  readonly kind: "delivered";
+  readonly runId: string;
+};
+
+export function deliveredTombstone(runId: string): DeliveredTombstone {
+  return { v: 1, kind: "delivered", runId };
+}
+
+export function isDeliveredTombstone(data: unknown): data is DeliveredTombstone {
+  if (typeof data !== "object" || data === null) return false;
+  const tombstone = data as Record<string, unknown>;
+  return tombstone.v === 1 && tombstone.kind === "delivered" && typeof tombstone.runId === "string";
+}
+
 export function terminalSnapshot(
   status: "completed" | "aborted",
   workflow: string,

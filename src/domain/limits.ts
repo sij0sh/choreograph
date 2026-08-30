@@ -47,6 +47,10 @@ export const LIMITS = {
   // Snapshot commits per session; rollover-capable hosts roll to a fresh child session,
   // embedders pause the run, so per-session files stay bounded.
   snapshotEntriesPerSession: 256,
+  // Serialized snapshot payload bytes per session (same rollover/pause split). 16 MiB
+  // binds the measured runaway region (P~120 at 1 KiB states, audit probe c5) without
+  // binding healthy summary-only runs earlier than the entry cap (node-5 measurement).
+  snapshotBytesPerSession: 16_777_216,
   scriptCaptureFiles: 4,
 } as const;
 
