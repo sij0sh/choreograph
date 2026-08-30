@@ -1,8 +1,9 @@
 import { parseDocument } from "yaml";
 import { currentPosition } from "../engine/interpreter.ts";
 import { CONTROL_TOOLS, RETRY_TOOL_NAME } from "./capabilities.ts";
-import type { Execution } from "../domain/execution.ts";
-import type { LoopFrame } from "../domain/execution.ts";
+import { frameAttempt, type Execution, type LoopFrame } from "../domain/execution.ts";
+import { BOUNDARY_CHECKPOINT_FIELDS, TRANSITION_SHAPE } from "../domain/checkpoint.ts";
+import { completedPlanNodeOf } from "../domain/artifacts.ts";
 import { canonicalJson, canonicalJsonBytes } from "../domain/json.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts"
 import type { Workflow } from "../domain/workflow.ts";
@@ -69,12 +70,17 @@ function toolsSection(tools: readonly string[] | undefined): string {
   return lines.join("\n");
 }
 
+const transitionStatuses = TRANSITION_SHAPE.statuses.map((status) => `\`${status}\``).join(", ");
+const boundaryCheckpointShape = BOUNDARY_CHECKPOINT_FIELDS
+  .map((field) => `\`${field}\`${TRANSITION_SHAPE.checkpointFields[field].required ? " (required)" : ""}`)
+  .join(", ");
+
 const TRANSITION_CONTRACT = [
   "## Transition contract",
   "Conclude the current position with exactly one `workflow_transition` call.",
-  "- `status`: `completed` when the criteria are met, `needs-work` when the output has problems, or `blocked` when you cannot proceed.",
+  `- \`status\`: one of ${transitionStatuses}. Use \`completed\` when the criteria are met, \`needs-work\` when the output has problems, or \`blocked\` when you cannot proceed.`,
   "- `met`: the required criterion IDs below that are complete, copied verbatim. Only valid with `status: \"completed\"`; a completion must list every required criterion.",
-  "- `checkpoint`: an object with a required `summary` and optional `evidence`, `decisions`, `unknowns`, and `data` fields. No other fields exist at the top level or inside `checkpoint`; structured output goes inside `checkpoint.data`.",
+  `- \`checkpoint\`: an object with these fields: ${boundaryCheckpointShape}. No other fields exist at the top level or inside \`checkpoint\`; structured output goes inside \`checkpoint.data\`.`,
   "- Caps: `evidence`/`decisions`/`unknowns` at most " + LIMITS.checkpointListItems + " items of " + LIMITS.checkpointItemBytes + " bytes each; `summary` at most " + LIMITS.checkpointSummaryBytes / 1024 + " KiB; the whole checkpoint at most " + LIMITS.checkpointBytes / 1024 + " KiB.",
   "- `checkpoint.data` must satisfy the current position's declared output contract when one exists.",
   "- `issues`: problems found, each `{ target, reason }`. Only valid with `status: \"needs-work\"`; recovery policy decides what happens next.",
@@ -238,12 +244,13 @@ export function renderPositionEnvelope(workflow: Workflow, state: Execution, rea
   const operator = workflow.operators.get(node.operator)!;
   const execution = position.execution!;
   const dependencyEntries = (node.dependsOn ?? [])
-    .filter((dependency) => Object.hasOwn(execution.results, dependency))
-    .map((dependency) => ({ dependency, result: execution.results[dependency] }))
+    .map((dependency) => {
+      const completed = completedPlanNodeOf(execution, dependency);
+      return completed ? { dependency, result: completed.result, producer: completed.node } : undefined;
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
     .map((entry) => {
-      const producer = execution.plan.nodes.find((candidate) => candidate.id === entry.dependency);
-      const operatorId = producer?.operator;
-      const producerOperator = operatorId ? workflow.operators?.get(operatorId) : undefined;
+      const producerOperator = workflow.operators?.get(entry.producer.operator);
       if (!producerOperator?.output) return { ...entry, operator: undefined, value: undefined };
       const value = entry.result.data === undefined ? {} : entry.result.data;
       return { ...entry, operator: producerOperator, value };
@@ -265,8 +272,7 @@ export function renderPositionEnvelope(workflow: Workflow, state: Execution, rea
   }
   const dependencies = renderedDependencies;
   const unknowns = execution.plan.nodes
-    .map((entry) => (Object.hasOwn(execution.results, entry.id) ? execution.results[entry.id].unknowns ?? [] : []))
-    .flat()
+    .flatMap((entry) => completedPlanNodeOf(execution, entry.id)?.result.unknowns ?? [])
     .slice(0, LIMITS.planNodeListItems);
   const nodeIndex = execution.plan.nodes.findIndex((entry) => entry.id === node.id);
   return [
@@ -337,7 +343,7 @@ export function rosterPrompt(visible: readonly Workflow[]): string {
 export function controlMessage(state: Execution): string {
   const position = state.status === "active" ? state.stack[state.stack.length - 1] : undefined;
   const where = position ? position.key : "completion";
-  const attempt = position && "attempt" in position ? position.attempt : 1;
+  const attempt = position ? frameAttempt(position) : 1;
   return `${controlPrefix(state.runId)} at ${where} (attempt ${attempt}).`;
 }
 

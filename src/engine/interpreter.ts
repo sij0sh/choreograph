@@ -1,15 +1,27 @@
-import type { Checkpoint } from "../domain/checkpoint.ts";
+import type { Checkpoint, TransitionStatus } from "../domain/checkpoint.ts";
 import { checkpointErrors, validateCheckpoint } from "../domain/checkpoint.ts";
-import type { Execution, Frame, LoopFrame, LoopState, NodeFrame, PlanExecution, SequenceFrame, TaskFrame } from "../domain/execution.ts";
+import {
+  frameAttempt,
+  isAttemptBearingFrame,
+  isLeafFrame,
+  upsertInvocation,
+  type Execution,
+  type Frame,
+  type LoopFrame,
+  type LoopState,
+  type NodeFrame,
+  type PlanExecution,
+  type SequenceFrame,
+  type TaskFrame,
+} from "../domain/execution.ts";
 import { applyNeedsWork } from "./recovery.ts";
 import { contractError as contractErrorFor } from "../domain/contract.ts";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
 import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
 import { evaluateGuard, skipReason, type GuardClause } from "../domain/guard.ts";
 import type { LoopBlock, OperatorDescriptor, PlanBlock, ScriptBlock, ScriptSpec, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
-import { blockOf } from "../domain/workflow.ts";
+import { blockOf, isGuardBearingBlock } from "../domain/workflow.ts";
 import { type NodeInvocation, type NodeStatus, type RunnerKind } from "../domain/node.ts";
-import { upsertInvocation } from "../domain/execution.ts";
 import { isArtifactRef, resolveBinding, type ArtifactSinkProvider } from "../domain/artifacts.ts";
 import { canonicalJsonBytes, type JsonValue } from "../domain/json.ts";
 import { firstIncompleteNode } from "../planning/graph.ts";
@@ -21,10 +33,19 @@ export type Issue = {
   readonly reason: string;
 };
 
-export type TaskOutcome =
-  | { readonly status: "completed"; readonly met?: readonly string[]; readonly checkpoint: Checkpoint }
-  | { readonly status: "needs-work"; readonly checkpoint: Checkpoint; readonly issues?: readonly Issue[] }
-  | { readonly status: "blocked"; readonly checkpoint: Checkpoint };
+type OutcomePayloads = {
+  completed: { readonly met?: readonly string[] };
+  "needs-work": { readonly issues?: readonly Issue[] };
+  blocked: {};
+};
+
+type AssertNever<T extends never> = T;
+type MissingOutcomeStatus = AssertNever<Exclude<TransitionStatus, keyof OutcomePayloads>>;
+type UnexpectedOutcomeStatus = AssertNever<Exclude<keyof OutcomePayloads, TransitionStatus>>;
+
+export type TaskOutcome = {
+  [Status in keyof OutcomePayloads]: { readonly status: Status; readonly checkpoint: Checkpoint } & OutcomePayloads[Status];
+}[keyof OutcomePayloads];
 
 type WorkflowEvent =
   | { readonly type: "outcome"; readonly outcome: TaskOutcome }
@@ -49,9 +70,6 @@ function fail(error: string): EngineResult {
   return { ok: false, error };
 }
 
-function isLeafFrame(frame: Frame): boolean {
-  return frame.kind === "task" || frame.kind === "node" || (frame.kind === "plan" && frame.mode === "create");
-}
 
 interface ProcessLeaf {
   readonly key: string;
@@ -212,7 +230,7 @@ export function advance(workflow: Workflow, state: Execution, store?: ArtifactSi
         }
         const advanced: SequenceFrame = { ...top, index: top.index + 1 };
         stack[topIndex] = advanced;
-        if ((child.kind === "task" || child.kind === "plan" || child.kind === "loop" || child.kind === "script") && child.guard) {
+        if (isGuardBearingBlock(child) && child.guard) {
           const view: Execution = { ...working, stack };
           const guard = evaluateGuard(workflow, view, child.guard);
           if (!guard.ok) return { ok: false, error: `guard for ${child.id} could not resolve: ${guard.error}` };
@@ -442,7 +460,7 @@ export function enterInvocation(workflow: Workflow, state: Execution, leaf: Fram
     key: leaf.key,
     runner: runnerOfLeaf(workflow, state, leaf),
     status,
-    attempt: attempt ?? ("attempt" in leaf ? leaf.attempt : 1),
+    attempt: attempt ?? frameAttempt(leaf),
   };
   const invocations = upsertInvocation(state, leaf.key, invocation);
   return invocations === state.invocations ? state : { ...state, invocations };
@@ -456,7 +474,7 @@ function leafEffect(workflow: Workflow, state: Execution, fallback: Effect): Eng
       return { ok: true, state: enterInvocation(workflow, state, leaf), effect: { kind: "run-process", key: leaf.key } };
     }
   }
-  if (leaf && (leaf.kind === "task" || leaf.kind === "plan" || leaf.kind === "node")) {
+  if (leaf && isAttemptBearingFrame(leaf)) {
     return { ok: true, state: enterInvocation(workflow, state, leaf), effect: fallback };
   }
   return { ok: true, state, effect: fallback };
@@ -487,15 +505,12 @@ function completePlanCreation(workflow: Workflow, state: Execution, leaf: Extrac
 function stripPlanPayload(checkpoint: Checkpoint): Checkpoint {
   const data = checkpoint.data;
   if (!data || typeof data !== "object" || Array.isArray(data) || (data as Record<string, unknown>).plan === undefined) return checkpoint;
-  const objectData = data as Record<string, unknown>;
-  const rest = { ...objectData };
+  const rest = { ...(data as Record<string, unknown>) };
   delete rest.plan;
-  const next: { summary: string; evidence?: string[]; decisions?: string[]; unknowns?: string[]; data?: import("../domain/json.ts").JsonValue } = { summary: checkpoint.summary };
-  if (checkpoint.evidence) next.evidence = [...checkpoint.evidence];
-  if (checkpoint.decisions) next.decisions = [...checkpoint.decisions];
-  if (checkpoint.unknowns) next.unknowns = [...checkpoint.unknowns];
-  if (Object.keys(rest).length > 0) next.data = rest as import("../domain/json.ts").JsonValue;
-  return next;
+  const { data: _planData, ...withoutData } = checkpoint;
+  return Object.keys(rest).length > 0
+    ? { ...withoutData, data: rest as import("../domain/json.ts").JsonValue }
+    : withoutData;
 }
 
 function completeNode(workflow: Workflow, state: Execution, leaf: NodeFrame, outcome: Extract<TaskOutcome, { status: "completed" }>): EngineResult {

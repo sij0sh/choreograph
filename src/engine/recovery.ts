@@ -1,6 +1,6 @@
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { contractError as contractErrorFor } from "../domain/contract.ts";
-import type { Execution, Frame } from "../domain/execution.ts";
+import { frameAttempt, isAttemptBearingFrame, type Execution, type Frame } from "../domain/execution.ts";
 import { DEFAULT_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
 import { blockOf, type Workflow } from "../domain/workflow.ts";
 import { planKeyOf } from "../domain/keys.ts";
@@ -17,12 +17,8 @@ function fail(error: string): EngineResult {
   return { ok: false, error };
 }
 
-function attemptOf(frame: Frame): number {
-  return frame.kind === "task" || frame.kind === "node" || frame.kind === "plan" ? frame.attempt : 1;
-}
-
 function withAttempt(frame: Frame, attempt: number): Frame {
-  return { ...frame, attempt } as Frame;
+  return isAttemptBearingFrame(frame) ? { ...frame, attempt } : frame;
 }
 
 function policyFor(workflow: Workflow, leaf: Frame): RecoveryPolicy {
@@ -58,7 +54,7 @@ export function applyNeedsWork(workflow: Workflow, state: Execution, outcome: Ou
   if (!blockOf(workflow, leaf.blockId)) return fail(`frame ${leaf.key} does not name a recoverable block`);
   const checkpointError = checkpointContractError(workflow, state, leaf, outcome.checkpoint);
   if (checkpointError) return fail(checkpointError);
-  const nextAttempt = attemptOf(leaf) + 1;
+  const nextAttempt = frameAttempt(leaf) + 1;
   if (nextAttempt <= policyFor(workflow, leaf).maxAttempts) {
     stack[stack.length - 1] = withAttempt(leaf, nextAttempt);
     const recorded = recordCheckpoint({ ...state, stack }, leaf.key, outcome.checkpoint);

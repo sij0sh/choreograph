@@ -3,6 +3,8 @@
 A [Pi](https://github.com/earendil-works/pi-coding-agent) extension that runs
 ordered, resumable workflows from Markdown files.
 
+See [Architecture ownership](ARCHITECTURE.md) for the authoritative modules behind cross-package contracts.
+
 ## Why choreograph?
 
 Pi skills provide reusable instructions, but they do not enforce an execution
@@ -446,7 +448,7 @@ on checkpoint summaries:
 - Task producers expose their latest checkpoint object, so `/data/...`
   narrows to the structured payload.
 - Plan producers expose an engine-generated aggregate:
-  `{ "version": 1, "nodes": [{ "id", "operator", "objective", "result" }] }`.
+  `{ "version": 1, "nodes": [{ "id", "operator", "objective", "evidence"?, "result" }] }`.
   A pending node's `result` is `null`; a completed node's `result` is its
   full checkpoint.
 - Loop producers expose the aggregate described above; script stdout/stderr

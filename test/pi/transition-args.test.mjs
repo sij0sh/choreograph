@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { RuntimeCoordinator } from "../../src/runtime/coordinator.ts";
 import { registerWorkflowTools } from "../../src/pi/tools.ts";
+import { BOUNDARY_CHECKPOINT_FIELDS, TRANSITION_FIELDS, TRANSITION_SHAPE } from "../../src/domain/checkpoint.ts";
 import { workflow, task } from "../engine/helpers.mjs";
 
 function transitionSchema() {
@@ -34,6 +35,22 @@ test("a well-formed transition passes the schema", () => {
   assert.equal(Value.Check(schema, valid), true);
   assert.equal(Value.Check(schema, { status: "needs-work", checkpoint: { summary: "broken" } }), true);
   assert.equal(Value.Check(schema, { status: "blocked", checkpoint: { summary: "stuck" } }), true);
+});
+
+test("the tool schema derives transition and checkpoint enumerations", () => {
+  assert.deepEqual(schema.properties.status.enum, [...TRANSITION_SHAPE.statuses]);
+  assert.deepEqual(Object.keys(schema.properties), [...TRANSITION_FIELDS]);
+  assert.deepEqual(Object.keys(schema.properties.checkpoint.properties), [...BOUNDARY_CHECKPOINT_FIELDS]);
+  assert.deepEqual(
+    schema.required,
+    TRANSITION_FIELDS.filter((field) => TRANSITION_SHAPE.fields[field].required),
+  );
+  assert.deepEqual(
+    schema.properties.checkpoint.required,
+    BOUNDARY_CHECKPOINT_FIELDS.filter((field) => TRANSITION_SHAPE.checkpointFields[field].required),
+  );
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(schema.properties.checkpoint.additionalProperties, false);
 });
 
 test("wrapper objects such as outcome or result are rejected", () => {

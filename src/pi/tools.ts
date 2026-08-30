@@ -1,6 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type TSchema } from "typebox";
 import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
+import {
+  BOUNDARY_CHECKPOINT_FIELDS,
+  TRANSITION_FIELDS,
+  TRANSITION_SHAPE,
+  type BoundaryCheckpointField,
+  type TransitionField,
+  type TransitionStatus,
+} from "../domain/checkpoint.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator, ToolResult } from "../runtime/coordinator.ts";
 import { DEFAULT_TARGET, START_TOOL_NAME, WorkflowCompileError } from "../runtime/coordinator.ts";
@@ -62,50 +70,54 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
   }
 
 
-  const transitionParameters = Type.Object(
-    {
-      status: Type.Unsafe<"completed" | "needs-work" | "blocked">({
-        type: "string",
-        enum: ["completed", "needs-work", "blocked"],
-        description: "The outcome of the current position.",
+  const checkpointProperties = {
+    summary: Type.String({ description: `What was done and concluded at this position; at most ${LIMITS.checkpointSummaryBytes} bytes.` }),
+    evidence: Type.Optional(Type.Array(Type.String({ description: `One reference or finding; at most ${LIMITS.checkpointItemBytes} bytes each.` }), { maxItems: LIMITS.checkpointListItems, description: "Evidence references backing the summary." })),
+    decisions: Type.Optional(Type.Array(Type.String({ description: `One decision; at most ${LIMITS.checkpointItemBytes} bytes each.` }), { maxItems: LIMITS.checkpointListItems, description: "Decisions taken." })),
+    unknowns: Type.Optional(Type.Array(Type.String({ description: `One open question or risk; at most ${LIMITS.checkpointItemBytes} bytes each.` }), { maxItems: LIMITS.checkpointListItems, description: "Open questions or risks." })),
+    data: Type.Optional(Type.Any({ description: "Structured payload; plan creation carries data.plan here. All other position-specific output lives here." })),
+  } satisfies Record<BoundaryCheckpointField, TSchema>;
+  const transitionProperties = {
+    status: Type.Unsafe<TransitionStatus>({
+      type: "string",
+      enum: [...TRANSITION_SHAPE.statuses],
+      description: "The outcome of the current position.",
+    }),
+    met: Type.Optional(
+      Type.Array(Type.String({ pattern: ID_PATTERN.source, description: "A criterion id matching ^[a-z][a-z0-9-]*$." }), {
+        uniqueItems: true,
+        description: "Criterion ids copied verbatim from the position's required criteria. A completion must list every required criterion.",
       }),
-      met: Type.Optional(
-        Type.Array(Type.String({ pattern: ID_PATTERN.source, description: "A criterion id matching ^[a-z][a-z0-9-]*$." }), {
-          uniqueItems: true,
-          description: "Criterion ids copied verbatim from the position's required criteria. A completion must list every required criterion.",
-        }),
-      ),
-      checkpoint: Type.Object(
-        {
-          summary: Type.String({ description: `What was done and concluded at this position; at most ${LIMITS.checkpointSummaryBytes} bytes.` }),
-          evidence: Type.Optional(Type.Array(Type.String({ description: `One reference or finding; at most ${LIMITS.checkpointItemBytes} bytes each.` }), { maxItems: LIMITS.checkpointListItems, description: "Evidence references backing the summary." })),
-          decisions: Type.Optional(Type.Array(Type.String({ description: `One decision; at most ${LIMITS.checkpointItemBytes} bytes each.` }), { maxItems: LIMITS.checkpointListItems, description: "Decisions taken." })),
-          unknowns: Type.Optional(Type.Array(Type.String({ description: `One open question or risk; at most ${LIMITS.checkpointItemBytes} bytes each.` }), { maxItems: LIMITS.checkpointListItems, description: "Open questions or risks." })),
-          data: Type.Optional(Type.Any({ description: "Structured payload; plan creation carries data.plan here. All other position-specific output lives here." })),
-        },
-        { additionalProperties: false },
-      ),
-      issues: Type.Optional(
-        Type.Array(
-          Type.Object(
-            {
-              target: Type.String({ minLength: 1, description: "The block, node, or task id the problem concerns." }),
-              reason: Type.String({ minLength: 1, description: "Why the target needs work." }),
-            },
-            { additionalProperties: false },
-          ),
-          { description: "Problems found; only valid with status \"needs-work\"." },
+    ),
+    checkpoint: Type.Object(checkpointProperties, { additionalProperties: false }),
+    issues: Type.Optional(
+      Type.Array(
+        Type.Object(
+          {
+            target: Type.String({ minLength: 1, description: "The block, node, or task id the problem concerns." }),
+            reason: Type.String({ minLength: 1, description: "Why the target needs work." }),
+          },
+          { additionalProperties: false },
         ),
+        { description: "Problems found; only valid with status \"needs-work\"." },
       ),
-    },
-    { additionalProperties: false },
-  );
+    ),
+  } satisfies Record<TransitionField, TSchema>;
+  const transitionParameters = Type.Object(transitionProperties, { additionalProperties: false });
+  const checkpointShape = BOUNDARY_CHECKPOINT_FIELDS
+    .map((field) => `${field}${TRANSITION_SHAPE.checkpointFields[field].required ? "" : "?"}`)
+    .join(", ");
+  const transitionShape = TRANSITION_FIELDS
+    .map((field) => field === "checkpoint"
+      ? `checkpoint: { ${checkpointShape} }`
+      : `${field}${TRANSITION_SHAPE.fields[field].required ? "" : "?"}`)
+    .join(", ");
   pi.registerTool({
     name: TRANSITION_TOOL_NAME,
     label: "Transition workflow",
     description: [
       "Record the outcome of the current workflow position: completed (criteria met), needs-work (problems found; recovery policy decides what happens), or blocked (cannot proceed).",
-      "Exact shape: { status, met?, checkpoint: { summary, evidence?, decisions?, unknowns?, data? }, issues? }.",
+      `Exact shape: { ${transitionShape} }. Allowed statuses: ${TRANSITION_SHAPE.statuses.join(", ")}.`,
       "Copy `met` criterion ids verbatim from the position's required criteria; list every required id on completion.",
       `Caps: evidence/decisions/unknowns at most ${LIMITS.checkpointListItems} items of ${LIMITS.checkpointItemBytes} bytes each; summary at most ${LIMITS.checkpointSummaryBytes / 1024} KiB; the checkpoint at most ${LIMITS.checkpointBytes / 1024} KiB.`,
       "There are no other fields; position-specific output goes inside checkpoint.data. Rejections report every violation at once.",

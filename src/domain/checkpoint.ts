@@ -10,7 +10,43 @@ export interface Checkpoint {
   readonly skipped?: boolean;
 }
 
-const CHECKPOINT_KEYS = ["summary", "evidence", "decisions", "unknowns", "data", "skipped"];
+export const TRANSITION_SHAPE = {
+  statuses: ["completed", "needs-work", "blocked"],
+  fields: {
+    status: { required: true },
+    met: { required: false, onlyWith: "completed" },
+    checkpoint: { required: true },
+    issues: { required: false, onlyWith: "needs-work" },
+  },
+  checkpointFields: {
+    summary: { required: true, boundary: "accept" },
+    evidence: { required: false, boundary: "accept" },
+    decisions: { required: false, boundary: "accept" },
+    unknowns: { required: false, boundary: "accept" },
+    data: { required: false, boundary: "accept" },
+    // Engine-generated checkpoints may carry skipped. The model-facing boundary rejects it.
+    skipped: { required: false, boundary: "reject" },
+  },
+} as const satisfies {
+  readonly statuses: readonly string[];
+  readonly fields: Record<"status" | "met" | "checkpoint" | "issues", { readonly required: boolean; readonly onlyWith?: string }>;
+  readonly checkpointFields: Record<keyof Checkpoint, { readonly required: boolean; readonly boundary: "accept" | "reject" }>;
+};
+
+export type TransitionStatus = (typeof TRANSITION_SHAPE.statuses)[number];
+export type TransitionField = keyof typeof TRANSITION_SHAPE.fields;
+export type CheckpointField = keyof typeof TRANSITION_SHAPE.checkpointFields;
+export type BoundaryCheckpointField = {
+  [K in CheckpointField]: (typeof TRANSITION_SHAPE.checkpointFields)[K]["boundary"] extends "accept" ? K : never;
+}[CheckpointField];
+
+export const TRANSITION_FIELDS = Object.keys(TRANSITION_SHAPE.fields) as TransitionField[];
+export const CHECKPOINT_KEYS = Object.keys(TRANSITION_SHAPE.checkpointFields) as CheckpointField[];
+export const BOUNDARY_CHECKPOINT_FIELDS = CHECKPOINT_KEYS.filter(
+  (field): field is BoundaryCheckpointField => TRANSITION_SHAPE.checkpointFields[field].boundary === "accept",
+);
+
+type MutableCheckpoint = { -readonly [K in keyof Checkpoint]: Checkpoint[K] };
 
 interface Bounded {
   value?: string[];
@@ -57,7 +93,7 @@ function dataErrors(value: unknown, label: string, errors: string[]): void {
 
 function normalizedCheckpoint(raw: Record<string, unknown>, exemptsPlan: boolean): Checkpoint | undefined {
   if (typeof raw.summary !== "string" || !raw.summary.trim()) return undefined;
-  const checkpoint: { summary: string; evidence?: string[]; decisions?: string[]; unknowns?: string[]; data?: JsonValue; skipped?: boolean } = { summary: raw.summary };
+  const checkpoint: MutableCheckpoint = { summary: raw.summary };
   const list = (value: unknown): string[] | undefined =>
     Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : undefined;
   const evidence = list(raw.evidence);
@@ -86,7 +122,7 @@ export function checkpointErrors(value: unknown, label: string, exemptsPlan = fa
   }
   const errors: string[] = [];
   for (const key of Object.keys(raw)) {
-    if (!CHECKPOINT_KEYS.includes(key)) errors.push(`${label}.${key} is not an accepted checkpoint field`);
+    if (!(CHECKPOINT_KEYS as readonly string[]).includes(key)) errors.push(`${label}.${key} is not an accepted checkpoint field`);
   }
   if (raw.skipped !== undefined && raw.skipped !== true) errors.push(`${label}.skipped must be true when present`);
   if (typeof raw.summary !== "string" || !raw.summary.trim()) {
@@ -115,7 +151,7 @@ export function validateCheckpoint(value: unknown, label: string, exemptsPlan = 
   const errors = checkpointErrors(value, label, exemptsPlan);
   if (errors.length > 0) throw new Error(errors.join("; "));
   const raw = objectAt(value, label);
-  const checkpoint: { summary: string; evidence?: string[]; decisions?: string[]; unknowns?: string[]; data?: JsonValue; skipped?: boolean } = {
+  const checkpoint: MutableCheckpoint = {
     summary: requireString(raw.summary, `${label}.summary`),
   };
   const evidence = boundedStringList(raw.evidence, `${label}.evidence`, []).value;

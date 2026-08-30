@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { start, transition } from "../../src/engine/interpreter.ts";
 import { completed, cp, loop, memoryStore, script, task, workflow } from "../engine/helpers.mjs";
-import { isArtifactRef } from "../../src/domain/artifacts.ts";
+import { completedPlanNodeOf, isArtifactRef, producerArtifact } from "../../src/domain/artifacts.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
 import { ArtifactStore } from "../../src/runtime/artifact-store.ts";
 import { inlineRefs, refLoaderFor, resolveBinding, resolveScriptInputs } from "../../src/runtime/artifacts.ts";
@@ -88,6 +88,51 @@ test("bindings report actionable errors", () => {
   const badPointer = resolveBinding(incomplete, planState, { from: "investigate", select: "/nodes/9" });
   assert.equal(badPointer.ok, false);
   assert.match(badPointer.error, /out of bounds/);
+});
+
+test("producer artifacts and binding resolution share one shape dispatch", () => {
+  const planBlock = { kind: "plan", id: "investigate", operators: ["inspect"] };
+  const loopBlock = loop("each");
+  const wf = workflow([task("frame"), planBlock, loopBlock], { operators: operators() });
+  const planKey = "root/investigate";
+  const plan = { version: 1, nodes: [PLAN.nodes[0]] };
+  const result = cp("found", { entry: "main.ts" });
+  const base = start(wf, { runId: "r1" }).state;
+  const state = {
+    ...base,
+    checkpoints: {
+      "root/frame": cp("framed"),
+      "root/each": cp("looped", { mode: "for-each", iterations: 0, results: [] }),
+    },
+    checkpointOrder: ["root/frame", "root/each"],
+    plans: { [planKey]: { blockId: "investigate", plan, results: { probe: result } } },
+  };
+
+  for (const blockId of ["frame", "investigate", "each"]) {
+    const artifact = producerArtifact(wf, state, blockId);
+    const binding = resolveBinding(wf, state, { from: blockId });
+    assert.equal(artifact.ok && artifact.present, true, blockId);
+    assert.equal(binding.ok, true, blockId);
+    assert.deepEqual(binding.value, artifact.value, blockId);
+  }
+
+  assert.deepEqual(completedPlanNodeOf(state.plans[planKey], "probe"), { node: plan.nodes[0], result });
+  assert.equal(completedPlanNodeOf(state.plans[planKey], "missing"), undefined);
+
+  const incomplete = { ...state, checkpoints: {}, checkpointOrder: [], plans: {} };
+  assert.equal(producerArtifact(wf, incomplete, "frame").present, false);
+  assert.match(resolveBinding(wf, incomplete, { from: "frame" }).error, /no recorded checkpoint/);
+  assert.equal(producerArtifact(wf, incomplete, "investigate").present, false);
+  assert.match(resolveBinding(wf, incomplete, { from: "investigate" }).error, /has not produced a plan/);
+  assert.equal(producerArtifact(wf, incomplete, "each").present, false);
+  assert.match(resolveBinding(wf, incomplete, { from: "each" }).error, /has not completed its loop/);
+
+  const skipped = { ...incomplete, checkpoints: { [planKey]: cp("skipped") }, checkpointOrder: [planKey] };
+  skipped.checkpoints[planKey].skipped = true;
+  const skippedArtifact = producerArtifact(wf, skipped, "investigate");
+  assert.equal(skippedArtifact.present, false);
+  assert.equal(skippedArtifact.skipped.skipped, true);
+  assert.deepEqual(resolveBinding(wf, skipped, { from: "investigate" }).value, skipped.checkpoints[planKey]);
 });
 
 test("the input section renders declared inputs within the budget", () => {

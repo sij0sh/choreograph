@@ -18,13 +18,13 @@ export interface TaskFrame {
   readonly attempt: number;
 }
 
-type PlanFrame = {
+export type PlanFrame = {
   readonly kind: "plan";
   readonly blockId: string;
   readonly key: string;
   readonly mode: "create" | "execute";
   readonly attempt: number;
-}
+};
 
 export interface LoopFrame {
   readonly kind: "loop";
@@ -41,6 +41,64 @@ export interface NodeFrame {
 }
 
 export type Frame = SequenceFrame | TaskFrame | PlanFrame | NodeFrame | LoopFrame;
+
+export type AttemptBearingFrame = TaskFrame | PlanFrame | NodeFrame;
+export type LeafFrame = TaskFrame | NodeFrame | (PlanFrame & { readonly mode: "create" });
+export type StructuralFrame = SequenceFrame | LoopFrame | (PlanFrame & { readonly mode: "execute" });
+export type AgentDispatchFrame = AttemptBearingFrame;
+
+type FrameRoles = {
+  readonly leaf: boolean;
+  readonly attemptBearing: boolean;
+  readonly structural: boolean;
+};
+
+function frameRoles(frame: Frame): FrameRoles {
+  switch (frame.kind) {
+    case "task":
+    case "node":
+      return { leaf: true, attemptBearing: true, structural: false };
+    case "plan":
+      switch (frame.mode) {
+        case "create":
+          return { leaf: true, attemptBearing: true, structural: false };
+        case "execute":
+          return { leaf: false, attemptBearing: true, structural: true };
+        default: {
+          const exhaustive: never = frame.mode;
+          return exhaustive;
+        }
+      }
+    case "sequence":
+    case "loop":
+      return { leaf: false, attemptBearing: false, structural: true };
+    default: {
+      const exhaustive: never = frame;
+      return exhaustive;
+    }
+  }
+}
+
+export function isAttemptBearingFrame(frame: Frame): frame is AttemptBearingFrame {
+  return frameRoles(frame).attemptBearing;
+}
+
+export function isLeafFrame(frame: Frame): frame is LeafFrame {
+  return frameRoles(frame).leaf;
+}
+
+export function isStructuralFrame(frame: Frame): frame is StructuralFrame {
+  return frameRoles(frame).structural;
+}
+
+/** The runtime dispatch projection intentionally includes plan execution frames, unlike isLeafFrame. */
+export function isAgentDispatchFrame(frame: Frame): frame is AgentDispatchFrame {
+  return isAttemptBearingFrame(frame);
+}
+
+export function frameAttempt(frame: Frame): number {
+  return isAttemptBearingFrame(frame) ? frame.attempt : 1;
+}
 
 export interface PlanExecution {
   readonly blockId: string;

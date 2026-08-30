@@ -1,4 +1,4 @@
-import type { Execution, Frame } from "../domain/execution.ts";
+import { isStructuralFrame, type Execution, type Frame } from "../domain/execution.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
 import { LIMITS } from "../domain/limits.ts";
@@ -6,6 +6,7 @@ import type { PlanExecution } from "../domain/execution.ts";
 import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.ts";
 import type { NodeInvocation, NodeStatus, RunnerKind } from "../domain/node.ts";
+import { loopFrameKeys, loopStateForFrame, RUN_STATE_FIELDS, RUN_STATE_SCHEMA } from "./run-state-schema.ts";
 
 const NODE_STATUSES: readonly NodeStatus[] = ["running", "waiting", "succeeded", "failed", "canceled", "skipped"];
 const RUNNER_KINDS: readonly RunnerKind[] = ["agent", "process"];
@@ -16,7 +17,7 @@ function invocationsAt(value: unknown, label: string): Record<string, NodeInvoca
   for (const [key, entry] of Object.entries(raw)) {
     const item = objectAt(entry, `${label}.${key}`);
     for (const field of Object.keys(item)) {
-      if (!["blockId", "key", "runner", "status", "attempt"].includes(field)) {
+      if (!(RUN_STATE_SCHEMA.invocations.entryFields as readonly string[]).includes(field)) {
         throw new Error(`${label}.${key}.${field} is not an accepted invocation field`);
       }
     }
@@ -117,7 +118,7 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
   for (const [key, entry] of Object.entries(raw)) {
     const planRaw = objectAt(entry, `${label}.${key}`);
     for (const field of Object.keys(planRaw)) {
-      if (!["blockId", "plan", "results"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted plan field`);
+      if (!(RUN_STATE_SCHEMA.plans.entryFields as readonly string[]).includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted plan field`);
     }
     const blockId = requireString(planRaw.blockId, `${label}.${key}.blockId`);
     const plan = planRaw.plan;
@@ -146,7 +147,7 @@ function loopsAt(value: unknown, label: string): Record<string, Execution["loops
   for (const [key, entry] of Object.entries(raw)) {
     const loopRaw = objectAt(entry, `${label}.${key}`);
     for (const field of Object.keys(loopRaw)) {
-      if (!["iteration", "items"].includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted loop field`);
+      if (!(RUN_STATE_SCHEMA.loops.entryFields as readonly string[]).includes(field)) throw new Error(`${label}.${key}.${field} is not an accepted loop field`);
     }
     const iteration = loopRaw.iteration;
     if (typeof iteration !== "number" || !Number.isInteger(iteration) || iteration < 1 || iteration > LIMITS.checkpointListItems) {
@@ -170,7 +171,7 @@ function loopsAt(value: unknown, label: string): Record<string, Execution["loops
 function executionAt(value: unknown, label: string): Execution {
   const raw = objectAt(value, label);
   for (const field of Object.keys(raw)) {
-    if (!["workflowName", "runId", "target", "status", "stack", "checkpoints", "checkpointOrder", "plans", "loops", "definitionDigest", "invocations"].includes(field)) {
+    if (!RUN_STATE_FIELDS.includes(field as keyof Execution)) {
       throw new Error(`${label}.${field} is not an accepted execution field`);
     }
   }
@@ -181,18 +182,16 @@ function executionAt(value: unknown, label: string): Execution {
   if (status !== "active") throw new Error(`${label}.status must be active`);
   const stack = stackAt(raw.stack, `${label}.stack`);
   const leaf = stack[stack.length - 1];
-  const leafKind = leaf.kind;
-  const structural = leafKind === "sequence" || leafKind === "loop" || (leafKind === "plan" && leaf.mode === "execute");
-  if (structural) throw new Error(`${label}.stack must end at a leaf frame (task, node, or plan creation)`);
+  if (isStructuralFrame(leaf)) throw new Error(`${label}.stack must end at a leaf frame (task, node, or plan creation)`);
   const checkpoints = checkpointsAt(raw.checkpoints ?? {}, `${label}.checkpoints`);
   const plans = plansAt(raw.plans ?? {}, `${label}.plans`);
   const loops = loopsAt(raw.loops ?? {}, `${label}.loops`);
   const invocations = raw.invocations === undefined ? undefined : invocationsAt(raw.invocations, `${label}.invocations`);
   for (const frame of stack) {
-    if (frame.kind !== "loop") continue;
-    if (!loops[frame.key]) throw new Error(`${label}.loops is missing state for loop frame ${frame.key}`);
+    if (frame.kind !== RUN_STATE_SCHEMA.loops.frameKind) continue;
+    if (!loopStateForFrame({ loops }, frame)) throw new Error(`${label}.loops is missing state for loop frame ${frame.key}`);
   }
-  const activeLoopKeys = new Set(stack.filter((frame) => frame.kind === "loop").map((frame) => frame.key));
+  const activeLoopKeys = loopFrameKeys(stack);
   for (const key of Object.keys(loops)) {
     if (!activeLoopKeys.has(key)) throw new Error(`${label}.loops[${key}] has no matching loop frame`);
   }
@@ -206,19 +205,28 @@ function executionAt(value: unknown, label: string): Execution {
   for (const key of Object.keys(checkpoints)) {
     if (!orderRaw.includes(key)) throw new Error(`${label}.checkpoints entry "${key}" is missing from checkpointOrder`);
   }
-  return {
+  const decoded = {
     workflowName: requireString(raw.workflowName, `${label}.workflowName`),
     runId: requireString(raw.runId, `${label}.runId`),
     target: typeof raw.target === "string" && Buffer.byteLength(raw.target, "utf8") <= LIMITS.targetBytes ? raw.target : "",
-    status: "active",
+    status: "active" as const,
     stack,
     checkpoints,
     checkpointOrder: orderRaw,
     plans,
     loops,
-    ...(raw.definitionDigest !== undefined ? { definitionDigest: raw.definitionDigest as string } : {}),
-    ...(invocations ? { invocations } : {}),
+    definitionDigest: raw.definitionDigest as string | undefined,
+    invocations,
+  } satisfies { [K in Exclude<keyof Execution, "definitionDigest" | "invocations">]-?: Execution[K] } & {
+    definitionDigest: Execution["definitionDigest"];
+    invocations: Execution["invocations"];
   };
+  const projected: Record<string, unknown> = {};
+  for (const field of RUN_STATE_FIELDS) {
+    const fieldValue = decoded[field];
+    if (fieldValue !== undefined) projected[field] = fieldValue;
+  }
+  return projected as unknown as Execution;
 }
 
 export function parseSnapshot(data: unknown): ParsedSnapshot | null {

@@ -77,6 +77,71 @@ export interface ScriptBlock {
 
 export type Block = TaskBlock | SequenceBlock | PlanBlock | LoopBlock | ScriptBlock;
 
+export type AuthoredBlock = Exclude<Block, SequenceBlock>;
+export type AuthoredBlockKind = AuthoredBlock["kind"];
+export type AgentFacingBlock = TaskBlock | PlanBlock;
+export type CheckpointContractBlock = TaskBlock | ScriptBlock;
+export type TaskFrameBlock = CheckpointContractBlock;
+
+/** Top-level authoring keys belong to exactly one authored block grammar. */
+export const BLOCK_KIND_KEYS = {
+  task: ["id", "run", "tools", "done", "repair", "inputs", "output", "when"],
+  plan: ["id", "plan", "inputs", "when"],
+  script: ["id", "script", "repair", "inputs", "output", "when"],
+  loop: ["id", "for_each", "inputs", "when"],
+} as const satisfies Record<AuthoredBlockKind, readonly string[]>;
+
+type BlockRoles = {
+  readonly guardBearing: boolean;
+  readonly agentFacing: boolean;
+  readonly restorable: boolean;
+  readonly bindable: boolean;
+  readonly checkpointContract: boolean;
+};
+
+function blockRoles(block: Block): BlockRoles {
+  switch (block.kind) {
+    case "task":
+      return { guardBearing: true, agentFacing: true, restorable: true, bindable: true, checkpointContract: true };
+    case "plan":
+      return { guardBearing: true, agentFacing: true, restorable: true, bindable: true, checkpointContract: false };
+    case "script":
+      return { guardBearing: true, agentFacing: false, restorable: true, bindable: true, checkpointContract: true };
+    case "loop":
+      return { guardBearing: true, agentFacing: false, restorable: true, bindable: true, checkpointContract: false };
+    case "sequence":
+      return { guardBearing: false, agentFacing: false, restorable: false, bindable: false, checkpointContract: false };
+    default: {
+      const exhaustive: never = block;
+      return exhaustive;
+    }
+  }
+}
+
+export function isGuardBearingBlock(block: Block): block is AuthoredBlock {
+  return blockRoles(block).guardBearing;
+}
+
+export function isAgentFacingBlock(block: Block): block is AgentFacingBlock {
+  return blockRoles(block).agentFacing;
+}
+
+export function isRestorableBlock(block: Block): block is AuthoredBlock {
+  return blockRoles(block).restorable;
+}
+
+export function isBindableBlock(block: Block): block is AuthoredBlock {
+  return blockRoles(block).bindable;
+}
+
+export function isCheckpointContractBlock(block: Block): block is CheckpointContractBlock {
+  return blockRoles(block).checkpointContract;
+}
+
+export function isTaskFrameBlock(block: Block): block is TaskFrameBlock {
+  return isCheckpointContractBlock(block);
+}
+
 export interface OperatorDescriptor {
   readonly id: string;
   readonly path: string;

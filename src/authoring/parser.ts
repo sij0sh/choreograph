@@ -13,13 +13,13 @@ import type {
   TaskBlock,
   Workflow,
 } from "../domain/workflow.ts";
+import { BLOCK_KIND_KEYS, type AuthoredBlockKind } from "../domain/workflow.ts";
 import { compileContract } from "../domain/contract.ts";
 import { LIMITS } from "../domain/limits.ts";
 import { DEFAULT_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
 import {
   FRONTMATTER_KEYS,
   OPERATOR_KEYS,
-  STEP_KEYS,
   assertKeys,
   assertUnique,
   booleanAt,
@@ -273,6 +273,39 @@ function scriptStep(entry: ObjectValue, id: string, label: string, context: Comp
   };
 }
 
+const STEP_DISCRIMINATORS = ["run", "plan", "script", "for_each"] as const;
+const AUTHORED_STEP_KEYS = new Set<string>(Object.values(BLOCK_KIND_KEYS).flat());
+
+function authoredKindOf(entry: ObjectValue, label: string): AuthoredBlockKind {
+  const declared = STEP_DISCRIMINATORS.filter((key) => entry[key] !== undefined);
+  const effective = declared.length > 1 && declared.includes("run") ? declared.filter((key) => key !== "run") : declared;
+  if (effective.length > 1) throw new Error(`${label} declares more than one of: ${effective.join(", ")}`);
+  switch (effective[0]) {
+    case "plan":
+      return "plan";
+    case "script":
+      return "script";
+    case "for_each":
+      return "loop";
+    case "run":
+    case undefined:
+      return "task";
+    default: {
+      const exhaustive: never = effective[0];
+      return exhaustive;
+    }
+  }
+}
+
+function assertAuthoredBlockKeys(entry: ObjectValue, kind: AuthoredBlockKind, label: string): void {
+  const allowed = new Set<string>(BLOCK_KIND_KEYS[kind]);
+  for (const key of Object.keys(entry)) {
+    if (allowed.has(key)) continue;
+    if (AUTHORED_STEP_KEYS.has(key)) throw new Error(`${label}.${key} only applies to "run:" tasks`);
+    throw new Error(`unknown ${label} key: ${key}`);
+  }
+}
+
 function parseStepEntry(raw: unknown, index: number, label: string, context: CompileContext): Block {
   if (typeof raw === "string") {
     const path = normalizeInstruction(raw, index, label, context);
@@ -282,15 +315,13 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
   }
   const entry = objectAt(raw, label);
   for (const key of Object.keys(entry)) {
-    if (new Set<string>(STEP_KEYS).has(key)) continue;
-    throw new Error(`unknown ${label} key: ${key}`);
+    if (!AUTHORED_STEP_KEYS.has(key)) throw new Error(`unknown ${label} key: ${key}`);
   }
-  if (entry.for_each !== undefined) {
+  const kind = authoredKindOf(entry, label);
+  assertAuthoredBlockKeys(entry, kind, label);
+  if (kind === "loop") {
     const id = stringAt(entry.id, `${label}.id`);
     registerId(context, id, label);
-    for (const key of ["run", "tools", "done", "output", "plan", "script"] as const) {
-      if (entry[key] !== undefined) throw new Error(`${label}.${key} only applies to "run:" tasks`);
-    }
     const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
     recordInputEdges(context, id, inputs, label);
     const guard = parseGuard(entry.when, `${label}.when`);
@@ -298,14 +329,9 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     const block = parseLoop(entry.for_each, id, label, context);
     return { ...(guard ? { guard } : {}), ...block, ...(inputs ? { inputs } : {}) };
   }
-  const structural = (["plan", "script"] as const).filter((key) => entry[key] !== undefined);
-  if (structural.length > 1) throw new Error(`${label} declares more than one of: ${structural.join(", ")}`);
-  if (structural[0] === "script") {
+  if (kind === "script") {
     const id = stringAt(entry.id, `${label}.id`);
     registerId(context, id, label);
-    for (const key of ["run", "tools", "done", "plan"] as const) {
-      if (entry[key] !== undefined) throw new Error(`${label}.${key} only applies to "run:" tasks`);
-    }
     const output = entry.output === undefined ? undefined : stringAt(entry.output, `${label}.output`);
     if (output !== undefined && !context.contracts.has(output)) {
       throw new Error(`${label}.output names contract "${output}", which has no contracts/ file`);
@@ -314,13 +340,9 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     assertScriptPaths(spec, `${label}.script`, context.lexicalRoot);
     return scriptStep(entry, id, label, context, spec, output);
   }
-  if (structural.length === 1) {
+  if (kind === "plan") {
     const id = stringAt(entry.id, `${label}.id`);
     registerId(context, id, label);
-    for (const key of ["run", "tools", "model", "done", "output"] as const) {
-      if (entry[key] !== undefined) throw new Error(`${label}.${key} only applies to "run:" tasks`);
-    }
-    if (entry.repair !== undefined) throw new Error(`${label}.repair only applies to "run:" tasks and "plan:" blocks`);
     const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
     recordInputEdges(context, id, inputs, label);
     const guard = parseGuard(entry.when, `${label}.when`);

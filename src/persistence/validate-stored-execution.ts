@@ -4,8 +4,9 @@ import { contractError } from "../domain/contract.ts";
 import { LIMITS } from "../domain/limits.ts";
 import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
 import type { Workflow } from "../domain/workflow.ts";
-import { blockOf } from "../domain/workflow.ts";
+import { blockOf, isCheckpointContractBlock, isTaskFrameBlock } from "../domain/workflow.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
+import { loopStateForFrame } from "./run-state-schema.ts";
 
 type ValidationResult = { ok: true; execution: Execution } | { ok: false; error: string };
 
@@ -46,7 +47,7 @@ function validatePair(workflow: Workflow, state: Execution, parent: Frame, child
         return `frame ${parent.key} must carry its body task ${parentBlock.body.id}, not ${child.blockId}`;
       }
       const loopState = state.loops[parent.key];
-      if (!loopState) return `frame ${parent.key} has no matching loop state`;
+      if (!loopStateForFrame(state, parent)) return `frame ${parent.key} has no matching loop state`;
       const expected = `${scopeKey(parent.key, loopState.iteration)}/${parentBlock.body.id}`;
       if (child.key !== expected) return `frame ${parent.key} expects body position ${expected} but holds ${child.key}`;
       if (loopState.iteration > parentBlock.maxIterations) {
@@ -64,8 +65,7 @@ function validateLeaf(workflow: Workflow, state: Execution, leaf: Frame): string
   if (!block) return `frame ${leaf.key} names unknown block ${leaf.blockId}`;
   switch (leaf.kind) {
     case "task":
-      if (block.kind === "script") return undefined;
-      if (block.kind !== "task") return `frame ${leaf.key} does not name a task`;
+      if (!isTaskFrameBlock(block)) return `frame ${leaf.key} does not name a task`;
       return undefined;
     case "node":
     case "plan": {
@@ -90,7 +90,7 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
       .find(({ planKey, node }) => `${planKey}/${node.id}` === key);
     if (!block && !nodeEntry) return `checkpoint key ${key} does not belong to any block in the current workflow`;
     if (checkpoint.skipped === true) continue;
-    if (block?.kind === "task" || block?.kind === "script") {
+    if (block && isCheckpointContractBlock(block)) {
       const runtimeManaged = block.kind === "script" && hasRuntimeManagedProcessData(state, key, checkpoint.data);
       const problem = runtimeManaged ? undefined : contractError(workflow, block.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
       if (problem) return problem;

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { activeSnapshot, parseSnapshot, terminalSnapshot } from "../../src/persistence/snapshot.ts";
 import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-execution.ts";
 import { latestSnapshot } from "../../src/persistence/store.ts";
+import { RUN_STATE_FIELDS, RUN_STATE_SCHEMA } from "../../src/persistence/run-state-schema.ts";
 import { completed, cp, loop, needsWork, sequence, task, workflow } from "../engine/helpers.mjs";
 import { start, transition } from "../../src/engine/interpreter.ts";
 import { LIMITS } from "../../src/domain/limits.ts";
@@ -34,6 +35,37 @@ test("an active snapshot round-trips through JSON and resumes", () => {
   assert.ok(next.ok);
   resumed = next.state;
   assert.equal(resumed.stack.at(-1).blockId, "deliver", "the resumed run finishes its exact remaining steps");
+});
+
+test("the run-state schema derives strict execution and collection allowlists", () => {
+  const { wf, state } = midRunState();
+  assert.deepEqual(RUN_STATE_FIELDS, Object.keys(RUN_STATE_SCHEMA));
+  assert.deepEqual(RUN_STATE_SCHEMA.plans.entryFields, ["blockId", "plan", "results"]);
+  assert.deepEqual(RUN_STATE_SCHEMA.loops.entryFields, ["iteration", "items"]);
+  assert.deepEqual(RUN_STATE_SCHEMA.invocations.entryFields, ["blockId", "key", "runner", "status", "attempt"]);
+
+  const parse = (execution) => parseSnapshot({ v: 7, status: "active", workflow: wf.name, execution, delivered: false });
+  const extraExecution = parse({ ...state, notes: [] });
+  assert.equal(extraExecution.status, "invalid");
+  assert.match(extraExecution.error, /notes is not an accepted execution field/);
+
+  const planExtra = parse({
+    ...state,
+    plans: { p: { blockId: "p", plan: { version: 1, nodes: [] }, results: {}, extra: true } },
+  });
+  assert.equal(planExtra.status, "invalid");
+  assert.match(planExtra.error, /not an accepted plan field/);
+
+  const loopExtra = parse({ ...state, loops: { l: { iteration: 1, items: [], extra: true } } });
+  assert.equal(loopExtra.status, "invalid");
+  assert.match(loopExtra.error, /not an accepted loop field/);
+
+  const invocationExtra = parse({
+    ...state,
+    invocations: { "root/inspect": { blockId: "inspect", key: "root/inspect", runner: "agent", status: "running", attempt: 1, extra: true } },
+  });
+  assert.equal(invocationExtra.status, "invalid");
+  assert.match(invocationExtra.error, /not an accepted invocation field/);
 });
 
 test("task and plan frames round-trip", () => {
