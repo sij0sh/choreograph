@@ -24,17 +24,32 @@ function clip(value: string, maxBytes: number): string {
   return `${clipped}...`;
 }
 
-export function readBlockFrom(fs: { readFileSync(path: string, encoding: "utf8"): string }): ReadBlock {
+const overBoundMessage = (label: string): string =>
+  `${label} exceeds ${LIMITS.instructionFileBytes} bytes; restore or edit the file, or abort the run.`;
+const unavailableMessage = (label: string, error: unknown): string =>
+  `${label} unavailable: ${error instanceof Error ? error.message : String(error)}. Restore the file or abort the run.`;
+
+/**
+ * Render-path file read (fx1): stat first, so an at-rest over-bound file costs an
+ * O(1) stat instead of a full allocation + event-loop stall per read. The post-read
+ * byte check stays: it is the correctness authority for the stat/read growth race.
+ * Stat failures (missing/unreadable) take the same "unavailable" path as read failures.
+ */
+export function readBlockFrom(fs: { statSync(path: string): { size: number }; readFileSync(path: string, encoding: "utf8"): string }): ReadBlock {
   return (path: string, label: string): string => {
+    let size: number;
+    try {
+      size = fs.statSync(path).size;
+    } catch (error) {
+      return unavailableMessage(label, error);
+    }
+    if (size > LIMITS.instructionFileBytes) return overBoundMessage(label);
     try {
       const content = fs.readFileSync(path, "utf8");
-      if (Buffer.byteLength(content, "utf8") > LIMITS.instructionFileBytes) {
-        return `${label} exceeds ${LIMITS.instructionFileBytes} bytes; restore or edit the file, or abort the run.`;
-      }
+      if (Buffer.byteLength(content, "utf8") > LIMITS.instructionFileBytes) return overBoundMessage(label);
       return content;
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      return `${label} unavailable: ${detail}. Restore the file or abort the run.`;
+      return unavailableMessage(label, error);
     }
   };
 }

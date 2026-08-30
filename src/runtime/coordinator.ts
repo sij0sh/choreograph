@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { SessionManager, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { freezeDefinition, type FrozenDefinition } from "../authoring/compile.ts";
 import { AgentRunner, ProcessRunner } from "./runner.ts";
 import { RunnerRegistry } from "./registry.ts";
@@ -101,7 +101,7 @@ export class WorkflowCompileError extends Error {
   }
 }
 
-const defaultRead = readBlockFrom({ readFileSync });
+const defaultRead = readBlockFrom({ statSync, readFileSync });
 
 /** Reads the real filesystem strictly: a missing required file is undefined, never an error string. */
 const strictRead = (path: string): string | undefined => {
@@ -468,6 +468,10 @@ export class RuntimeCoordinator {
           terminate: true,
         };
       }
+      // Terminal release (fx3): the run is over; a later store for this runId simply
+      // re-creates one for the same dir, and content addressing makes that harmless.
+      // Mid-run rollovers keep the entry - only terminal run states release it.
+      this.artifactStores.delete(current.execution.runId);
       return {
         content: [{ type: "text", text: `${current.workflow.title} run ${current.execution.runId} completed. Its final report will run in a fresh bounded session.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, status: "rollover-pending" },
@@ -492,6 +496,10 @@ export class RuntimeCoordinator {
       };
     }
     this.state = { status: "idle" };
+    // Terminal release (fx3): the per-run ArtifactStore entry must not outlive the run
+    // (about 789 B/entry on a session-lifetime Map); a later lookup re-creates it.
+    // Mid-run rollovers keep the entry - only terminal run states release it.
+    this.artifactStores.delete(current.execution.runId);
     this.setTools();
     this.showStatus(ctx);
     if (status === "completed") {

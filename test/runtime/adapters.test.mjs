@@ -8,6 +8,23 @@ import { start, transition } from "../../src/engine/interpreter.ts";
 
 const BASE = ["read", "bash", "edit"];
 
+/** An in-memory fs for readBlockFrom: stat-first sizes from content, throws like node on misses. */
+function memFs(files, hooks = {}) {
+  const miss = (path) => Object.assign(new Error(`ENOENT: no such file or directory, ${path}`), { code: "ENOENT" });
+  return {
+    statSync: (path) => {
+      if (hooks.stat) return hooks.stat(path);
+      if (!(path in files)) throw miss(path);
+      return { size: Buffer.byteLength(files[path], "utf8") };
+    },
+    readFileSync: (path) => {
+      if (hooks.read) return hooks.read(path);
+      if (!(path in files)) throw miss(path);
+      return files[path];
+    },
+  };
+}
+
 function toolsFor(wf, state, baseline = BASE) {
   return effectiveTools(wf, state, baseline);
 }
@@ -177,7 +194,7 @@ test("rule-led bodies render verbatim while real frontmatter still strips", () =
 
 test("runtime instruction reads enforce the authoring size cap", () => {
   const grown = { "WORKFLOW.md": "# Overview", "steps/frame.md": "# " + "x".repeat(200_000) };
-  const grownRead = readBlockFrom({ readFileSync: (path) => grown[path] });
+  const grownRead = readBlockFrom(memFs(grown));
   const wf = workflow([task("frame")]);
   const state = start(wf, { runId: "r1" }).state;
   const prompt = renderPositionEnvelope(wf, state, grownRead);
@@ -185,9 +202,55 @@ test("runtime instruction reads enforce the authoring size cap", () => {
   assert.ok(!prompt.includes("xxx"), "the oversized content never renders");
 
   const normal = { "WORKFLOW.md": "# Overview", "steps/frame.md": "# Fine" };
-  const normalRead = readBlockFrom({ readFileSync: (path) => normal[path] });
+  const normalRead = readBlockFrom(memFs(normal));
   const okPrompt = renderPositionEnvelope(wf, state, normalRead);
   assert.ok(okPrompt.includes("# Fine"), "in-bound bodies still render");
+});
+
+test("an at-rest over-bound file is rejected from its stat size without a full read (fx1)", () => {
+  let reads = 0;
+  const read = readBlockFrom(memFs({}, {
+    stat: () => ({ size: 512 * 1024 * 1024 }),
+    read: () => {
+      reads += 1;
+      return "# never reached";
+    },
+  }));
+  assert.equal(
+    read("steps/frame.md", "Task instructions"),
+    "Task instructions exceeds 128000 bytes; restore or edit the file, or abort the run.",
+    "rejection text is frozen: agents parse it",
+  );
+  assert.equal(reads, 0, "readFileSync must not run for a stat-over-bound file");
+});
+
+test("a file that grows between stat and read is still rejected by the post-read check (fx1)", () => {
+  const read = readBlockFrom(memFs({}, {
+    stat: () => ({ size: 10 }),
+    read: () => "# " + "x".repeat(200_000),
+  }));
+  assert.equal(
+    read("steps/frame.md", "Task instructions"),
+    "Task instructions exceeds 128000 bytes; restore or edit the file, or abort the run.",
+  );
+});
+
+test("stat failures take the unavailable path without reading (fx1)", () => {
+  let reads = 0;
+  const read = readBlockFrom(memFs({}, {
+    stat: () => {
+      throw Object.assign(new Error("EACCES: permission denied, stat '/w/steps/frame.md'"), { code: "EACCES" });
+    },
+    read: () => {
+      reads += 1;
+      return "# unreachable";
+    },
+  }));
+  assert.equal(
+    read("steps/frame.md", "Task instructions"),
+    "Task instructions unavailable: EACCES: permission denied, stat '/w/steps/frame.md'. Restore the file or abort the run.",
+  );
+  assert.equal(reads, 0);
 });
 
 test("loop body prompts carry the iteration context and current item", () => {
