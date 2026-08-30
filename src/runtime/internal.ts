@@ -25,6 +25,7 @@ export interface CoordinatorInternals {
   showStatus(ctx: UiContext): void;
   adoptActive(state: ActiveState, ctx: UiContext): void;
   finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Execution): Promise<ToolResult>;
+  runTerminalExclusive(signal: AbortSignal | undefined, fn: () => Promise<unknown>): Promise<unknown>;
   supportsSessionRollover(ctx: UiContext): boolean;
   renderReport(workflow: Workflow, execution: Execution): string;
 }

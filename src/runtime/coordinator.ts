@@ -4,6 +4,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { freezeDefinition, type FrozenDefinition } from "../authoring/compile.ts";
 import { AgentRunner, ProcessRunner } from "./runner.ts";
 import { RunnerRegistry } from "./registry.ts";
+import { AsyncMutex } from "./mutex.ts";
 import { refLoaderFor } from "./artifacts.ts";
 import { ArtifactStore } from "./artifact-store.ts";
 import type { ArtifactRef } from "../domain/artifacts.ts";
@@ -144,6 +145,10 @@ export class RuntimeCoordinator {
   private isolationRunId: string | undefined;
   private readonly contextIsolator = createContextIsolator();
   private suppressDelivery = false;
+  /** Serializes the abort terminal commit against transition epilogue sampling (corr-c8). */
+  private readonly terminalLock = new AsyncMutex();
+  /** Terminal status of the run-ending event that just landed; single-slot because abort and completion cannot interleave under the lock (corr-c8). */
+  private lastTerminal: "completed" | "aborted" | undefined;
 
   constructor(pi: RuntimeCoordinator["pi"], workflows: readonly Workflow[], read?: ReturnType<typeof readBlockFrom>, defaultArtifactRoot?: string) {
     this.pi = pi;
@@ -314,6 +319,26 @@ export class RuntimeCoordinator {
     return this.state;
   }
 
+  /** Runs fn while holding the terminal lock (corr-c8). A fired signal unblocks a queued caller. */
+  private async runTerminalExclusive<T>(signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
+    const release = await this.terminalLock.acquire(signal);
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
+  /** Truthful response when the run ended while this operation was in flight (corr-c8). */
+  private runEndedText(run: ActiveState): ToolResult {
+    const ended = this.lastTerminal === "completed" ? "completed" : "was aborted";
+    return {
+      content: [{ type: "text", text: `${run.workflow.title} run ${run.execution.runId} ${ended} while this operation was in flight. The run is over; no further instructions or deliveries will arrive.` }],
+      details: { workflow: run.workflow.name, runId: run.execution.runId, status: this.lastTerminal === "completed" ? "completed" : "aborted" },
+      terminate: true,
+    };
+  }
+
   private async deliverPending(): Promise<void> {
     await deliverPendingNow(this as unknown as CoordinatorInternals);
   }
@@ -351,6 +376,7 @@ export class RuntimeCoordinator {
     const next: ActiveState = { status: "active", workflow, execution, delivered: false };
     this.commit(this.snapshotOf(next, false), `start of ${workflow.title} run ${next.execution.runId}`);
     this.isolationRunId = next.execution.runId;
+    this.lastTerminal = undefined;
     this.adoptActive(next, ctx);
     ctx.ui.notify(`${workflow.title} started.`, "info");
     return next;
@@ -391,8 +417,11 @@ export class RuntimeCoordinator {
       };
     }
     if (result.effect.kind === "complete") {
-      this.settleAgent(current, outcome);
-      return this.finishRun(current, ctx, "completed", result.state);
+      return this.runTerminalExclusive(signal, async () => {
+        if (this.state.status !== "active") return this.runEndedText(current);
+        this.settleAgent(current, outcome);
+        return this.finishRun(current, ctx, "completed", result.state);
+      });
     }
     // A blocked position waits for the user in this session; rolling it over would respawn the same blocker forever.
     const rollover = this.supportsSessionRollover(ctx) && outcome.status !== "blocked";
@@ -485,7 +514,17 @@ export class RuntimeCoordinator {
     } finally {
       this.suppressDelivery = false;
     }
+    return this.runTerminalExclusive(signal, () => Promise.resolve(this.transitionEpilogue(current, outcome, rollover, result.effect.kind === "stay" ? "stay" : "advance", ctx)));
+  }
+
+  /**
+   * Post-drive epilogue (corr-c8): the response describes the run state after
+   * this transition's own effects, sampled under the terminal lock so a
+   * concurrent abort can never interleave between the sample and the text.
+   */
+  private transitionEpilogue(current: ActiveState, outcome: TaskOutcome, rollover: boolean, effectKind: "complete" | "advance" | "stay", ctx: UiContext): ToolResult {
     if (this.state.status !== "active") {
+      if (this.lastTerminal === "aborted") return this.runEndedText(current);
       return {
         content: [{ type: "text", text: `${current.workflow.title} run ${current.execution.runId} completed during script execution. Its bounded summary session is being prepared.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, status: "completed" },
@@ -506,7 +545,7 @@ export class RuntimeCoordinator {
         {
           type: "text",
           text:
-            result.effect.kind === "stay"
+            effectKind === "stay"
               ? `Recorded ${outcome.status}. The run stays at ${this.state.execution.stack.at(-1)?.key}${outcome.status === "blocked" ? " and waits for the user" : ""}; the checkpoint is saved.`
               : `Recorded ${outcome.status}. Continue at ${this.state.execution.stack.at(-1)?.key}; instructions arrive in the next message.`,
         },
@@ -526,6 +565,7 @@ export class RuntimeCoordinator {
    */
   private stopLocalRun(run: ActiveState, ctx: UiContext): void {
     this.state = { status: "idle" };
+    this.lastTerminal = "aborted";
     this.artifactStores.delete(run.execution.runId);
     this.setTools();
     this.showStatus(ctx);
@@ -543,6 +583,7 @@ export class RuntimeCoordinator {
           terminate: true,
         };
       }
+      this.lastTerminal = status;
       // Terminal release (fx3): the run is over; a later store for this runId simply
       // re-creates one for the same dir, and content addressing makes that harmless.
       // Mid-run rollovers keep the entry - only terminal run states release it.
@@ -590,6 +631,7 @@ export class RuntimeCoordinator {
       };
     }
     this.state = { status: "idle" };
+    this.lastTerminal = status;
     // Terminal release (fx3): the per-run ArtifactStore entry must not outlive the run
     // (about 789 B/entry on a session-lifetime Map); a later lookup re-creates it.
     // Mid-run rollovers keep the entry - only terminal run states release it.
@@ -619,18 +661,30 @@ export class RuntimeCoordinator {
     const current = this.requireActive();
     assertNotCancelled(signal);
     await this.registry.cancelAll();
-    const process = processLeafAt(current.workflow, current.execution);
-    const leaf = current.execution.stack[current.execution.stack.length - 1];
-    const execution = leaf && isAttemptBearingFrame(leaf)
-      ? { ...current.execution, status: "aborted" as const, invocations: upsertInvocation(current.execution, leaf.key, {
-          blockId: leaf.blockId,
-          key: leaf.key,
-          runner: process ? "process" : "agent",
-          status: "canceled",
-          attempt: frameAttempt(leaf),
-        }) }
-      : { ...current.execution, status: "aborted" as const };
-    return this.finishRun(current, ctx, "aborted", execution);
+    // corr-c8: the terminal commit is serialized against the transition
+    // epilogue; the re-check under the lock keeps a completed run from being
+    // retro-aborted when a concurrent transition lands first.
+    return this.runTerminalExclusive(signal, async () => {
+      if (this.state.status !== "active") {
+        return {
+          content: [{ type: "text", text: `${current.workflow.title} run ${current.execution.runId} is no longer active; there is nothing to abort.` }],
+          details: { workflow: current.workflow.name, runId: current.execution.runId, status: "not-active" },
+        };
+      }
+      const active = this.state;
+      const process = processLeafAt(active.workflow, active.execution);
+      const leaf = active.execution.stack[active.execution.stack.length - 1];
+      const execution = leaf && isAttemptBearingFrame(leaf)
+        ? { ...active.execution, status: "aborted" as const, invocations: upsertInvocation(active.execution, leaf.key, {
+            blockId: leaf.blockId,
+            key: leaf.key,
+            runner: process ? "process" : "agent",
+            status: "canceled",
+            attempt: frameAttempt(leaf),
+          }) }
+        : { ...active.execution, status: "aborted" as const };
+      return this.finishRun(active, ctx, "aborted", execution);
+    });
   }
 
   async retry(signal: AbortSignal | undefined, ctx: UiContext): Promise<ToolResult> {
@@ -827,6 +881,7 @@ export class RuntimeCoordinator {
     this.snapshotBytes = 0;
     this.snapshotByteLog.length = 0;
     this.delivery.reset();
+    this.lastTerminal = undefined;
     void this.registry.cancelAll();
     this.notifyCtx.current = ctx;
     const sessionDir = ctx.sessionManager?.getSessionDir?.();

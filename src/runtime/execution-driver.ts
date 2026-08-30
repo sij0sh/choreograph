@@ -170,7 +170,10 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
     }
     execution = applied.state;
     if (applied.effect.kind === "complete") {
-      await c.finishRun(current, ctx, "completed", applied.state);
+      await c.runTerminalExclusive(undefined, async () => {
+        // corr-c8: the lock wait can overlap an abort; never double-commit a terminal record.
+        if (c.state.status === "active") await c.finishRun(current, ctx, "completed", applied.state);
+      });
       return execution;
     }
     const parked = applied.effect.kind === "stay";
