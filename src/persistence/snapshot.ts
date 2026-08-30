@@ -197,13 +197,14 @@ function executionAt(value: unknown, label: string): Execution {
   }
   const orderRaw = raw.checkpointOrder === undefined ? Object.keys(checkpoints) : raw.checkpointOrder;
   if (!Array.isArray(orderRaw) || orderRaw.some((key) => typeof key !== "string")) throw new Error(`${label}.checkpointOrder must be a list of checkpoint keys`);
-  if (new Set(orderRaw).size !== orderRaw.length) throw new Error(`${label}.checkpointOrder must not contain duplicates`);
+  const ordered = new Set(orderRaw);
+  if (ordered.size !== orderRaw.length) throw new Error(`${label}.checkpointOrder must not contain duplicates`);
   const known = new Set(Object.keys(checkpoints));
   for (const key of orderRaw) {
     if (!known.has(key)) throw new Error(`${label}.checkpointOrder entry "${key}" has no checkpoint`);
   }
   for (const key of Object.keys(checkpoints)) {
-    if (!orderRaw.includes(key)) throw new Error(`${label}.checkpoints entry "${key}" is missing from checkpointOrder`);
+    if (!ordered.has(key)) throw new Error(`${label}.checkpoints entry "${key}" is missing from checkpointOrder`);
   }
   const decoded = {
     workflowName: requireString(raw.workflowName, `${label}.workflowName`),
