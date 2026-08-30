@@ -45,14 +45,15 @@ export function isolateWorkflowContext<T extends IsolatableMessage>(messages: re
   return index === undefined ? undefined : messages.slice(index);
 }
 
-type BoundaryMemo = { runId: string; length: number; boundary: number | undefined };
+type BoundaryMemo = { runId: string; length: number; boundary: number | undefined; last: IsolatableMessage | undefined };
 
 /**
  * Memoizing isolator for the per-LLM-call context event: repeated calls visit
  * only messages appended since the previous call instead of the full tail
  * (cumulative Theta(T) visits instead of Theta(T^2)). The memo is keyed by the
  * message-array length; a shrink is a truncation/compaction and a runId switch
- * is a transfer/adopt, and both force a full rescan.
+ * is a transfer/adopt, and both force a full rescan. An unchanged length whose
+ * tail message is a different object also forces one (identity lost).
  */
 export function createContextIsolator(): <T extends IsolatableMessage>(messages: readonly T[], runId: string) => T[] | undefined {
   let memo: BoundaryMemo | undefined;
@@ -60,7 +61,8 @@ export function createContextIsolator(): <T extends IsolatableMessage>(messages:
     const prefixes = [controlPrefix(runId), summaryPrefix(runId)];
     const remembered = memo;
     let boundary: number | undefined;
-    if (!remembered || remembered.runId !== runId || messages.length < remembered.length) {
+    const identityLost = messages.length === remembered?.length && messages[messages.length - 1] !== remembered.last;
+    if (!remembered || remembered.runId !== runId || messages.length < remembered.length || identityLost) {
       boundary = scanForBoundary(messages, prefixes, messages.length - 1, 0);
     } else {
       // Same runId, no shrink: a newer boundary can only sit in the appended tail.
@@ -71,7 +73,7 @@ export function createContextIsolator(): <T extends IsolatableMessage>(messages:
           : scanForBoundary(messages, prefixes, messages.length - 1, 0);
       }
     }
-    memo = { runId, length: messages.length, boundary };
+    memo = { runId, length: messages.length, boundary, last: messages[messages.length - 1] };
     return boundary === undefined ? undefined : messages.slice(boundary);
   };
 }

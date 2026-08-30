@@ -58,8 +58,8 @@ test("the latest boundary wins when a run delivers several", () => {
 });
 
 test("a boundary for a different run never matches", () => {
-  const foreign = [user("request"), user("Continue workflow `other-run` at a."), assistant("work")];
-  assert.equal(isolate(foreign, RUN), undefined);
+  const other = user("Continue workflow `other-run` at a.");
+  const messages = [user("request"), other, assistant("work")];
   assert.equal(isolateWorkflowContext(messages, RUN), undefined);
 });
 
@@ -170,7 +170,7 @@ test("a runId switch forces a full rescan", () => {
   const isolate = createContextIsolator();
   const first = [user("request"), boundary("task-a"), assistant("work")];
   assert.deepEqual(isolate(first, RUN), first.slice(1));
-  const other = user("Continue workflow `other-run` at a.");
-  assert.equal(isolate([user("request"), other, assistant("work")], "other-run"), undefined);
+  const foreign = [user("request"), user("Continue workflow `other-run` at a."), assistant("work")];
+  assert.equal(isolate(foreign, RUN), undefined);
   assert.deepEqual(isolate(first, RUN), first.slice(1));
 });
