@@ -534,6 +534,7 @@ Each position must finish with one `workflow_transition` call:
 ```json
 {
   "status": "completed",
+  "key": "root/scope",
   "met": ["scope-clear"],
   "checkpoint": {
     "summary": "The scope and affected components are confirmed.",
@@ -543,7 +544,10 @@ Each position must finish with one `workflow_transition` call:
 ```
 
 The transition schema is strict: extra properties, unknown statuses, and
-malformed checkpoints are rejected with an exact error.
+malformed checkpoints are rejected with an exact error. `key` names the
+position the outcome concludes; copy it verbatim from the position
+envelope. The engine applies an outcome only to the position it names, so
+a stale or replayed transition is rejected and changes nothing.
 
 A completion must include every criterion from the task or plan node's `done`
 list. `checkpoint.data` holds the authoring interface's structured payload:

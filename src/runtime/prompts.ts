@@ -94,13 +94,14 @@ const TRANSITION_CONTRACT = [
   "## Transition contract",
   "Conclude the current position with exactly one `workflow_transition` call.",
   `- \`status\`: one of ${transitionStatuses}. Use \`completed\` when the criteria are met, \`needs-work\` when the output has problems, or \`blocked\` when you cannot proceed.`,
+  "- `key`: the position key this outcome applies to, copied verbatim from the `Position` line of this envelope. A key mismatch is rejected.",
   "- `met`: the required criterion IDs below that are complete, copied verbatim. Only valid with `status: \"completed\"`; a completion must list every required criterion.",
   `- \`checkpoint\`: an object with these fields: ${boundaryCheckpointShape}. No other fields exist at the top level or inside \`checkpoint\`; structured output goes inside \`checkpoint.data\`.`,
   "- Caps: `evidence`/`decisions`/`unknowns` at most " + LIMITS.checkpointListItems + " items of " + LIMITS.checkpointItemBytes + " bytes each; `summary` at most " + LIMITS.checkpointSummaryBytes / 1024 + " KiB; the whole checkpoint at most " + LIMITS.checkpointBytes / 1024 + " KiB.",
   "- `checkpoint.data` must satisfy the current position's declared output contract when one exists.",
   "- `issues`: problems found, each `{ target, reason }`. Only valid with `status: \"needs-work\"`; recovery policy decides what happens next.",
   "A rejected transition reports every violation at once and changes nothing. Example of the exact shape:",
-  '`{ "status": "completed", "met": ["first-criterion-id"], "checkpoint": { "summary": "...", "evidence": ["..."], "data": { "...": "position-specific output" } } }`',
+  '`{ "status": "completed", "key": "the-position-key-from-the-envelope", "met": ["first-criterion-id"], "checkpoint": { "summary": "...", "evidence": ["..."], "data": { "...": "position-specific output" } } }`',
 ].join("\n");
 
 /**

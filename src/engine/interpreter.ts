@@ -45,7 +45,7 @@ type MissingOutcomeStatus = AssertNever<Exclude<TransitionStatus, keyof OutcomeP
 type UnexpectedOutcomeStatus = AssertNever<Exclude<keyof OutcomePayloads, TransitionStatus>>;
 
 export type TaskOutcome = {
-  [Status in keyof OutcomePayloads]: { readonly status: Status; readonly checkpoint: Checkpoint } & OutcomePayloads[Status];
+  [Status in keyof OutcomePayloads]: { readonly status: Status; readonly key: string; readonly checkpoint: Checkpoint } & OutcomePayloads[Status];
 }[keyof OutcomePayloads];
 
 type WorkflowEvent =
@@ -584,6 +584,11 @@ export function transition(workflow: Workflow, state: Execution, event: Workflow
   }
   const outcome = event.outcome;
   const leaf = state.stack[state.stack.length - 1];
+  // Keyed outcomes (C1): an outcome applies only to the position it names, so a
+  // duplicated or stale tool result can never commit another position.
+  if (leaf && outcome.key !== leaf.key) {
+    return fail(`outcome key ${outcome.key} does not match position ${leaf.key}`);
+  }
   const planExempt = leaf?.kind === "plan" && leaf.mode === "create";
   if (leaf?.kind === "task" && blockOf(workflow, leaf.blockId)?.kind === "script") {
     return fail(`position ${leaf.key} is a script step; the runtime executes it and it does not accept transitions`);

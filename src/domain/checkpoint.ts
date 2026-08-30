@@ -14,6 +14,7 @@ export const TRANSITION_SHAPE = {
   statuses: ["completed", "needs-work", "blocked"],
   fields: {
     status: { required: true },
+    key: { required: true },
     met: { required: false, onlyWith: "completed" },
     checkpoint: { required: true },
     issues: { required: false, onlyWith: "needs-work" },
@@ -29,7 +30,7 @@ export const TRANSITION_SHAPE = {
   },
 } as const satisfies {
   readonly statuses: readonly string[];
-  readonly fields: Record<"status" | "met" | "checkpoint" | "issues", { readonly required: boolean; readonly onlyWith?: string }>;
+  readonly fields: Record<"status" | "key" | "met" | "checkpoint" | "issues", { readonly required: boolean; readonly onlyWith?: string }>;
   readonly checkpointFields: Record<keyof Checkpoint, { readonly required: boolean; readonly boundary: "accept" | "reject" }>;
 };
 

@@ -83,6 +83,7 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
       enum: [...TRANSITION_SHAPE.statuses],
       description: "The outcome of the current position.",
     }),
+    key: Type.String({ minLength: 1, description: "The position key this outcome applies to; copy `Position` verbatim from the instructions envelope. A key mismatch is rejected." }),
     met: Type.Optional(
       Type.Array(Type.String({ pattern: ID_PATTERN.source, description: "A criterion id matching ^[a-z][a-z0-9-]*$." }), {
         uniqueItems: true,
@@ -119,6 +120,7 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
       "Record the outcome of the current workflow position: completed (criteria met), needs-work (problems found; recovery policy decides what happens), or blocked (cannot proceed).",
       `Exact shape: { ${transitionShape} }. Allowed statuses: ${TRANSITION_SHAPE.statuses.join(", ")}.`,
       "Copy `met` criterion ids verbatim from the position's required criteria; list every required id on completion.",
+      "Copy `key` verbatim from the position's `Position` line; an outcome is applied only to the position it names.",
       `Caps: evidence/decisions/unknowns at most ${LIMITS.checkpointListItems} items of ${LIMITS.checkpointItemBytes} bytes each; summary at most ${LIMITS.checkpointSummaryBytes / 1024} KiB; the checkpoint at most ${LIMITS.checkpointBytes / 1024} KiB.`,
       "There are no other fields; position-specific output goes inside checkpoint.data. Rejections report every violation at once.",
     ].join(" "),
