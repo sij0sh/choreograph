@@ -215,7 +215,8 @@ steps:
   assert.match(prompt, /iteration 1 of 2/);
   assert.match(prompt, /Current item: "a"/);
 
-  const midLoop = ext.entries.at(-1).data;
+  // The delivered marker may be the newest entry; read the latest active snapshot.
+  const midLoop = ext.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").at(-1).data;
   assert.equal(midLoop.status, "active");
   assert.equal(midLoop.execution.loops["root/review"].iteration, 1);
 
