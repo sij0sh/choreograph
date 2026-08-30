@@ -3,7 +3,6 @@ import { SessionManager, type ExtensionCommandContext } from "@earendil-works/pi
 import type { Execution } from "../domain/execution.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { estimateMessageTokens, projectEpoch } from "./epoch.ts";
-import { EVENT_ENTRY_TYPE } from "./journal.ts";
 import { HANDOFF_MANIFEST_TYPE, renderHandoffCapsule, rollUpManifest } from "./handoff-store.ts";
 import { capWorkflowContext, EPOCH_MESSAGE_TYPE, HANDOFF_MESSAGE_TYPE } from "./isolation.ts";
 import { summaryMessage, summaryPrefix } from "./prompts.ts";
@@ -87,9 +86,6 @@ export async function performRollover(c: CoordinatorInternals, transferId: strin
       id: transfer.childSessionId,
       ...(transfer.parentSession ? { parentSession: transfer.parentSession } : {}),
     });
-    for (const event of c.journal.all) {
-      if (event.runId === transfer.runId) child.appendCustomEntry(EVENT_ENTRY_TYPE, event);
-    }
     child.appendCustomEntry(HANDOFF_MANIFEST_TYPE, transfer.manifest);
     child.appendCustomMessageEntry(HANDOFF_MESSAGE_TYPE, renderHandoffCapsule(transfer.manifest), false, {
       runId: transfer.runId,

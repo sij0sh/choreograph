@@ -31,8 +31,6 @@ import { compactEpochMessages } from "./epoch.ts";
 import { preparedTransfer, ROLLOVER_COMMAND, type RolloverTransferV1 } from "./transfer.ts";
 import { statusValue } from "./status.ts";
 import { DeliveryCoordinator } from "./delivery.ts";
-import { EVENT_ENTRY_TYPE, RunJournal, parseEvent, project, type EventRunner, type RunEvent, type RunProjection } from "./journal.ts";
-import { nextTuiMode, renderDetailed, renderEventLog, renderStatus, tuiModeFromEnv, type TuiMode } from "./tui.ts";
 import { deliverPending as deliverPendingNow, dispatchAgent as dispatchAgentNow, drive as driveRun, publishLogs as publishLogsNow, settleAgent as settleAgentNow } from "./execution-driver.ts";
 import { performRollover as performRolloverNow, prepareRollover as prepareRolloverNow } from "./rollover.ts";
 import type { CoordinatorInternals } from "./internal.ts";
@@ -130,10 +128,7 @@ export class RuntimeCoordinator {
   private state: RunState = { status: "idle" };
   private baselineTools: string[] | null = null;
   private readonly delivery: DeliveryCoordinator;
-  private readonly journal = new RunJournal();
   private readonly artifactStores = new Map<string, ArtifactStore>();
-  private tuiMode: TuiMode = tuiModeFromEnv(process.env.CHOREOGRAPH_TUI);
-  private eventsPersistWarned = false;
   private runtimeArtifactRoot: string | undefined;
   private readonly defaultArtifactRoot: string | undefined;
   private readonly handoffs = new Map<string, HandoffManifestV1>();
@@ -220,102 +215,11 @@ export class RuntimeCoordinator {
     }
   }
 
-  /**
-   * Append one lifecycle event to the bounded journal and persist it
-   * best-effort. Observability must never fail the run itself.
-   */
-  private record(event: RunEvent): void {
-    const normalized = parseEvent(event);
-    if (!normalized) return;
-    this.journal.append(normalized);
-    try {
-      this.pi.appendEntry(EVENT_ENTRY_TYPE, normalized);
-    } catch (error) {
-      if (!this.eventsPersistWarned) {
-        this.eventsPersistWarned = true;
-        this.notifyCtx.current?.ui.notify(`Run-event persistence failed; the TUI falls back to in-memory events: ${error instanceof Error ? error.message : String(error)}.`, "warning");
-      }
-    }
-    const ctx = this.notifyCtx.current;
-    if (ctx?.ui) this.showStatus(ctx);
-  }
-
-  private syncInvocations(workflow: Workflow, runId: string, previous: Execution | undefined, next: Execution): void {
-    const before = previous?.invocations ?? {};
-    const after = next.invocations ?? {};
-    const settled: string[] = [];
-    const started: string[] = [];
-    for (const key of Object.keys(after)) {
-      const current = after[key]!;
-      const prior = before[key];
-      if (current.status === "running") {
-        if (!prior || prior.status !== "running" || prior.attempt !== current.attempt) started.push(key);
-        continue;
-      }
-      if (!prior || prior.status !== current.status) settled.push(key);
-    }
-    for (const key of settled) {
-      const current = after[key]!;
-      if (current.status === "succeeded") this.record({ type: "node-succeeded", runId, at: this.now(), key });
-      else if (current.status === "failed" || current.status === "waiting") {
-        const reason = next.checkpoints[key]?.summary ?? previous?.checkpoints[key]?.summary ?? "unknown";
-        this.record({ type: current.status === "failed" ? "node-failed" : "node-waiting", runId, at: this.now(), key, reason });
-      } else if (current.status === "canceled") {
-        this.record({ type: "node-canceled", runId, at: this.now(), key });
-      }
-    }
-    for (const key of next.checkpointOrder) {
-      if (next.checkpoints[key]?.skipped !== true || previous?.checkpoints[key]?.skipped === true) continue;
-      const block = blockOf(workflow, lastSegment(key));
-      const runner: EventRunner = block?.kind === "script" ? "process" : block?.kind === "loop" ? "control" : "agent";
-      this.record({ type: "node-skipped", runId, at: this.now(), key, runner, reason: next.checkpoints[key]?.summary ?? "unknown" });
-    }
-    for (const [key, loopState] of Object.entries(next.loops)) {
-      const prior = previous?.loops[key];
-      if (prior?.iteration === loopState.iteration) continue;
-      const block = blockOf(workflow, lastSegment(key));
-      if (block?.kind !== "loop") continue;
-      const total = loopState.items?.length ?? block.maxIterations;
-      const first = prior === undefined ? 1 : Math.max(loopState.iteration, prior.iteration + 1);
-      for (let iteration = first; iteration <= loopState.iteration; iteration += 1) {
-        this.record({ type: "loop-iteration-started", runId, at: this.now(), key, mode: "for-each", iteration, total: Math.max(iteration, total) });
-      }
-    }
-    for (const key of next.checkpointOrder) {
-      if (next.loops[key] !== undefined) continue;
-      const block = blockOf(workflow, lastSegment(key));
-      const data = next.checkpoints[key]?.data;
-      if (!block || block.kind !== "loop" || !data || typeof data !== "object" || Array.isArray(data)) continue;
-      if (previous?.checkpoints[key] === next.checkpoints[key]) continue;
-      if (typeof data.iterations !== "number" || !Number.isInteger(data.iterations) || data.iterations < 0) continue;
-      const iterations = data.iterations;
-      const loopEvents = this.journal.all.filter((event) => event.runId === runId && "key" in event && event.key === key);
-      const lastCompletion = loopEvents.findLastIndex((event) => event.type === "loop-completed");
-      const currentCycle = loopEvents.slice(lastCompletion + 1);
-      for (let iteration = 1; iteration <= iterations; iteration += 1) {
-        const recorded = currentCycle.some((event) => event.type === "loop-iteration-started" && event.iteration === iteration);
-        if (!recorded) this.record({ type: "loop-iteration-started", runId, at: this.now(), key, mode: "for-each", iteration, total: iterations });
-      }
-      this.record({ type: "loop-completed", runId, at: this.now(), key, mode: "for-each", iterations, total: iterations, exhausted: false });
-    }
-    for (const key of started) {
-      const current = after[key]!;
-      const prior = before[key];
-      if (prior && current.attempt > prior.attempt) {
-        this.record({ type: "retry-scheduled", runId, at: this.now(), key, attempt: current.attempt });
-      }
-      this.record({ type: "node-ready", runId, at: this.now(), key, runner: current.runner, attempt: current.attempt });
-      this.record({ type: "node-started", runId, at: this.now(), key, runner: current.runner, attempt: current.attempt });
-    }
-  }
 
   private publishLogs(runId: string, key: string, sink: ArtifactSink, exit: { readonly stdout: string; readonly stderr: string; readonly truncated: boolean }): void {
     publishLogsNow(this as unknown as CoordinatorInternals, runId, key, sink, exit);
   }
 
-  private projectionFor(runId: string): RunProjection | undefined {
-    return project(this.journal.all.filter((event) => event.runId === runId));
-  }
 
   /**
    * The run's artifact store, rooted under the workflow directory so retention stays per-run.
@@ -328,43 +232,12 @@ export class RuntimeCoordinator {
       ? workflowDir
       : this.defaultArtifactRoot ?? this.runtimeArtifactRoot;
     if (!dir) throw new Error(`run ${runId} cannot resolve an artifact store root for workflow ${workflow.name}`);
-    const store = ArtifactStore.forRun(dir, runId, ({ invocationKey: key, ...artifact }) => {
-      this.record({ type: "artifact-published", runId, at: this.now(), key, ...artifact });
-    });
+    const store = ArtifactStore.forRun(dir, runId);
     if (!store) throw new Error(`run ${runId} cannot resolve an absolute artifact store root`);
     this.artifactStores.set(runId, store);
     return store;
   }
 
-
-  private replayJournal(branch: readonly unknown[]): void {
-    for (const entry of branch) {
-      const typed = entry as { type?: unknown; customType?: unknown; data?: unknown };
-      if (typed.type === "custom" && typed.customType === EVENT_ENTRY_TYPE) this.journal.appendParsed(typed.data);
-    }
-  }
-
-  cycleTuiMode(ctx: UiContext): TuiMode {
-    this.tuiMode = nextTuiMode(this.tuiMode);
-    this.showStatus(ctx);
-    return this.tuiMode;
-  }
-
-  inspect(runId?: string): { runId: string; mode: TuiMode; projection: RunProjection | undefined; events: readonly string[] } | undefined {
-    const requested = runId?.trim();
-    const activeRunId = this.state.status === "active" ? this.state.execution.runId : undefined;
-    const selectedRunId = requested || activeRunId || this.journal.all.at(-1)?.runId;
-    if (!selectedRunId) return undefined;
-    const events = this.journal.all.filter((event) => event.runId === selectedRunId);
-    if (events.length === 0) return undefined;
-    const projection = project(events);
-    return {
-      runId: selectedRunId,
-      mode: this.tuiMode,
-      projection,
-      events: renderEventLog(events, 8),
-    };
-  }
 
   private snapshotOf(state: ActiveState | undefined, delivered: boolean, handoff?: HandoffManifestV1): unknown {
     if (!state) return terminalSnapshot("aborted", "", "");
@@ -401,15 +274,8 @@ export class RuntimeCoordinator {
 
   private showStatus(ctx: UiContext): void {
     const active = this.state.status === "active" ? this.state : undefined;
-    const projection = active ? this.projectionFor(active.execution.runId) : undefined;
-    const compact = active ? statusValue(active.workflow, active.execution) : undefined;
-    if (this.tuiMode === "detailed" && projection && ctx.ui.setWidget) {
-      ctx.ui.setStatus("choreograph", renderStatus({ mode: "compact", compact, projection }));
-      ctx.ui.setWidget("choreograph-details", [...renderDetailed(projection, compact)], { placement: "aboveEditor" });
-      return;
-    }
     ctx.ui.setWidget?.("choreograph-details", undefined);
-    ctx.ui.setStatus("choreograph", renderStatus({ mode: this.tuiMode, compact, projection }));
+    ctx.ui.setStatus("choreograph", active ? statusValue(active.workflow, active.execution) : undefined);
   }
 
   private requireActive(): ActiveState {
@@ -508,8 +374,6 @@ export class RuntimeCoordinator {
     this.commit(this.snapshotOf(next, false, manifest), `start of ${workflow.title} run ${next.execution.runId}`);
     this.handoffs.set(next.execution.runId, manifest);
     this.isolationRunId = next.execution.runId;
-    this.record({ type: "run-started", runId: next.execution.runId, at: this.now(), workflow: workflow.name, target: target.trim() });
-    this.syncInvocations(workflow, next.execution.runId, undefined, execution);
     this.adoptActive(next, ctx);
     ctx.ui.notify(`${workflow.title} started.`, "info");
     return next;
@@ -555,7 +419,6 @@ export class RuntimeCoordinator {
         isError: true,
       };
     }
-    this.syncInvocations(current.workflow, current.execution.runId, current.execution, result.state);
     const positionKey = current.execution.stack.at(-1)?.key ?? "unknown";
     const nextManifest = this.addHandoff(current, raw.checkpoint, positionKey, raw.status, result.state, raw.issues?.map((issue) => issue.target));
     if (result.effect.kind === "complete") {
@@ -567,7 +430,6 @@ export class RuntimeCoordinator {
     const next: ActiveState = { ...current, execution: result.state, delivered: rollover ? false : result.effect.kind === "stay" };
     const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: next.delivered });
     if (!withinMemoryBound(pendingSnapshot)) {
-      this.record({ type: "run-paused", runId: current.execution.runId, at: this.now(), reason: "memory bound" });
       return {
         content: [{ type: "text", text: `The run's persisted state would exceed ${LIMITS.memoryBytes / 1024} KiB; the transition was rejected. Abort the run or narrow the checkpoint data.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, status: "memory-bound" },
@@ -628,7 +490,6 @@ export class RuntimeCoordinator {
   }
 
   private async finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Execution): Promise<ToolResult> {
-    this.record({ type: status === "completed" ? "run-completed" : "run-aborted", runId: current.execution.runId, at: this.now() });
     const manifest = this.handoffs.get(current.execution.runId);
     if (status === "completed" && this.supportsSessionRollover(ctx)) {
       try {
@@ -851,8 +712,6 @@ export class RuntimeCoordinator {
 
   restoreRun(ctx: UiContext): void {
     const branch = ctx.sessionManager?.getBranch() ?? [];
-    this.journal.clear();
-    this.replayJournal(branch);
     const pendingTransfer = preparedTransfer(branch);
     if (pendingTransfer) {
       this.state = { status: "rollover-pending", transfer: pendingTransfer.transfer };
@@ -918,7 +777,6 @@ export class RuntimeCoordinator {
     else this.persistManifest(this.manifestFor(state, ctx));
     this.isolationRunId = state.execution.runId;
     this.adoptActive(state, ctx);
-    this.record({ type: "run-resumed", runId: state.execution.runId, at: this.now() });
     ctx.ui.notify(`Resumed ${workflow.title} run \`${state.execution.runId}\` at ${state.execution.stack.at(-1)?.key}.`, "info");
     void this.drive(state, ctx);
   }

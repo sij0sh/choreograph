@@ -81,11 +81,10 @@ export function publishLogs(c: CoordinatorInternals, runId: string, key: string,
   for (const stream of ["stdout", "stderr"] as const) {
     const text = exit[stream];
     if (!text) continue;
-    c.record({ type: "node-log", runId, at: c.now(), key, stream, message: text, truncated: exit.truncated });
     try {
       sink.publishText(stream, text);
     } catch {
-      // Log artifacts are best effort. The bounded journal event remains available.
+      // Log artifacts are best effort.
     }
   }
 }
@@ -116,9 +115,6 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
     const recorded = current.execution.invocations?.[processKey];
     const reexecution = recorded !== undefined && recorded.status !== "running";
     const attempt = reexecution ? recorded.attempt + 1 : recorded?.attempt ?? (leaf && "attempt" in leaf ? leaf.attempt : 1);
-    if (reexecution) {
-      c.record({ type: "retry-scheduled", runId: current.execution.runId, at: c.now(), key: processKey, attempt });
-    }
     const invocation = { ...(recorded ?? { blockId: process.blockId, key: processKey, runner: "process" as const, attempt }), status: "running" as const, attempt };
     const processSpec = processSpecFor(process.script, process.blockId, dirname(current.workflow.overviewPath));
     const store = c.artifactStoreFor(current.workflow, current.execution.runId);
@@ -130,41 +126,32 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
       (ref) => store.materialize(ref, processSpec.cwd),
     );
     if (!resolved.ok) {
-      c.record({ type: "node-failed", runId: current.execution.runId, at: c.now(), key: processKey, reason: resolved.error });
       ctx.ui.notify(`Script ${processKey} could not run: ${resolved.error}. The run stays at ${processKey}.`, "error");
       return execution;
-    }
-    if (!c.journal.all.some((event) => event.type === "node-started" && event.runId === current.execution.runId && event.key === processKey && event.attempt === invocation.attempt)) {
-      c.record({ type: "node-started", runId: current.execution.runId, at: c.now(), key: processKey, runner: "process", attempt: invocation.attempt });
     }
     const result = await c.registry
       .dispatch(invocation, processSpec, resolved.inputs, invocation.attempt > 1 ? { acknowledgedRetry: true } : undefined)
       .result;
     if (c.state !== current) return execution;
     if (result.status === "canceled") {
-      c.record({ type: "node-canceled", runId: current.execution.runId, at: c.now(), key: processKey });
       return execution;
     }
     if (!result.exit) {
-      c.record({ type: "node-failed", runId: current.execution.runId, at: c.now(), key: processKey, reason: result.reason ?? "unknown runner error" });
       ctx.ui.notify(`Script ${processKey} could not run: ${result.reason ?? "unknown runner error"}. The run stays at ${processKey}.`, "error");
       return execution;
     }
     const exit = result.exit;
     if (exit.cancelled) {
-      c.record({ type: "node-canceled", runId: current.execution.runId, at: c.now(), key: processKey });
       return execution;
     }
     const captured = captureScriptFiles(processKey, processSpec.spec, processSpec.cwd, store, exit);
     publishLogs(c, current.execution.runId, processKey, sink, exit);
     const applied = engineTransition(current.workflow, current.execution, { type: "process-exit", key: processKey, exit, ...captured, store: sink }, store);
     if (!applied.ok) {
-      c.record({ type: "node-failed", runId: current.execution.runId, at: c.now(), key: processKey, reason: applied.error });
       ctx.ui.notify(`Result for ${processKey} could not be applied: ${applied.error}. The run stays at ${processKey}.`, "error");
       return execution;
     }
     execution = applied.state;
-    c.syncInvocations(current.workflow, current.execution.runId, current.execution, applied.state);
     const processManifest = c.processHandoffManifest(current, current.execution, applied.state);
     if (applied.effect.kind === "complete") {
       c.persistManifest(processManifest);
@@ -172,14 +159,9 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
       return execution;
     }
     const parked = applied.effect.kind === "stay";
-    if (parked && reexecution) {
-
-      c.record({ type: "node-waiting", runId: current.execution.runId, at: c.now(), key: processKey, reason: applied.state.checkpoints[processKey]?.summary ?? "unknown" });
-    }
     const next: ActiveState = { ...current, execution: applied.state, delivered: false, ...(parked ? { parked: true } : { parked: undefined }) };
     const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: false });
     if (!withinMemoryBound(pendingSnapshot)) {
-      c.record({ type: "run-paused", runId: current.execution.runId, at: c.now(), reason: "memory bound" });
       ctx.ui.notify(`The run's persisted state would exceed ${LIMITS.memoryBytes / 1024} KiB after process ${processKey}; the run is paused. Abort the run or narrow the workflow outputs.`, "error");
       return execution;
     }

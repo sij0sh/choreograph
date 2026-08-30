@@ -313,9 +313,9 @@ test("workflow_retry rejects while a script is still in flight", async () => {
     snapshotsBefore,
     "no mid-flight snapshot is committed",
   );
-  const events = runtime.journal.all.filter((event) => event.key === "root/long");
-  assert.equal(events.filter((event) => event.type === "node-started").length, 1, "one node-started for attempt 1");
-  assert.equal(events.filter((event) => event.type === "retry-scheduled").length, 0, "no retry is scheduled");
+  const invocation = runtime.state.execution.invocations?.["root/long"];
+  assert.equal(invocation?.status, "running", "the script stays in flight on attempt 1");
+  assert.equal(invocation?.attempt, 1, "no retry is scheduled");
   assert.ok(!h.sent.some((entry) => entry.message.includes("Retried process")), "no false completion reply is sent");
   await runtime.abort(undefined, h.ctx);
   await started;
@@ -534,13 +534,6 @@ test("an unresolvable script input fails the node and parks the run at the scrip
   const notice = h.ctx.ui.notices.at(-1);
   assert.match(notice.message, /Script root\/probe could not run/);
   assert.match(notice.message, /input "gone"/);
-  const failed = h.entries
-    .filter((entry) => entry.customType === "choreograph-events")
-    .map((entry) => entry.data)
-    .filter((event) => event.type === "node-failed" && event.key === "root/probe")
-    .at(-1);
-  assert.ok(failed, "the resolution failure is journaled as node-failed");
-  assert.match(failed.reason, /input "gone"/);
 });
 
 test("script runs publish stdout and stderr log artifacts under the run directory", async () => {
