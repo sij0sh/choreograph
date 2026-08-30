@@ -35,6 +35,9 @@ import type { CoordinatorInternals } from "./internal.ts";
 
 export const START_TOOL_NAME = "workflow_start";
 
+/** Used when a workflow is started without an explicit target. */
+export const DEFAULT_TARGET = "the entire project";
+
 
 export function newRunId(): string {
   const stamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
@@ -314,7 +317,7 @@ export class RuntimeCoordinator {
       return null;
     }
     assertNotCancelled(signal);
-    const next = this.beginRun(workflow, target, ctx);
+    const next = this.beginRun(workflow, target.trim() || DEFAULT_TARGET, ctx);
     const finalExecution = await this.drive(next, ctx);
     return { ...next, execution: finalExecution };
   }
@@ -349,7 +352,8 @@ export class RuntimeCoordinator {
       this.settleAgent(current, raw);
       return this.finishRun(current, ctx, "completed", result.state);
     }
-    const rollover = this.supportsSessionRollover(ctx);
+    // A blocked position waits for the user in this session; rolling it over would respawn the same blocker forever.
+    const rollover = this.supportsSessionRollover(ctx) && raw.status !== "blocked";
     const next: ActiveState = { ...current, execution: result.state, delivered: rollover ? false : result.effect.kind === "stay" };
     const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: next.delivered });
     if (!withinMemoryBound(pendingSnapshot)) {
@@ -399,7 +403,7 @@ export class RuntimeCoordinator {
           type: "text",
           text:
             result.effect.kind === "stay"
-              ? `Recorded ${raw.status}. The run stays at ${this.state.execution.stack.at(-1)?.key}; the checkpoint is saved.`
+              ? `Recorded ${raw.status}. The run stays at ${this.state.execution.stack.at(-1)?.key}${raw.status === "blocked" ? " and waits for the user" : ""}; the checkpoint is saved.`
               : `Recorded ${raw.status}. Continue at ${this.state.execution.stack.at(-1)?.key}; instructions arrive in the next message.`,
         },
       ],
