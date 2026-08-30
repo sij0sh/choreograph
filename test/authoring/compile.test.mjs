@@ -139,16 +139,3 @@ test("the digest reacts to every change class the old digest ignored", () => {
     "digest changes when the overview changes",
   );
 });
-
-test("a process operator's script spec is frozen into the compiled definition and shapes the digest", () => {
-  const spec = { argv: ["node", "fetch.mjs"], cwd: ".", timeoutMs: 5_000, acceptedExitCodes: [0], stdout: "json", stderr: "none", maxCaptureBytes: 1_024 };
-  const compileWith = (operatorSpec) => compileAt([plan("make", ["fetch"])], {
-    operators: operatorsOf(operator("fetch", { script: operatorSpec })),
-  });
-  const compiled = compileWith(spec);
-  assert.deepEqual(compiled.operators.fetch.script, spec);
-  assert.ok(Object.isFrozen(compiled.operators.fetch.script), "the operator script spec is frozen");
-  const other = compileWith({ ...spec, timeoutMs: 6_000 });
-  assert.notEqual(compiled.digest, other.digest, "changing an operator's script changes the digest");
-  assert.equal(compileWith(spec).digest, compiled.digest, "the same operator script compiles to the same digest");
-});

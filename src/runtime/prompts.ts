@@ -110,7 +110,7 @@ function operatorRoster(workflow: Workflow, allowed: readonly string[]): string 
   const lines = allowed
     .map((id) => workflow.operators.get(id))
     .filter((operator): operator is NonNullable<typeof operator> => Boolean(operator))
-    .map((operator) => `- \`${operator.id}\`${operator.script ? " (process)" : ""}: ${operator.description}`);
+    .map((operator) => `- \`${operator.id}\`: ${operator.description}`);
   return ["## Operator registry", ...lines].join("\n");
 }
 

@@ -87,8 +87,6 @@ export interface OperatorDescriptor {
   readonly description: string;
   readonly tools?: readonly string[];
   readonly output?: string;
-  /** When present, the operator runs as a bounded local process instead of a model turn. */
-  readonly script?: ScriptSpec;
 }
 
 export interface Workflow {

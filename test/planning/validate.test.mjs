@@ -57,19 +57,4 @@ test("firstIncompleteNode finds the first node without a result", () => {
   assert.equal(firstIncompleteNode(finished), undefined);
 });
 
-test("process operator nodes take neither done nor evidence", () => {
-  const operators = new Map([
-    ...OPERATORS,
-    ["fetch", { id: "fetch", path: "operators/fetch.md", description: "Fetch.", script: { argv: ["node", "fetch.mjs"], cwd: ".", timeoutMs: 1_000, acceptedExitCodes: [0], stdout: "json", stderr: "none", maxCaptureBytes: 1_024 } }],
-  ]);
-  const validateWith = (value) =>
-    validateDynamicPlan(value, { operators, allowedOperators: ["inspect", "trace", "fetch"] });
-  const good = validateWith({ version: 1, nodes: [node("probe"), { id: "fetch-data", operator: "fetch", objective: "Fetch.", dependsOn: ["probe"] }] });
-  assert.ok("plan" in good);
-  assert.deepEqual(good.plan.nodes[1].done, []);
-  const withDone = validateWith({ version: 1, nodes: [node("probe"), { id: "fetch-data", operator: "fetch", objective: "Fetch.", done: ["fetched"] }] });
-  assert.ok("errors" in withDone);
-  assert.ok(withDone.errors.some((error) => /neither "done" nor "evidence"/.test(error)));
-  const withEvidence = validateWith({ version: 1, nodes: [node("probe"), { id: "fetch-data", operator: "fetch", objective: "Fetch.", evidence: ["logs"] }] });
-  assert.ok("errors" in withEvidence);
-});
+test("every plan node requires done", () => { const missing = validate({ version: 1, nodes: [{ id: "probe", operator: "inspect", objective: "Look." }] }); assert.ok("errors" in missing); assert.ok(missing.errors.some((error) => /done must be a non-empty list/.test(error))); });

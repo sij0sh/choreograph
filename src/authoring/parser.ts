@@ -199,18 +199,12 @@ function loadOperators(directory: string, contracts: ReadonlyMap<string, Contrac
     if (output !== undefined && !contracts.has(output)) {
       throw new Error(`${label} output names contract "${output}", which has no contracts/ file`);
     }
-    if (frontmatter.script !== undefined && frontmatter.tools !== undefined) {
-      throw new Error(`${label} declares both "script" and "tools"; a process operator takes no tools`);
-    }
-    const script = frontmatter.script === undefined ? undefined : parseScriptSpec(frontmatter.script, `${label}.script`);
-    if (script) assertScriptPaths(script, `${label}.script`, lexicalRoot);
     operators.set(id, {
       id,
       path,
       description: stringAt(frontmatter.description, `${label} description`),
       ...(frontmatter.tools !== undefined ? { tools: parseToolList(frontmatter.tools, `${label} tools`)! } : {}),
       ...(output !== undefined ? { output } : {}),
-      ...(script ? { script } : {}),
     });
   }
   return operators;
@@ -306,7 +300,7 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     for (const key of ["run", "tools", "done", "output", "plan"] as const) {
       if (entry[key] !== undefined) throw new Error(`${label}.${key} only applies to "run:" tasks`);
     }
-    for (const key of ["script", "operator"] as const) {
+    for (const key of ["script"] as const) {
       if (entry[key] !== undefined) throw new Error(`${label}.${key} cannot be combined with "${loopKeys[0]}"`);
     }
     const inputs = parseInputBindings(entry.inputs, `${label}.inputs`);
@@ -315,18 +309,6 @@ function parseStepEntry(raw: unknown, index: number, label: string, context: Com
     recordGuardEdge(context, id, guard, `${label}.when`);
     const block = parseLoop(loopKeys[0], entry[loopKeys[0]], id, label, context);
     return { ...(guard ? { guard } : {}), ...block, ...(inputs ? { inputs } : {}) };
-  }
-  if (entry.operator !== undefined) {
-    for (const key of ["run", "tools", "done", "output", "plan", "script", "for_each", "repeat_until"] as const) {
-      if (entry[key] !== undefined) throw new Error(`${label}.${key} cannot be combined with "operator"`);
-    }
-    const id = stringAt(entry.id, `${label}.id`);
-    registerId(context, id, label);
-    const operatorId = stringAt(entry.operator, `${label}.operator`);
-    const operator = context.operators.get(operatorId);
-    if (!operator) throw new Error(`${label}.operator names "${operatorId}", which has no operator file`);
-    if (!operator.script) throw new Error(`${label}.operator "${operatorId}" is a model operator; steps support process operators only`);
-    return scriptStep(entry, id, label, context, operator.script, operator.output);
   }
   const structural = (["plan", "script"] as const).filter((key) => entry[key] !== undefined);
   if (structural.length > 1) throw new Error(`${label} declares more than one of: ${structural.join(", ")}`);

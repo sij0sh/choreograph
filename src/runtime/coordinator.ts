@@ -34,6 +34,7 @@ import { compactEpochMessages, estimateMessageTokens, projectEpoch } from "./epo
 import { createTransfer, preparedTransfer, ROLLOVER_COMMAND, TRANSFER_ENTRY_TYPE, validTransferDigest, type RolloverCompletedV1, type RolloverTransferV1 } from "./transfer.ts";
 import { statusValue } from "./status.ts";
 import { DeliveryCoordinator } from "./delivery.ts";
+import { captureScriptFiles } from "./script-capture.ts";
 import { EVENT_ENTRY_TYPE, RunJournal, parseEvent, project, type EventRunner, type RunEvent, type RunProjection } from "./journal.ts";
 import { nextTuiMode, renderDetailed, renderEventLog, renderStatus, tuiModeFromEnv, type TuiMode } from "./tui.ts";
 
@@ -322,18 +323,6 @@ export class RuntimeCoordinator {
       } catch {
         // Log artifacts are best effort. The bounded journal event remains available.
       }
-    }
-  }
-
-  private captureScriptFiles(key: string, spec: ScriptSpec, cwd: string, store: ArtifactStore, exit: ProcessResult): { readonly files?: readonly ArtifactRef[]; readonly captureError?: string } {
-    const accepted = !exit.timedOut && !exit.cancelled && exit.spawnError === undefined && exit.code !== undefined && spec.acceptedExitCodes.includes(exit.code);
-    if (!accepted || !spec.files?.length) return {};
-    const files: ArtifactRef[] = [];
-    try {
-      for (const capture of spec.files) files.push(store.publishFile(capture.name, key, resolve(cwd, capture.path)));
-      return { files };
-    } catch (error) {
-      return { captureError: `a declared capture file could not be published: ${error instanceof Error ? error.message : String(error)}` };
     }
   }
 
@@ -834,17 +823,15 @@ export class RuntimeCoordinator {
       const processSpec = processSpecFor(process.script, process.blockId, dirname(current.workflow.overviewPath));
       const store = this.artifactStoreFor(current.workflow, current.execution.runId);
       const sink = store.sinkFor(processKey);
-      const resolved = process.planKey === undefined
-        ? resolveScriptInputs(
-            current.workflow,
-            current.execution,
-            process.inputs,
-            (ref) => store.materialize(ref, processSpec.cwd),
-          )
-        : dependencyInputs(current.execution, process.planKey, process.dependsOn);
+      const resolved = resolveScriptInputs(
+        current.workflow,
+        current.execution,
+        process.inputs,
+        (ref) => store.materialize(ref, processSpec.cwd),
+      );
       if (!resolved.ok) {
         this.record({ type: "node-failed", runId: current.execution.runId, at: this.now(), key: processKey, reason: resolved.error });
-        ctx.ui.notify(`${process.planKey === undefined ? "Script" : "Process operator node"} ${processKey} could not run: ${resolved.error}. The run stays at ${processKey}.`, "error");
+        ctx.ui.notify(`Script ${processKey} could not run: ${resolved.error}. The run stays at ${processKey}.`, "error");
         return execution;
       }
       if (!this.journal.all.some((event) => event.type === "node-started" && event.runId === current.execution.runId && event.key === processKey && event.attempt === invocation.attempt)) {
@@ -860,7 +847,7 @@ export class RuntimeCoordinator {
       }
       if (!result.exit) {
         this.record({ type: "node-failed", runId: current.execution.runId, at: this.now(), key: processKey, reason: result.reason ?? "unknown runner error" });
-        ctx.ui.notify(`${process.planKey === undefined ? "Script" : "Process operator node"} ${processKey} could not run: ${result.reason ?? "unknown runner error"}. The run stays at ${processKey}.`, "error");
+        ctx.ui.notify(`Script ${processKey} could not run: ${result.reason ?? "unknown runner error"}. The run stays at ${processKey}.`, "error");
         return execution;
       }
       const exit = result.exit;
@@ -868,7 +855,7 @@ export class RuntimeCoordinator {
         this.record({ type: "node-canceled", runId: current.execution.runId, at: this.now(), key: processKey });
         return execution;
       }
-      const captured = this.captureScriptFiles(processKey, processSpec.spec, processSpec.cwd, store, exit);
+      const captured = captureScriptFiles(processKey, processSpec.spec, processSpec.cwd, store, exit);
       this.publishLogs(current.execution.runId, processKey, sink, exit);
       const applied = engineTransition(current.workflow, current.execution, { type: "process-exit", key: processKey, exit, ...captured, store: sink }, store);
       if (!applied.ok) {
@@ -1367,16 +1354,6 @@ export class RuntimeCoordinator {
   }
 }
 
-/** Dependency results of a process operator node, delivered as its JSON stdin payload. */
-function dependencyInputs(execution: Execution, planKey: string, dependsOn: readonly string[] | undefined): { readonly ok: true; readonly inputs?: Readonly<Record<string, JsonValue>> } {
-  const results = execution.plans[planKey]?.results ?? {};
-  const payload: Record<string, JsonValue> = {};
-  for (const dependency of dependsOn ?? []) {
-    const data = results[dependency]?.data;
-    if (data !== undefined) payload[dependency] = data;
-  }
-  return Object.keys(payload).length > 0 ? { ok: true, inputs: payload } : { ok: true };
-}
 
 function blocksWithTools(workflow: Workflow): readonly (readonly string[])[] {
   return workflowBlocks(workflow)

@@ -41,7 +41,7 @@ function checkpointContractError(workflow: Workflow, state: Execution, leaf: Fra
   const node = execution?.plan.nodes.find((entry) => entry.id === leaf.nodeId);
   if (!node) return undefined;
   const operator = workflow.operators.get(node.operator);
-  if (!operator || operator.script) return undefined; // a process node's failure checkpoint carries no agent-authored data
+  if (!operator) return undefined; // process nodes take no checkpoint contract
   return contractErrorFor(workflow, operator.output, checkpoint.data, `checkpoint ${leaf.key}`);
 }
 

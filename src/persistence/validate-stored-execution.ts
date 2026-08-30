@@ -106,8 +106,7 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
     }
     if (nodeEntry) {
       const operator = workflow.operators.get(nodeEntry.node.operator);
-      const runtimeManaged = operator?.script !== undefined && hasRuntimeManagedProcessData(state, key, checkpoint.data);
-      const problem = runtimeManaged ? undefined : contractProblem(workflow, operator?.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
+      const problem = contractProblem(workflow, operator?.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
       if (problem) return problem;
     }
   }
@@ -127,8 +126,7 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
       if (!node) return `plan result ${key}/${resultId} has no matching node in the current plan`;
       const operator = workflow.operators.get(node.operator);
       if (!operator) return `plan result ${key}/${resultId} uses unknown operator ${node.operator}`;
-      const runtimeArtifact = operator.script !== undefined && isArtifactRef(result.data);
-      const problem = runtimeArtifact ? undefined : contractProblem(workflow, operator.output, result.data === undefined ? {} : result.data, `node result ${key}/${resultId}`);
+      const problem = contractProblem(workflow, operator.output, result.data === undefined ? {} : result.data, `node result ${key}/${resultId}`);
       if (problem) return problem;
     }
     const validation = validateDynamicPlan(plan.plan, planInputFor(workflow, block.operators));

@@ -66,7 +66,6 @@ export function validateDynamicPlan(value: unknown, input: PlanValidationInput):
     } else if (Buffer.byteLength(node.objective, "utf8") > LIMITS.planNodeObjectiveBytes) {
       errors.push(`${label}.objective exceeds ${LIMITS.planNodeObjectiveBytes} bytes`);
     }
-    const processOperator = operator.script !== undefined;
     let dependsOn: string[] | undefined;
     let evidence: string[] | undefined;
     let done: string[] | undefined;
@@ -78,10 +77,7 @@ export function validateDynamicPlan(value: unknown, input: PlanValidationInput):
       errors.push(error instanceof Error ? error.message : String(error));
       return;
     }
-    if (processOperator && ((done?.length ?? 0) > 0 || (evidence?.length ?? 0) > 0)) {
-      errors.push(`${label} runs process operator "${node.operator}"; process nodes take neither "done" nor "evidence"`);
-    }
-    if (!processOperator && (!done || done.length === 0)) errors.push(`${label}.done must be a non-empty list`);
+    if (!done || done.length === 0) errors.push(`${label}.done must be a non-empty list`);
     if (dependsOn?.includes(node.id as string)) errors.push(`${label}.dependsOn must not include its own node`);
     if (dependsOn) {
       const earlier = new Set(nodes.map((known) => known.id));
