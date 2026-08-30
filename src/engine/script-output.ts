@@ -21,10 +21,15 @@ export function utf8Preview(value: string, max: number): string {
   return `${clipped}...`;
 }
 
-/** Adds side outputs (stderr, captured files) to the stdout-derived data without losing non-object stdout values. */
+/**
+ * Adds side outputs (stderr, captured files) to the stdout-derived data without
+ * losing non-object stdout values. Script stdout keys win over side keys of the
+ * same name (corr-c3): runtime sides keep their documented keys only where the
+ * script did not use them, so a script's own `stderr`/`files` entry survives.
+ */
 function mergeOutputSides(base: JsonValue, sides: Record<string, JsonValue>): JsonValue {
   if (Object.keys(sides).length === 0) return base;
-  if (typeof base === "object" && base !== null && !Array.isArray(base)) return { ...base, ...sides };
+  if (typeof base === "object" && base !== null && !Array.isArray(base)) return { ...sides, ...base };
   const wrapped: Record<string, JsonValue> = base === null ? {} : { stdout: base };
   return { ...wrapped, ...sides };
 }
