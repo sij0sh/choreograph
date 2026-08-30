@@ -4,6 +4,50 @@ Notable behavior changes to choreograph, newest first. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Entries are
 behavioral and reference the commits that introduced them.
 
+## [0.2.0] - 2026-09-02
+
+A simplification release. The runtime keeps three durable representations: the
+parsed workflow, the authoritative `Execution`, and its serialized snapshot.
+Prompts, status lines, tool lists, and rollover payloads are derived views.
+
+### Removed
+
+- Generated workflows and promotion: `workflow_run_definition`,
+  `workflow_promote`, and the in-memory compiled mirror. Workflows live on
+  disk; a frozen definition with a content digest is built at run start.
+- Process-backed operators: `OperatorDescriptor.script` and `operator:` step
+  desugaring. Plan nodes always run through the model; use `script:` steps for
+  bounded processes.
+- `repeat_until` loops and multi-step loop bodies. A `for_each` body is one
+  `run` step.
+- Recovery invalidation, replanning, retained results, scopes, and strategies.
+  Recovery retries the current position, then parks the run. `issues[]` are
+  diagnostics only.
+- The run journal and TUI: `workflow-tui`, `workflow-inspect`, the progress
+  widget, and all journal persistence.
+- Handoff manifests, capsules, context epochs, `workflow_handoff_read`, and
+  workflow-aware compaction. Rollover transfers the snapshot only.
+- Loose transition arguments: `workflow_transition` validates its checkpoint
+  with a strict schema; legacy wrappers and normalizers are gone.
+
+### Changed
+
+- Snapshots are written in format v7 and only v7 is resumable; older active
+  snapshots are rejected with a restart message. The rollover marker stays a
+  v6 rollover-pending entry.
+- Rollover transfers are v2: snapshot, workflow, run id, terminal flag, child
+  identity, and digest. v1 transfers are ignored.
+- Each position receives a fixed prompt envelope: identity, position, tools,
+  overview, context, inputs, prior attempt, bounded prior summaries, task,
+  contract, and transition rules.
+
+### Fixed
+
+- Loop item bindings are validated before the loop body is parsed, so a
+  circular `from` reference now fails loudly instead of being accepted.
+- Loop checkpoint keys (`root/<loop>/loop[n]/<body-id>`) and the aggregate
+  shape (`mode: for-each`, `iterations`, `results`) are preserved.
+
 ## [0.1.5] - 2026-08-29
 
 ### Removed

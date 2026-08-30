@@ -1,6 +1,6 @@
 import { canonicalJsonBytes, type JsonValue } from "../domain/json.ts";
 import { LIMITS } from "../domain/limits.ts";
-import { SNAPSHOT_TYPE, parseSnapshot, type ActiveSnapshotV5, type ParsedSnapshot } from "./snapshot.ts";
+import { SNAPSHOT_TYPE, parseSnapshot, type ActiveSnapshotV7, type ParsedSnapshot } from "./snapshot.ts";
 
 export class WorkflowStorageError extends Error {
   constructor(operation: string, cause: unknown) {
@@ -13,7 +13,7 @@ export interface SnapshotStore {
   append(snapshot: unknown): void;
 }
 
-export function withinMemoryBound(snapshot: ActiveSnapshotV5): boolean {
+export function withinMemoryBound(snapshot: ActiveSnapshotV7): boolean {
   const bytes = canonicalJsonBytes({
     checkpoints: snapshot.execution.checkpoints,
     checkpointOrder: snapshot.execution.checkpointOrder,

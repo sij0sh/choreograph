@@ -16,7 +16,7 @@ function messageText(message: IsolatableMessage): string | undefined {
 }
 
 /**
- * The exact current-epoch slice: everything from the latest workflow control
+ * The exact current-context slice: everything from the latest workflow control
  * message onward. Nothing from earlier positions survives; there are no
  * protected message types.
  */

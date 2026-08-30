@@ -355,7 +355,7 @@ test("abort persists the pre-abort execution in the terminal snapshot", async ()
   await runtime.abort(undefined, h.ctx);
   const terminal = h.entries.at(-1).data;
   assert.equal(terminal.status, "aborted");
-  assert.equal(terminal.v, 5);
+  assert.equal(terminal.v, 7);
   assert.equal(terminal.execution.status, "aborted");
   assert.equal(terminal.execution.stack.at(-1)?.key, "root/frame");
   assert.equal(Object.keys(terminal.execution.checkpoints).length, 0, "the pre-abort state survives");
@@ -395,7 +395,7 @@ test("completion persists the post-transition execution in the terminal snapshot
   ]);
   const terminal = h.entries.at(-1).data;
   assert.equal(terminal.status, "completed");
-  assert.equal(terminal.v, 5);
+  assert.equal(terminal.v, 7);
   assert.equal(terminal.execution.status, "completed");
   assert.deepEqual(terminal.execution.stack, [], "the post-transition stack is empty");
   assert.deepEqual(Object.keys(terminal.execution.checkpoints).sort(), ["root/deliver", "root/frame"], "every checkpoint survives in the terminal snapshot");

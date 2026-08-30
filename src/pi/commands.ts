@@ -5,7 +5,7 @@ import { ROLLOVER_COMMAND } from "../runtime/transfer.ts";
 
 export function registerRuntimeCommands(pi: ExtensionAPI, runtime: RuntimeCoordinator): void {
   pi.registerCommand(ROLLOVER_COMMAND, {
-    description: "Internal command that moves a workflow into its next bounded context epoch.",
+    description: "Internal command that moves a workflow into its next bounded child session.",
     handler: async (args, ctx) => {
       const transferId = (args ?? "").trim();
       if (!transferId) {

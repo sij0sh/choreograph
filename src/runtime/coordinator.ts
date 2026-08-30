@@ -379,7 +379,7 @@ export class RuntimeCoordinator {
     }
     if (this.state.status !== "active") {
       return {
-        content: [{ type: "text", text: `${current.workflow.title} run ${current.execution.runId} completed during script execution. Its bounded summary epoch is being prepared.` }],
+        content: [{ type: "text", text: `${current.workflow.title} run ${current.execution.runId} completed during script execution. Its bounded summary session is being prepared.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, status: "completed" },
         terminate: true,
       };
@@ -388,7 +388,7 @@ export class RuntimeCoordinator {
       const active = this.state;
       this.prepareRollover(active.workflow, active.execution, this.snapshotOf(active, false), false, ctx);
       return {
-        content: [{ type: "text", text: `Recorded ${raw.status}. The next workflow epoch will continue at ${active.execution.stack.at(-1)?.key} in a fresh session.` }],
+        content: [{ type: "text", text: `Recorded ${raw.status}. The workflow continues at ${active.execution.stack.at(-1)?.key} in a fresh session.` }],
         details: { workflow: active.workflow.name, runId: active.execution.runId, position: active.execution.stack.at(-1)?.key, status: "rollover-pending" },
         terminate: true,
       };

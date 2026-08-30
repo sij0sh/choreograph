@@ -41,8 +41,8 @@ test("invariant: structural blocks hold no effects of their own", () => {
   assert.deepEqual(started.state, before, "structural advancement never mutates prior state");
 });
 
-test("invariant: retry and replan budgets are finite", () => {
-  const wf = workflow([task("only", { recovery: { maxAttempts: 1, maxReplans: 0, strategy: ["retry", "block"] } })]);
+test("invariant: retry budgets are finite", () => {
+  const wf = workflow([task("only", { recovery: { maxAttempts: 1 } })]);
   let state = start(wf, { runId: "r1" }).state;
   state = transition(wf, state, { type: "outcome", outcome: { status: "needs-work", checkpoint: cp("one") } }).state;
   const blocked = transition(wf, state, { type: "outcome", outcome: { status: "needs-work", checkpoint: cp("two") } });
@@ -77,7 +77,7 @@ test("invariant: model-generated work selects trusted operators only", () => {
 });
 
 test("invariant: blocking always leaves a resumable checkpoint", () => {
-  const wf = workflow([task("only", { recovery: { maxAttempts: 1, maxReplans: 0, strategy: ["block"] } })]);
+  const wf = workflow([task("only", { recovery: { maxAttempts: 1 } })]);
   let state = start(wf, { runId: "r1" }).state;
   const blocked = transition(wf, state, { type: "outcome", outcome: { status: "needs-work", checkpoint: cp("stuck", { hint: "ask user" }) } });
   assert.ok(blocked.ok);

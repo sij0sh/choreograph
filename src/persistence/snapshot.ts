@@ -37,8 +37,8 @@ function invocationsAt(value: unknown, label: string): Record<string, NodeInvoca
 
 export const SNAPSHOT_TYPE = "choreograph";
 
-export type ActiveSnapshotV5 = {
-  readonly v: 5;
+export type ActiveSnapshotV7 = {
+  readonly v: 7;
   readonly status: "active";
   readonly workflow: string;
   readonly execution: Execution;
@@ -47,8 +47,8 @@ export type ActiveSnapshotV5 = {
 };
 
 type TerminalSnapshot =
-  | { readonly v: 5; readonly status: "completed"; readonly workflow: string; readonly runId: string; readonly execution?: Execution }
-  | { readonly v: 5; readonly status: "aborted"; readonly workflow: string; readonly runId: string; readonly execution?: Execution }
+  | { readonly v: 7; readonly status: "completed"; readonly workflow: string; readonly runId: string; readonly execution?: Execution }
+  | { readonly v: 7; readonly status: "aborted"; readonly workflow: string; readonly runId: string; readonly execution?: Execution }
 
 type RolloverSnapshotV6 = {
   readonly v: 6;
@@ -59,7 +59,7 @@ type RolloverSnapshotV6 = {
 };
 
 export type ParsedSnapshot =
-  | ActiveSnapshotV5
+  | ActiveSnapshotV7
   | RolloverSnapshotV6
   | TerminalSnapshot
   | { readonly status: "terminal" }
@@ -232,8 +232,8 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
     return { v: 6, status: "rollover-pending", workflow: snapshot.workflow, runId: snapshot.runId, transferId: snapshot.transferId };
   }
   if (snapshot.status !== "active") return null;
-  if (snapshot.v !== 5) {
-    return { status: "invalid", error: "snapshot version must be 5; snapshots from earlier engine versions are not resumable" };
+  if (snapshot.v !== 7) {
+    return { status: "invalid", error: "snapshot version must be 7; snapshots from earlier engine versions are not resumable; start the workflow again" };
   }
   try {
     const execution = executionAt(snapshot.execution, "snapshot.execution");
@@ -249,7 +249,7 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
     }
     const baselineTools = snapshot.baselineTools as string[] | undefined;
     return {
-      v: 5,
+      v: 7,
       status: "active",
       workflow: execution.workflowName,
       execution,
@@ -266,9 +266,9 @@ export function activeSnapshot(fields: {
   execution: Execution;
   delivered: boolean;
   baselineTools?: readonly string[];
-}): ActiveSnapshotV5 {
+}): ActiveSnapshotV7 {
   return {
-    v: 5,
+    v: 7,
     status: "active",
     workflow: fields.workflow,
     execution: fields.execution,
@@ -287,5 +287,5 @@ export function terminalSnapshot(
   runId: string,
   execution?: Execution,
 ): TerminalSnapshot {
-  return { v: 5, status, workflow, runId, ...(execution ? { execution } : {}) };
+  return { v: 7, status, workflow, runId, ...(execution ? { execution } : {}) };
 }

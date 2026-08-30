@@ -1,5 +1,6 @@
 import type { Execution, Frame, PlanExecution } from "../domain/execution.ts";
 import { isArtifactRef } from "../domain/artifacts.ts";
+import { contractError } from "../domain/contract.ts";
 import { LIMITS } from "../domain/limits.ts";
 import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
 import type { Workflow } from "../domain/workflow.ts";
@@ -10,14 +11,6 @@ type ValidationResult = { ok: true; execution: Execution } | { ok: false; error:
 
 function reject(error: string): ValidationResult {
   return { ok: false, error };
-}
-
-function contractProblem(workflow: Workflow, contractId: string | undefined, data: unknown, label: string): string | undefined {
-  if (contractId === undefined) return undefined;
-  const contract = workflow.contracts?.get(contractId);
-  if (!contract) return `${label} names missing contract ${contractId}`;
-  const errors = contract.validate(data === undefined ? {} : data);
-  return errors.length > 0 ? `${label} violates contract ${contractId}: ${errors.join("; ")}` : undefined;
 }
 
 function hasRuntimeManagedProcessData(state: Execution, key: string, data: unknown): boolean {
@@ -99,12 +92,12 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
     if (checkpoint.skipped === true) continue;
     if (block?.kind === "task" || block?.kind === "script") {
       const runtimeManaged = block.kind === "script" && hasRuntimeManagedProcessData(state, key, checkpoint.data);
-      const problem = runtimeManaged ? undefined : contractProblem(workflow, block.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
+      const problem = runtimeManaged ? undefined : contractError(workflow, block.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
       if (problem) return problem;
     }
     if (nodeEntry) {
       const operator = workflow.operators.get(nodeEntry.node.operator);
-      const problem = contractProblem(workflow, operator?.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
+      const problem = contractError(workflow, operator?.output, checkpoint.data === undefined ? {} : checkpoint.data, `checkpoint ${key}`);
       if (problem) return problem;
     }
   }
@@ -124,7 +117,7 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
       if (!node) return `plan result ${key}/${resultId} has no matching node in the current plan`;
       const operator = workflow.operators.get(node.operator);
       if (!operator) return `plan result ${key}/${resultId} uses unknown operator ${node.operator}`;
-      const problem = contractProblem(workflow, operator.output, result.data === undefined ? {} : result.data, `node result ${key}/${resultId}`);
+      const problem = contractError(workflow, operator.output, result.data === undefined ? {} : result.data, `node result ${key}/${resultId}`);
       if (problem) return problem;
     }
     const validation = validateDynamicPlan(plan.plan, planInputFor(workflow, block.operators));

@@ -113,7 +113,7 @@ function aggregateOf(state: Execution, key: string): JsonValue | undefined {
   return { version: 1, nodes } as JsonValue;
 }
 
-export function planKeyForBlock(state: Execution, blockId: string): string | undefined {
+function planKeyForBlock(state: Execution, blockId: string): string | undefined {
   const entry = Object.entries(state.plans).find(([, execution]) => execution.blockId === blockId);
   return entry ? entry[0] : undefined;
 }

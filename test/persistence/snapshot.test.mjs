@@ -23,7 +23,7 @@ test("an active snapshot round-trips through JSON and resumes", () => {
   const snapshot = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });
   const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
   assert.equal(parsed.status, "active");
-  assert.equal(parsed.v, 5);
+  assert.equal(parsed.v, 7);
   assert.deepEqual(parsed.execution, state);
 
   const migrated = validateAgainstWorkflow(wf, parsed.execution);
@@ -60,7 +60,7 @@ function planRecoveryWorkflow() {
         kind: "plan",
         id: "investigate",
         operators: ["inspect", "trace"],
-        recovery: { maxAttempts: 3, maxReplans: 2, strategy: ["retry", "replan"] },
+        recovery: { maxAttempts: 3 },
       },
     ],
     { operators: PLAN_OPERATORS },
@@ -140,7 +140,7 @@ test("terminal snapshots keep the version and tolerate a final execution", () =>
   const { wf, state } = midRunState();
   const completedState = { ...state, stack: [], status: "completed" };
   const snapshot = terminalSnapshot("completed", wf.name, "run-1", completedState);
-  assert.equal(snapshot.v, 5);
+  assert.equal(snapshot.v, 7);
   const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
   assert.equal(parsed.status, "terminal");
   const abortedState = { ...state, status: "aborted" };
@@ -148,16 +148,19 @@ test("terminal snapshots keep the version and tolerate a final execution", () =>
   assert.equal(aborted.status, "terminal");
 });
 
-test("pre-version-5 active snapshots report as invalid", () => {
+test("pre-version-7 active snapshots report as invalid", () => {
   const stale = parseSnapshot({ v: 3, status: "active", workflow: "demo", runId: "r1", position: { kind: "step", stepId: "frame" }, target: "", delivered: false, memory: { steps: {} } });
   assert.equal(stale.status, "invalid");
-  assert.match(stale.error, /version must be 5/);
+  assert.match(stale.error, /version must be 7/);
 });
 
 test("invalid snapshots never partially resume", () => {
-  const invalid = parseSnapshot({ v: 5, status: "active", workflow: "demo", execution: { status: "active", stack: [{ kind: "task" }] }, delivered: false });
+  const invalid = parseSnapshot({ v: 7, status: "active", workflow: "demo", execution: { status: "active", stack: [{ kind: "task" }] }, delivered: false });
   assert.equal(invalid.status, "invalid");
   assert.match(invalid.error, /blockId/);
+  const stale = parseSnapshot({ v: 5, status: "active", workflow: "demo", execution: { status: "active", stack: [{ kind: "task", blockId: "a", key: "root/a", attempt: 1 }] }, delivered: false });
+  assert.equal(stale.status, "invalid");
+  assert.match(stale.error, /start the workflow again/);
   const notAnObject = parseSnapshot("nope");
   assert.equal(notAnObject, null);
 });
@@ -295,7 +298,7 @@ test("loop snapshots reject out-of-range iterations and orphan loop state", () =
   assert.equal(orphan.status, "invalid");
   assert.match(orphan.error, /no matching loop frame/);
 });
-test("a loop-free v5 snapshot restores identically alongside loop support", () => {
+test("a loop-free v7 snapshot restores identically alongside loop support", () => {
   const { wf, state } = midRunState();
   const snapshot = activeSnapshot({ workflow: wf.name, execution: state, delivered: false });
   const parsed = parseSnapshot(JSON.parse(JSON.stringify(snapshot)));
@@ -319,7 +322,7 @@ test("active snapshots carry no parked marker; parking lives in the invocation s
   assert.equal(parsedParked.execution.invocations?.["root/probe"]?.status, "waiting", "the waiting invocation carries the park");
 }, { todo: false });
 
-test("a definition digest and typed invocations round-trip through v5 snapshots", () => {
+test("a definition digest and typed invocations round-trip through v7 snapshots", () => {
   const { wf, state } = midRunState();
   const withFields = {
     ...state,
