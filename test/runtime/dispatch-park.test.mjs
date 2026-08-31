@@ -166,7 +166,7 @@ test("a live fence parks a restored running script leaf", async () => {
   last.data.execution.invocations["root/stuck"] = { ...last.data.execution.invocations["root/stuck"], status: "running" };
   const fence = fencePath(root, "root/stuck");
   rmSync(fence, { force: true });
-  mkdirSync(join(root, ".choreograph", "fences"), { recursive: true });
+  mkdirSync(join(root, ".agents", ".choreograph", "fences"), { recursive: true });
   writeFileSync(fence, `${JSON.stringify({ pid: process.pid, attempt: 1, startedAt: Date.now() })}\n`, "utf8");
   try {
     const revived = new RuntimeCoordinator(revivedHarness.pi, [wf], revivedHarness.read, revivedHarness.storeRoot);

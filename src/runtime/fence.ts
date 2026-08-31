@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-const FENCE_DIR = ".choreograph/fences";
+const FENCE_DIR = ".agents/.choreograph/fences";
 
 export interface FenceRecord {
   readonly pid: number;
