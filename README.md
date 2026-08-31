@@ -14,7 +14,7 @@ contracts.
 
 ## [!] What Problem It Solves
 
-Pi skills progressively add guidance to the current conversation. That works
+Agent skills progressively add guidance to the current conversation. That works
 well for focused instructions. It becomes less reliable when a long process
 must share one growing context with tool output, intermediate reasoning, and
 past decisions. The agent can lose the sequence, skip a check, or drift from
@@ -101,6 +101,9 @@ ln -s "$AGENT_DIR/git/github.com/sij0sh/choreograph/.agents/workflows/choreograp
 
 The link keeps the authoring workflow in sync with package updates. If the
 target already exists, keep it or remove it before creating the link.
+Inside the Choreograph repository itself the authoring workflow loads
+automatically from `.agents/workflows/choreograph`; the link is only needed
+to author workflows from other projects.
 
 ### 3. Author a workflow
 
@@ -127,8 +130,15 @@ command named after its directory:
 
 ## [=] Configuration
 
-Workflow packages live under `$PI_CODING_AGENT_DIR/workflows`. The default is
-`~/.pi/agent/workflows`. A package uses this layout:
+Workflow packages load from two roots:
+
+* Global: `$PI_CODING_AGENT_DIR/workflows` (default `~/.pi/agent/workflows`).
+* Local: `<project>/.agents/workflows`, relative to the directory Pi starts
+  in.
+
+A local package overrides a global package with the same name, which keeps a
+repo's workflows self-contained inside the repository. A package uses this
+layout:
 
 ```text
 my-workflow/

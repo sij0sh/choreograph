@@ -7,9 +7,11 @@ hand.
 
 ## Discovery and layout
 
-Choreograph discovers direct child directories under
-`$PI_CODING_AGENT_DIR/workflows`. The default root is
-`~/.pi/agent/workflows`. The directory name is both the workflow id and its
+Choreograph discovers direct child directories under two roots: the global
+root `$PI_CODING_AGENT_DIR/workflows` (default `~/.pi/agent/workflows`) and
+the project-local root `<project>/.agents/workflows`, where `<project>` is
+the directory Pi starts in. A local workflow overrides a global workflow with
+the same name. The directory name is both the workflow id and its
 slash command. It must match `^[a-z][a-z0-9-]*$`.
 
 ```text
