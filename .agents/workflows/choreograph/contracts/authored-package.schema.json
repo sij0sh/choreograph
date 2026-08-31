@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "required": ["name", "packagePath", "command", "files", "featuresUsed"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+    "packagePath": { "type": "string", "minLength": 1 },
+    "command": { "type": "string", "pattern": "^/[a-z][a-z0-9-]*$" },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "featuresUsed": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

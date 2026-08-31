@@ -1,0 +1,54 @@
+{
+  "type": "object",
+  "required": ["name", "purpose", "blocks", "handoffs", "featureDecisions"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$" },
+    "purpose": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "blocks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "kind", "responsibility", "design"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+          "kind": { "enum": ["task", "plan", "script", "loop"] },
+          "responsibility": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "design": { "type": "string", "minLength": 1, "maxLength": 2048 }
+        }
+      }
+    },
+    "handoffs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["producer", "consumer", "artifact", "select"],
+        "additionalProperties": false,
+        "properties": {
+          "producer": { "type": "string", "minLength": 1 },
+          "consumer": { "type": "string", "minLength": 1 },
+          "artifact": { "type": "string", "minLength": 1 },
+          "select": { "type": "string" }
+        }
+      }
+    },
+    "featureDecisions": {
+      "type": "array",
+      "minItems": 11,
+      "items": {
+        "type": "object",
+        "required": ["feature", "use", "rationale"],
+        "additionalProperties": false,
+        "properties": {
+          "feature": {
+            "enum": ["task", "plan", "operator", "script", "loop", "contract", "input-binding", "guard", "tool-ceiling", "recovery", "visibility"]
+          },
+          "use": { "type": "boolean" },
+          "rationale": { "type": "string", "minLength": 1, "maxLength": 1024 }
+        }
+      }
+    }
+  }
+}

@@ -1,35 +1,52 @@
 ---
-description: Create a new choreograph workflow definition end to end.
+description: Design, author, and validate a Choreograph workflow package from a concrete outcome.
 piVisibility: false
+contracts:
+  workflow-spec: contracts/workflow-spec.schema.json
+  authored-package: contracts/authored-package.schema.json
+  validation-report: contracts/validation-report.schema.json
 steps:
   - run: steps/01-frame.md
     id: frame
+    output: workflow-spec
     done:
       - target-named
       - steps-planned
-      - contracts-declared
-      - guards-justified
+      - features-considered
+      - handoffs-declared
   - run: steps/02-author.md
     id: author
+    inputs:
+      specification: { from: frame, select: /data }
+    output: authored-package
     done:
       - package-written
       - paths-contained
-      - contracts-declared
+      - design-implemented
   - run: steps/03-validate.md
     id: validate
+    inputs:
+      package: { from: author, select: /data }
+      specification: { from: frame, select: /data }
+    output: validation-report
     done:
-      - engine-check-run
+      - discovery-check-run
+      - design-reviewed
       - diagnostics-addressed
   - run: steps/04-report.md
     id: report
     inputs:
-      validation: { from: validate }
+      package: { from: author, select: /data }
+      validation: { from: validate, select: /data }
     done:
-      - restart-recorded
+      - package-recorded
       - validation-recorded
+      - restart-recorded
 ---
 
 # Author a workflow
 
-Frame the target, author the package, run the engine check and fix every
-diagnostic (at most three rounds), and report.
+Turn the requested outcome into the smallest reliable workflow. Choose each
+feature for the ambiguity or failure mode that it removes. Carry the design
+through explicit artifacts, validate the package, review its runtime semantics,
+and report whether it is ready. Use at most three validator invocations total.

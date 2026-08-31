@@ -1,112 +1,146 @@
 # Author
 
-Purpose: write the complete package.
+Purpose: implement the declared `specification` as a complete workflow package.
+Use the specification as required data. Do not redesign from prior summaries.
 
-## Location
-- Default root: `~/.pi/agent/workflows/`
-- Override: definitions resolve under `$PI_CODING_AGENT_DIR/workflows`.
-- Every instruction path MUST be relative to the package directory. The parser rejects `..` and absolute paths.
+## Location and package shape
 
-## Scaffold
+Use `$PI_CODING_AGENT_DIR/workflows/<name>/`, or
+`~/.pi/agent/workflows/<name>/` when the variable is unset.
 
 ```text
 <name>/
-|-- WORKFLOW.md          # Frontmatter + overview (required)
+|-- WORKFLOW.md
 |-- steps/
-|   |-- 01-frame.md      # One markdown task file
-|   `-- ...
-|-- contracts/           # Optional contract schemas
-|   |-- finding.schema.json
-|   `-- verdict.schema.json
-`-- operators/           # Only when a plan block references operators
+|   `-- 01-task.md
+|-- contracts/
+|   `-- artifact.schema.json
+|-- operators/
+|   `-- capability.md
+`-- scripts/
+    `-- helper.mjs
 ```
 
-## Frontmatter
+Create only directories required by the selected features. Every referenced path
+must be relative to the package. Paths must not use `..`, absolute paths, or
+escaping symlinks. Remove stale invalid direct children from `contracts/` and
+`operators/`; discovery validates them even when unused.
 
-Write `WORKFLOW.md` with this shape; unknown keys are rejected.
+## Workflow frontmatter
+
+Unknown keys are rejected.
 
 ```yaml
 ---
-description: What it does and when to use it.
-piVisibility: false              # Optional; exposes the workflow to the model; defaults to false
-contracts:                       # Optional; maps contract ids to schema files
+description: What the workflow does and when to use it.
+piVisibility: false
+legalTools: [read, grep, bash] # Optional workflow-wide ceiling
+contracts:                     # Optional explicit id-to-file map
   finding: contracts/finding.schema.json
 steps:
-  - run: steps/02-observe.md    # A task
+  - run: steps/01-observe.md
     id: observe
-    output: brief               # Optional; declares the task's output contract
     done: [evidence-recorded]
-  - id: investigate             # A dynamic plan
-    inputs:                      # Optional; declared artifact bindings
-      brief:
-        from: observe
-    plan:
-      operators: [inspect, trace]
+    repair: { max_attempts: 2 }
+    output: finding
 ---
 ```
 
-Rules:
-- Every block id MUST be unique across the workflow.
-- Each step entry MUST use exactly one of `run`, `plan`, `script`, or `for_each`.
-- Omit `legalTools` so every position keeps the session's full toolset. Add `tools` on a task or operator only when that phase needs a narrower ceiling.
-- A `plan:` block MUST list only operator ids that have files.
-- `inputs.from` MUST name a block declared earlier in `steps` order.
-- `output` MUST name a discovered contract id. It is invalid on `plan:` steps; plans emit an engine-generated aggregate.
+Each block id must be unique. Each step must select exactly one of `run`, `plan`,
+`script`, or `for_each`. An input or guard may name only an earlier top-level
+block.
 
-## Guards
+## Tasks
 
-A task or plan step MAY carry one `when:` guard. The engine evaluates it
-before the step runs; a guard that does not hold skips the step with a
-synthetic `skipped` checkpoint.
+Use a task for a known model responsibility. Write a focused Markdown file.
+Declare evidence-based `done` criteria. Add `tools` only to narrow the workflow
+ceiling. Add `output` when machine-consumed checkpoint data needs validation.
+
+A successful model position must make exactly one real `workflow_transition`
+call and report every declared criterion id. The task should explain the exact
+`checkpoint.data` shape when it has an output contract.
+
+## Plans and operators
+
+Use a plan only when the model must discover the investigation path at runtime.
 
 ```yaml
-- run: steps/03-deep-trace.md
-  id: deep-trace
-  when:
-    from: triage          # earlier step id
-    select: /data/severity # optional JSON Pointer into the artifact
-    op: in                 # equals | not-equals | in | not-in | exists | not-exists | gt | gte | lt | lte
-    value: [high, critical]
+- id: investigate
+  inputs:
+    brief: { from: observe, select: /data }
+  plan:
+    operators: [inspect, trace]
+    repair: { max_attempts: 2 }
 ```
 
-Rules:
-- `from` MUST name a block declared earlier in `steps` order.
-- Value ops require `value`; `exists` and `not-exists` forbid it.
-- `equals`/`not-equals` take a scalar; `in`/`not-in` take a non-empty scalar
-  list; `gt`/`gte`/`lt`/`lte` take a finite number.
-- A missing artifact or unresolvable pointer makes every value op false
-  (including negations). Use `exists`/`not-exists` to key off presence.
-- The engine evaluates the guard whenever the block becomes current: at
-  start and after each transition.
-
-## Script steps
-
-A script step runs one bounded local process with no model turn. The engine
-spawns it, records its exit, and moves on; `workflow_transition` is rejected
-at script positions.
+Create one direct `operators/<id>.md` file for each operator:
 
 ```yaml
-- id: run-tests
+---
+description: One precise capability for the planning model.
+tools: [read, grep]
+output: finding
+---
+
+# Inspect
+
+Perform only this capability and return the contracted data.
+```
+
+Operators should not overlap. The planning position must place a version 1 plan
+in `checkpoint.data.plan`. A plan has two to eight ordered nodes. Each node has a
+unique id, non-empty objective, listed operator, dependencies only on earlier
+nodes, and a non-empty `done` list. Nodes run in dependency order, not in
+parallel. Plans cannot declare `output`; they emit
+`{ version, nodes: [{ id, operator, objective, result }] }`.
+
+## Scripts
+
+Use a script for deterministic work that needs no model judgment.
+
+```yaml
+- id: validate-data
   script:
-    argv: [npm, test]
+    argv: [node, scripts/validate.mjs]
+    cwd: .
+    env: { CI: "1" }
+    inheritEnv: [PATH, HOME]
+    timeoutMs: 60000
+    acceptedExitCodes: [0]
     stdout: json
-    timeoutMs: 120000
-  output: test-report
+    stderr: text
+    maxCaptureBytes: 65536
+    files:
+      - { name: report, path: out/report.json }
+  inputs:
+    selection: { from: choose, select: /data/items }
+  repair: { max_attempts: 2 }
+  output: validation-result
 ```
 
-Rules:
-- `argv` is required; there is no shell. `cwd` stays inside the package
-  (default `.`).
-- `stdout`/`stderr` take `json`, `text`, or `none`; `json` stdout becomes the
-  checkpoint data. `timeoutMs` defaults to 60000; `acceptedExitCodes` defaults
-  to `[0]`.
-- Declared `inputs` arrive as one JSON object on stdin.
-- Script steps accept `id`, `script`, `repair`, `when`, `inputs`, and
-  `output`. They reject `run`, `tools`, `done`, and `plan`.
+`argv` is literal and no shell is used. Inputs are one JSON object on stdin;
+they are never interpolated into argv or environment values. The default cwd is
+the package and cannot escape it. The process environment is empty except for
+`env` and names in `inheritEnv`, so include `PATH` when command lookup needs it.
+
+A script cannot set cwd to the user's project because cwd must stay inside the
+workflow package. When it must inspect a project, bind the project path through
+an earlier task and let a packaged helper read that path from stdin. Do not
+assume the workflow target is interpolated into argv, cwd, or env.
+
+`stdout` and `stderr` accept `json`, `text`, or `none`. JSON stdout becomes
+checkpoint data. Text or oversized output may become an artifact reference.
+Capture at most four contained files. Set an explicit timeout, accepted exits,
+and capture cap when defaults are not intentional.
+
+Timeouts, rejected exits, spawn failures, invalid JSON, missing capture files,
+and contract failures use the repair policy and then park. Make scripts
+idempotent because execution is at least once. Script positions reject
+`workflow_transition`.
 
 ## Loops
 
-A `for_each` loop runs one task body once per item, under a hard cap.
+Use a loop for independent homogeneous work over a bounded list.
 
 ```yaml
 - id: review-files
@@ -114,91 +148,120 @@ A `for_each` loop runs one task body once per item, under a hard cap.
     items: { from: gather, select: /data/files }
     body:
       run: steps/review-one.md
-      id: review-one
-      inputs: { item: { from: "$item" } }
+      inputs:
+        item: { from: "$item" }
     maxItems: 8
 ```
 
-Rules:
-- `maxItems` is a required integer from 1 to 8. The loop finishes when the
-  items run out or the cap is reached.
-- The body holds exactly one `run` step. It accepts `inputs` and may bind
-  `$item`; it rejects `tools`, `done`, `output`, `plan`, `script`, and
-  nested loops.
-- The loop writes one aggregate checkpoint:
-  `{ mode: "for-each", iterations, results: [{ item, outputs }] }`.
-  Downstream steps bind `{ from: <loop-id> }`.
+The body accepts only `run` and `inputs`. Its id is derived from the task file
+stem after removal of a leading numeric prefix. Do not put `id`, `tools`, `done`,
+`output`, `repair`, a plan, a script, or another loop in the body.
 
-## Contracts
-
-Contracts are JSON Schema files under `contracts/`. The file stem becomes the
-contract id. The engine validates each completed position's `checkpoint.data`
-against its declared contract.
-
-Write one schema file per named artifact from the frame step.
+The list is materialized once. An empty list succeeds. A list larger than
+`maxItems` fails before iteration; it is not truncated. Each iteration gets a
+fresh context. The aggregate is:
 
 ```json
 {
-  "type": "object",
-  "required": ["finding", "evidence"],
-  "additionalProperties": false,
-  "properties": {
-    "finding": { "type": "string", "minLength": 1 },
-    "evidence": { "type": "array", "items": { "type": "string" }, "maxItems": 8 },
-    "severity": { "enum": ["low", "medium", "high"] }
-  }
+  "mode": "for-each",
+  "iterations": 1,
+  "results": [
+    {
+      "iteration": 1,
+      "item": {},
+      "outputs": { "review-one": { "invocationKey": "...", "output": "...", "checksum": "...", "size": 1, "mediaType": "application/json" } }
+    }
+  ]
 }
 ```
 
-The accepted schema subset: `type` (with lists), `properties`, `required`,
-`items`, `enum`, `const`, `additionalProperties` (boolean), `minItems`,
-`maxItems`, `minLength`, `maxLength`, `pattern`, `minimum`, `maximum`,
-`oneOf` (up to 4), `title`, and `description`. Every other keyword fails
-discovery. Schemas nest to at most 8 levels.
+Body checkpoint data is stored as an artifact reference. A body checkpoint with
+no data creates no output entry. Downstream work should bind only the aggregate
+fields it needs.
 
-Every discovered contract compiles at discovery time, even when unused.
+## Contracts and inputs
 
-## Input bindings
+Put JSON Schema files directly under `contracts/`. Omit the frontmatter
+`contracts` map to use each file stem as its id. When the map is present, list
+every discovered schema file. Reuse a contract only when the data shape is the
+same.
 
-Steps that consume earlier artifacts declare `inputs`. Each binding names a
-producer step and an optional JSON Pointer `select`.
+Use only `type`, `properties`, `required`, `items`, `enum`, `const`,
+`additionalProperties` as a boolean, `minItems`, `maxItems`, `minLength`,
+`maxLength`, `pattern`, `minimum`, `maximum`, `oneOf` with two to four branches,
+`title`, and `description`. Schemas may nest to eight levels. Prefer `required`
+and `additionalProperties: false` for stable handoffs.
 
-```yaml
-- run: steps/03-verify.md
-  id: verify
-  inputs:
-    brief:
-      from: observe
-      select: /data/scope
-    findings:
-      from: investigate
-      select: /nodes/0/result
-```
+Contracts validate completed, blocked, and recovery checkpoint data. Therefore,
+make the task able to emit contract-valid diagnostic data for non-success
+transitions, or use a schema branch that explicitly supports that state.
 
-Rules:
-- `select` is a JSON Pointer (RFC 6901) applied to the producer's artifact.
-- Task producers expose their latest checkpoint.
-- Plan producers expose the engine-generated aggregate
-  `{ version, nodes: [{ id, operator, objective, result }] }`; a pending
-  node's `result` is `null`.
-- Declared inputs deliver the full artifacts, so bind every artifact the
-  step needs; summaries alone are not data.
-
-## Operators
-
-WHEN a step uses a `plan:` block, write `operators/<id>.md` for every listed id.
+Bind every required artifact. Summaries are orientation only.
 
 ```yaml
----
-description: Trace control and data flow through the relevant path.
-tools: [read, bash]    # Optional; operator tool ceiling
-output: finding         # Optional; declares the operator's output contract
----
-# Trace
-...operator instructions...
+inputs:
+  scope: { from: observe, select: /data/scope }
 ```
+
+A position accepts at most eight inputs under one 24 KiB rendered budget. Use
+JSON Pointers to avoid oversized prompts. Model inputs report missing or omitted
+values; unresolved script inputs park before process spawn.
+
+## Guards
+
+Tasks, plans, scripts, and loops may have one top-level `when` guard.
+
+```yaml
+when:
+  from: triage
+  select: /data/severity
+  op: in
+  value: [high, critical]
+```
+
+The operators are `equals`, `not-equals`, `in`, `not-in`, `exists`,
+`not-exists`, `gt`, `gte`, `lt`, and `lte`. A valid false comparison creates a
+synthetic skipped checkpoint. A missing operand used by a value comparison is a
+configuration error. Numeric operators also reject non-numeric operands. Use
+`exists` or `not-exists` when absence is expected. Do not duplicate the guard as
+a prose decision in the task.
+
+## Recovery, tools, and visibility
+
+Task and script repair belongs at block level. Plan repair belongs inside
+`plan`. `max_attempts` ranges from 1 to 3 and defaults to 2. A loop has no repair
+field; recovery applies to its current body iteration under the body default.
+`needs-work` retries until exhausted. `blocked` parks immediately. The current
+`workflow_retry` tool retries parked scripts only, so do not promise generic
+manual retry for parked model positions.
+
+Tool ceilings intersect the Pi session set, workflow `legalTools`, and task or
+operator `tools`. A narrower scope cannot restore a removed tool. Omit a ceiling
+when full access is intentional. Scripts do not use Pi tools.
+
+Leave `piVisibility: false` for direct slash-command use. Set it to true only
+when the model should see the workflow roster and may start this workflow after
+a user request.
+
+## Author checkpoint data
+
+After writing every file, complete with:
+
+```json
+{
+  "name": "workflow-name",
+  "packagePath": "/absolute/path/to/workflow-name",
+  "command": "/workflow-name",
+  "files": ["WORKFLOW.md", "steps/01-task.md"],
+  "featuresUsed": ["task", "contract", "input-binding"]
+}
+```
+
+List paths relative to the new package. Include only features whose
+`featureDecisions.use` value is true.
 
 ## Done when
-- package-written: `WORKFLOW.md` and every referenced step file exist.
-- paths-contained: every path is relative and stays inside the package.
-- contracts-declared: one schema file exists per named artifact from the frame step, and every `output` names a discovered contract.
+
+- `package-written`: Every referenced file exists and the checkpoint lists it.
+- `paths-contained`: Every authored path stays inside the package.
+- `design-implemented`: The files implement every selected feature and omit every rejected feature unless the specification required it indirectly.
