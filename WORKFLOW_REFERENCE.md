@@ -1,4 +1,4 @@
-# Workflow Reference
+# Workflow reference
 
 This reference documents Choreograph workflow files and runtime limits. Start
 with the authoring workflow in the [README](README.md#3-author-a-workflow).
@@ -292,7 +292,7 @@ inputs:
 `from` must name a block declared earlier in `steps` order. Task and script
 producers expose their latest checkpoint. Plan and loop producers expose their
 engine-generated aggregates. Bind every artifact a step needs. Checkpoint
-summaries provide orientation, not implicit data flow.
+summaries are for orientation. They do not carry data between steps.
 
 A position accepts at most eight inputs under a shared 24 KiB rendered budget.
 If the budget is exceeded, the prompt drops the largest entries first and

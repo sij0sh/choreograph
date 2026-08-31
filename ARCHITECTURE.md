@@ -2,7 +2,7 @@
 
 This document identifies the source module for cross-package contracts. Consumers must import these contracts instead of reconstructing kind sets, field lists, or representation shapes.
 
-## Kind taxonomies
+## Kind sets
 
 ### Execution frames
 
@@ -45,4 +45,4 @@ The spec owns statuses, top-level fields, checkpoint fields, required fields, co
 
 `src/domain/execution.ts` owns the `Execution` domain type. `src/persistence/run-state-schema.ts` owns its runtime persistence field table and is compiler-linked to every `Execution` key.
 
-`src/persistence/snapshot.ts` derives strict top-level and collection allowlists plus decoded projection from that table. `src/persistence/validate-stored-execution.ts` keeps the separate workflow-semantic validation layer. Both validation layers remain required. Unknown fields remain rejected. The active snapshot version gate remains unchanged.
+`src/persistence/snapshot.ts` derives strict top-level and collection allowlists plus decoded projection from that table. `src/persistence/validate-stored-execution.ts` keeps the separate workflow-semantic validation layer. Both validation layers stay required. Unknown fields are still rejected. The active snapshot version gate is unchanged.
