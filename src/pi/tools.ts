@@ -39,6 +39,13 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
           return { content: [{ type: "text", text: `Unknown workflow: ${params.name}` }], details: { workflow: params.name, status: "unknown" }, isError: true } satisfies ToolResult;
         }
         const target = typeof params.target === "string" ? params.target.trim() : DEFAULT_TARGET;
+        if (Buffer.byteLength(target, "utf8") > LIMITS.targetBytes) {
+          return {
+            content: [{ type: "text", text: `target exceeds ${LIMITS.targetBytes} bytes; narrow it and start again. The session stays idle.` }],
+            details: { workflow: params.name, status: "target-too-long" },
+            isError: true,
+          } satisfies ToolResult;
+        }
         let run;
         try {
           run = await runtime.startWorkflow(ctx, workflow, target, signal);

@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator } from "../runtime/coordinator.ts";
+import { LIMITS } from "../domain/limits.ts";
 import { ROLLOVER_COMMAND } from "../runtime/transfer.ts";
 
 export function registerRuntimeCommands(pi: ExtensionAPI, runtime: RuntimeCoordinator): void {
@@ -26,6 +27,11 @@ export function registerWorkflowCommands(pi: ExtensionAPI, runtime: RuntimeCoord
     pi.registerCommand(workflow.name, {
       description: `${workflow.description} Optional arguments describe the target.`,
       handler: async (args, ctx) => {
+        const target = (args ?? "").trim();
+        if (Buffer.byteLength(target, "utf8") > LIMITS.targetBytes) {
+          ctx.ui.notify(`target exceeds ${LIMITS.targetBytes} bytes; narrow it and start again. The session stays idle.`, "error");
+          return;
+        }
         try {
           await runtime.startWorkflow(ctx, workflow, args ?? "");
         } catch (error) {
