@@ -1,159 +1,105 @@
 # choreograph
 
-A [Pi](https://github.com/earendil-works/pi-coding-agent) extension that runs
-ordered, resumable workflows from Markdown files.
+> choreograph runs multi-step Pi workflows in fresh context windows, with
+> explicit handoffs, checkpoints, and validation between steps.
 
-See [Architecture ownership](ARCHITECTURE.md) for the authoritative modules behind cross-package contracts.
+> **Status:** choreograph is an MVP. Workflow files, snapshots, and runtime
+> behavior can change between releases.
 
-## Why choreograph?
+A [Pi](https://github.com/earendil-works/pi-coding-agent) extension. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the modules behind cross-package
+contracts.
 
-Pi skills provide reusable instructions, but they do not enforce an execution
-order. choreograph adds an explicit workflow structure for tasks that need
-repeatable stages, completion criteria, bounded tool access, and recovery from
-incomplete work. Each position starts from a clean context window: a fixed
-position envelope, not transcript history, carries state between positions.
+---
 
-A workflow combines three block types:
+## [!] What Problem It Solves
 
-- **Tasks** run a specific Markdown instruction file.
-- **Plans** let the model build a small dependency-ordered plan from trusted
-  operator files.
-- **Scripts** run one bounded local process with no model turn.
+Pi skills use progressive disclosure: the agent loads more guidance into the
+same conversation as the work unfolds. That works for focused instructions,
+but long workflows must compete with an accumulating transcript, tool output,
+and intermediate reasoning. As context fills, the agent can lose the sequence,
+skip checks, or drift from the original task.
 
-choreograph runs one position at a time. Each position records a checkpoint
-before the workflow advances. Incomplete work is retried while attempts
-remain, then the run parks at that position and waits for the user.
+choreograph makes each workflow step a context boundary. Every model step
+starts in a fresh child session with a bounded handoff: the workflow overview,
+current instructions, declared inputs, checkpoint summaries, completion
+criteria, and transition contract. The engine owns order, progress, retries,
+and resume state instead of relying on conversation memory.
 
-## Install
+## [*] Key Features
 
-From the repository root, install the dependencies and create an extension
-symlink:
+* **Fresh context for every step:** Each model position starts in a new child
+  session. A bounded handoff carries only the state that the next step needs.
+* **Author-controlled rails:** Ordered blocks, completion criteria, strict
+  transitions, guards, and tool ceilings define what may run and what counts
+  as complete.
+* **Validated handoffs:** JSON Schema contracts validate structured outputs.
+  Explicit JSON Pointer bindings select which earlier artifacts reach each
+  step.
+* **Durable progress:** choreograph checkpoints before advancing. Failed work
+  retries under a declared policy, then parks for inspection and resumes with
+  `workflow_retry`.
+* **User-first invocation:** Workflows are slash commands by default, so the
+  workflow catalog does not consume model context. Set `piVisibility: true`
+  only when the agent should discover and start a workflow itself.
+* **Tasks, plans, scripts, and loops:** Use direct model instructions, bounded
+  dependency plans, local processes without a model turn, or capped iteration.
+* **A workflow for authoring workflows:** The included
+  `.agents/workflows/choreograph` workflow frames, writes, validates, and
+  reports a new workflow package using the same engine it targets.
+* **Bounded runtime behavior:** Stall nudges, absolute script deadlines,
+  snapshot caps, and artifact retention turn silent hangs and unbounded growth
+  into explicit failures with recovery paths.
+
+## [>] Quickstart
+
+### Prerequisites
+
+* Node.js 22.19+
+* [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) ~0.84.x
+* No API keys or environment variables are required.
+
+### Installation & Run
+
+Install from a clone of this repository:
 
 ```bash
+# 1. Clone & enter the repository
+git clone git@github.com:sij0sh/choreograph.git
+cd choreograph
+
+# 2. Install dependencies
 npm install
+
+# 3. Symlink the extension into Pi
 mkdir -p ~/.pi/agent/extensions
 ln -sfn "$PWD" ~/.pi/agent/extensions/choreograph
+
+# 4. Start Pi
+pi
 ```
 
-The symlink points to the checkout, so future pulls do not require another
-installation. Start a new Pi process after installing or updating the
-extension.
+The symlink points at the checkout. Future pulls need no reinstall. Start a
+new Pi process after installing or updating.
 
-## Try it without installing
+To try it without installing, run `pi -e ./src/index.ts` from the repository
+root. This loads choreograph for that Pi process only.
 
-Run this command from the repository root:
+## [=] Configuration
 
-```bash
-npm install
-pi -e ./src/index.ts
-```
+There are no environment variables. Configuration lives in workflow
+directories under `$PI_CODING_AGENT_DIR/workflows` (default
+`~/.pi/agent/workflows`). The directory name is the workflow id and slash
+command. Use lowercase kebab-case (`review-change`, not `Review_Change`).
 
-This loads choreograph for that Pi process only.
-
-## Quick start
-
-Workflows live under `$PI_CODING_AGENT_DIR/workflows`. The default location is
-`~/.pi/agent/workflows`.
-
-Create a workflow with two task files:
-
-```text
-~/.pi/agent/workflows/review-change/
-├── WORKFLOW.md
-└── steps/
-    ├── 01-inspect.md
-    └── 02-report.md
-```
-
-Add this frontmatter and overview to `WORKFLOW.md`:
-
-```markdown
----
-description: Inspect a code change and report actionable findings.
-piVisibility: true
-legalTools: [read, grep, bash]
-steps:
-  - run: steps/01-inspect.md
-    id: inspect
-    done: [change-understood, tests-checked]
-  - run: steps/02-report.md
-    id: report
-    done: [findings-delivered]
----
-
-Review the requested change for correctness, regressions, and missing tests.
-Prefer specific findings with file and line references.
-```
-
-Write the instructions for each stage in the two step files. Then start a new
-Pi process and run:
-
-```text
-/review-change path/to/change
-```
-
-The text after the command is optional. choreograph passes it to every
-position as the workflow target.
-
-Every valid workflow gets a slash command named after its directory. When
-`piVisibility` is `true`, the model can also discover and start it through the
-`workflow_start` tool. Only one workflow can be active at a time.
-
-## Workflow structure
-
-A workflow directory has this shape:
-
-```text
-my-workflow/
-├── WORKFLOW.md          # Required frontmatter and workflow overview
-├── steps/               # Recommended convention
-│   ├── 01-frame.md      # Task instructions
-│   └── 02-deliver.md
-├── contracts/           # Optional contract schemas
-│   ├── finding.schema.json
-│   └── verdict.schema.json
-└── operators/           # Optional trusted operator registry
-    ├── inspect.md
-    └── trace.md
-```
-
-The workflow directory name becomes its id and slash command. It must match
-`^[a-z][a-z0-9-]*$`.
-
-Task files may use any contained `.md` path. The `steps/` directory is only a
-convention. Paths cannot be absolute or escape the workflow directory through
-`..` or a symlink.
-
-The `operators/` name is enforced. choreograph reads only direct
-`operators/*.md` children. It validates every discovered operator, even when a
-workflow does not use it.
-
-The `contracts/` directory is also enforced. choreograph reads only direct
-`contracts/*.schema.json` children and compiles every discovered contract,
-even when unused. Contract files may live elsewhere in the package when the
-frontmatter `contracts:` mapping names them.
-
-Frontmatter in task files is optional. When valid object frontmatter is
-present, choreograph removes it from the instructions shown to the model.
-
-### Workflow checking
-
-choreograph parses and validates workflow definitions from disk
-(`src/authoring/parser.ts`) with strict schemas: unknown frontmatter or step
-keys are rejected loudly. Before a run starts, `freezeDefinition`
-(`src/authoring/compile.ts`) reads every Markdown source and freezes its
-content. The frozen definition carries a digest over the whole projection;
-the run's snapshot records that digest, and resume verifies it. A workflow
-edited mid-run is refused on restore.
-
-## Workflow frontmatter
+### Workflow frontmatter
 
 `WORKFLOW.md` must start with YAML frontmatter. Unknown fields are rejected.
-The Markdown body becomes the overview shown at every workflow position.
+The Markdown body is the overview shown at every position.
 
 ```yaml
 ---
-description: What this workflow does and when to use it.
+description: Inspect a code change and report actionable findings.
 piVisibility: true
 legalTools: [read, grep, bash]
 steps:
@@ -163,60 +109,106 @@ steps:
   - id: investigate
     plan:
       operators: [inspect, trace]
-      repair:
-        max_attempts: 2
   - run: steps/03-deliver.md
     id: deliver
-    repair:
-      max_attempts: 2
-  - run: steps/04-file-issues.md
-    id: file-issues
     when:
-      from: deliver
-      select: /data/severity
-      op: in
-      value: [high, critical]
+      from: frame
+      select: /data/scope
+      op: exists
 ---
 ```
 
 | Field | Required | Effect |
 |---|---:|---|
 | `description` | Yes | Describes the workflow in Pi and to the model. |
-| `steps` | Yes | Defines a non-empty ordered list of task, plan, script, and loop blocks. |
-| `piVisibility` | No | Adds the workflow to the model-facing roster and `workflow_start` tool. Defaults to `false`. |
-| `legalTools` | No | Limits the Pi tools available throughout the workflow. |
-| `contracts` | No | Maps contract ids to contained `contracts/*.schema.json` files. Discovery is automatic without it. |
+| `steps` | Yes | A non-empty ordered list of task, plan, script, and loop blocks. |
+| `piVisibility` | No | Adds the workflow to the model-facing roster and `workflow_start` tool. Default `false`. |
+| `legalTools` | No | Limits Pi tools for the whole workflow. |
+| `contracts` | No | Maps contract ids to `contracts/*.schema.json` files. Discovery is automatic without it. |
+
+### Directory layout
+
+```text
+my-workflow/
+├── WORKFLOW.md          # Required frontmatter and overview
+├── steps/               # Convention only; any contained .md path works
+├── contracts/           # Optional JSON Schema files
+└── operators/           # Optional trusted operator registry
+```
+
+`operators/` and `contracts/` are enforced names. choreograph reads only
+direct children and validates every discovered file, used or not. Paths cannot
+escape the workflow directory through `..`, absolute paths, or symlinks.
 
 ### Task blocks
 
 A task runs one Markdown instruction file to completion.
 
-```yaml
-- run: steps/01-inspect.md
-  id: inspect
-  tools: [read, grep]
-  done: [implementation-checked, tests-checked]
-  repair:
-    max_attempts: 2
-```
-
 | Field | Required | Effect |
 |---|---:|---|
 | `run` | Yes | Names a contained Markdown instruction file. |
-| `id` | No | Sets the block id. Otherwise the file stem is used, with a leading numeric prefix removed. |
-| `tools` | No | Further limits the tools available for this task. |
-| `done` | No | Lists criterion ids that a successful transition must report. |
-| `repair` | No | Overrides the recovery policy: `max_attempts` from 1 to 3, default 2. |
-| `inputs` | No | Binds earlier artifacts to this position; see [Artifacts and contracts](#artifacts-and-contracts). |
-| `output` | No | Names the contract that `checkpoint.data` must satisfy. |
-| `when` | No | Guards this task on an earlier artifact; see [Guards](#guards). |
+| `id` | No | Defaults to the file stem minus a leading numeric prefix. |
+| `tools` | No | Narrows tools for this task. |
+| `done` | No | Criterion ids a successful transition must report. |
+| `repair` | No | `{ max_attempts: 1..3 }`, default 2. |
+| `inputs` | No | Binds earlier artifacts. |
+| `output` | No | Contract that `checkpoint.data` must satisfy. |
+| `when` | No | Guard on an earlier artifact. |
 
-Every block id must be unique within the workflow and match
-`^[a-z][a-z0-9-]*$`.
+Block ids are unique per workflow and use lowercase kebab-case.
+
+### Plan blocks
+
+A plan asks the model to build 2 to 8 nodes from trusted operators. The engine
+runs each node in dependency order, one node per turn. Every node needs a
+non-empty `done` list. Dependencies may name only earlier nodes.
+
+```yaml
+- id: investigate
+  plan:
+    operators: [inspect, trace]
+    repair: { max_attempts: 2 }
+```
+
+Operators live under `operators/*.md`; the stem is the id. Operator
+frontmatter accepts `description`, `tools`, and `output`. Plan blocks accept
+`inputs`, `repair`, and `when`; they reject `output`. A completed plan emits
+an engine-generated aggregate instead of a contract-validated checkpoint.
+
+### Script steps
+
+A script step runs one bounded local process. No model turn runs.
+
+```yaml
+- id: run-tests
+  script:
+    argv: [npm, test]        # Required; no shell, literal arguments
+    cwd: .                   # Inside the workflow directory
+    env: { CI: "1" }         # Overrides; inheritEnv allowlists the rest
+    inheritEnv: [PATH, HOME]
+    timeoutMs: 120000        # 1,000-600,000, default 60,000
+    acceptedExitCodes: [0]
+    stdout: json             # json | text | none
+    stderr: text             # none | text | json
+    maxCaptureBytes: 65536   # Shared stdout+stderr cap, 1 MiB max
+    files:                   # Up to 4 { name, path } captures
+      - { name: log, path: out/log.txt }
+  output: test-report        # Optional contract id
+```
+
+* `timeoutMs` ends with SIGTERM, then SIGKILL after a 5 second grace, then a
+  1 second drain. The deadline is absolute from spawn, so descendants that
+  escape the process group cannot wedge settlement.
+* Declared `inputs` arrive as one JSON object on stdin (24 KiB budget). No
+  implicit interpolation into `argv` or `env`.
+* `stdout: json` parses stdout into `checkpoint.data`. Script stdout keys win
+  over runtime side keys (`stderr`, `files`) in the merged data.
+* A timeout, rejected exit code, invalid JSON, contract violation, or spawn
+  failure retries the step through `repair`; exhausted attempts park the run.
 
 ### Loop blocks
 
-A loop block runs one task body once per item, under a hard cap.
+A loop runs one task body once per item under a hard cap.
 
 ```yaml
 - id: review-files
@@ -229,457 +221,154 @@ A loop block runs one task body once per item, under a hard cap.
     maxItems: 8
 ```
 
-| Field | Required | Effect |
-|---|---:|---|
-| `for_each` | Yes | Chooses the loop form; a step declares at most one. |
-| `items` | Yes | Input binding that must resolve to a list of at most `maxItems` JSON values. Materialized once at loop start. |
-| `body` | Yes | Exactly one `run` step. The body accepts `inputs` and may bind `$item`; it rejects `tools`, `done`, `output`, `plan`, `script`, and nested loops. |
-| `maxItems` | Yes | Integer 1 to 8. The loop finishes when the items run out or the cap is reached. |
+`items` must resolve to a list, materialized once at loop start. `maxItems` is
+1 to 8. The body is exactly one `run` step and may bind `$item`. Recovery is
+per iteration; earlier iterations stay untouched. The loop finishes with one
+aggregate checkpoint: `{ mode, iterations, results }`.
 
-Each iteration writes its body checkpoint under a scoped key such as
-`root/review-files/loop[2]/review-one`. On completion the loop writes one
-aggregate checkpoint at its own key. The aggregate always has the same shape:
+### Contracts and input bindings
 
-```json
-{
-  "mode": "for-each",
-  "iterations": 3,
-  "results": [{ "item": "...", "outputs": { "...": "artifact-reference" } }]
-}
-```
+Contracts are JSON Schema files under `contracts/`; the stem is the id. Tasks
+and operators declare `output: <contract-id>`. The engine validates
+`checkpoint.data` on completion, blocked, and recovery checkpoints.
 
-The shape never varies with output size, so a downstream consumer always knows
-what a binding resolves to. Recovery is per iteration: a retry re-runs the
-failed body step in place, leaving earlier iterations untouched.
+Accepted keywords: `type` (single or list), `properties`, `required`, `items`,
+`enum`, `const`, `additionalProperties` (boolean), `minItems`, `maxItems`,
+`minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `oneOf` (2-4
+branches), `title`, `description`. Schemas nest at most 8 levels and stay
+under 64 KiB.
 
-### Plan blocks
-
-A plan block asks the model to create a bounded plan from trusted operators.
-The engine then runs each node in dependency order, one node per turn.
+Inputs resolve with RFC 6901 JSON Pointers:
 
 ```yaml
-- id: investigate
-  plan:
-    operators: [inspect, trace]
-    repair:
-      max_attempts: 2
-  inputs:
-    brief:
-      from: observe
-      select: /data/scope
+inputs:
+  brief: { from: observe, select: /data/scope }
 ```
 
-Plan blocks accept `inputs` (bound before plan creation), `repair`, and `when`
-guards. They do not accept `output`; a completed plan emits an
-engine-generated aggregate artifact (see below) rather than a
-contract-validated checkpoint.
+`from` names an earlier block. Rendered inputs share a 24 KiB budget per
+position; the prompt drops the largest entries first and names what was cut.
 
-Plan creation returns the plan in `checkpoint.data.plan`:
+### Guards
 
-```json
-{
-  "version": 1,
-  "nodes": [
-    {
-      "id": "inspect-api",
-      "operator": "inspect",
-      "objective": "Inspect the changed API behavior.",
-      "done": ["behavior-documented"]
-    },
-    {
-      "id": "trace-callers",
-      "operator": "trace",
-      "objective": "Trace affected callers.",
-      "dependsOn": ["inspect-api"],
-      "evidence": ["direct call sites"],
-      "done": ["callers-checked"]
-    }
-  ]
-}
-```
-
-A plan must contain 2 to 8 nodes. Node ids must be unique. Every node
-requires a non-empty `done` list. Each node must use an operator allowed by
-the block. Dependencies may name only earlier nodes.
-
-### Script steps
-
-A script step runs one bounded local process with no model turn. The runtime
-spawns it, records its exit, and moves on; `workflow_transition` is rejected
-at script positions.
-
-```yaml
-- id: run-tests
-  script:
-    argv: [npm, test]
-    cwd: .
-    env: { CI: "1" }
-    inheritEnv: [PATH, HOME, LANG]
-    timeoutMs: 120000
-    acceptedExitCodes: [0]
-    stdout: json            # json | text | none
-    stderr: text
-    maxCaptureBytes: 65536
-  output: test-report       # optional contract id
-```
-
-Rules:
-
-- `argv` is required: a non-empty list of non-empty strings. There is no shell;
-  metacharacters are passed through as literal arguments.
-- `cwd` is relative to the workflow directory (default `.`) and must stay
-  inside it.
-- `env` entries override the inherited environment. `inheritEnv` is an
-  allowlist of variable names copied from the agent's environment; nothing
-  else is inherited.
-- `timeoutMs` must be 1000 to 600000 (default 60000). On timeout the process
-  gets SIGTERM, then SIGKILL after a 5 second grace.
-- `acceptedExitCodes` defaults to `[0]`; entries must be 0 to 255.
-- `maxCaptureBytes` defaults to 65536 (cap 1 MiB, shared across stdout and
-  stderr). Output beyond the cap is truncated and flagged in the checkpoint
-  summary.
-- `stdout` mode decides the checkpoint data: `json` parses stdout into the
-  data, `text` stores it as `{ stdout }`, `none` stores an empty object. When
-  an output would exceed the checkpoint budget, the run publishes it to the
-  artifact store and keeps a reference (`json`) or a short preview plus an
-  `artifact` reference (`text`). When the stored `stdout` text is a preview
-  rather than the full stream, the data carries `stdoutTruncated: true`.
-- `stderr` mode decides how standard error is honored. `none` (the default)
-  keeps stderr diagnostic-only: captured for the run's log artifacts, never
-  parsed into the data. `text` adds the captured text under the `stderr` key
-  of the data; beyond the checkpoint budget it is previewed with a
-  `stderrArtifact` reference (`stderrTruncated: true`). `json` parses stderr
-  and stores the decoded value under `stderr`; stderr that is not valid JSON
-  fails the step like invalid stdout JSON. When `stdout: json` decodes to a
-  non-object while a `stderr` value or captured files exist, the data becomes
-  an object with the decoded stdout under `stdout`.
-- `files` optionally lists up to 4 file outputs as `{ name, path }` entries,
-  with `path` relative to the script's `cwd` and inside the workflow
-  directory. After an accepted exit each file is published to the run's
-  artifact store (`application/octet-stream`), and the references land under
-  the `files` key of the data, so downstream steps can bind them like any
-  artifact reference. A capture file that cannot be read fails the step
-  through its repair policy.
-- Script steps accept `id`, `script`, `repair`, `when`, `inputs`, and
-  `output`. They reject `run`, `tools`, `done`, `plan`, and `for_each`.
-- Declared `inputs` are resolved from earlier artifacts like task inputs,
-  then delivered to the process as one JSON object (plus a trailing newline)
-  on stdin. There is no implicit interpolation into `argv` or `env`; a script
-  that wants the values reads its stdin. The payload shares the 24 KiB
-  position input budget; an oversized payload fails the step and applies
-  `repair`.
-- An accepted exit with output satisfying the `output` contract completes the
-  step. A timeout, a rejected exit code, invalid JSON, a contract violation,
-  or a spawn failure retries the step; after attempts are exhausted the run
-  parks at the script position with a failure checkpoint.
-
-### Operators
-
-Operators are trusted definitions under `operators/`. The file stem is the
-operator id. Plan creation sees only each operator's id and description. A
-node's execution also receives that operator's Markdown body.
-
-```markdown
----
-description: Trace control and data flow through the relevant code.
-tools: [read, grep]
----
-
-Follow the relevant call path. Record direct evidence for each conclusion.
-```
-
-Operator frontmatter accepts `description`, optional `tools`, and optional
-`output`. The operator tool list further limits the tools available while its
-nodes run. `output` names the contract that each node's `checkpoint.data`
-must satisfy.
-
-## Artifacts and contracts
-
-Contracts turn free-form checkpoints into typed artifacts. A contract is a
-JSON Schema file under `contracts/`; the file stem is the contract id.
-Discovery is automatic, or the frontmatter `contracts:` mapping can assign
-ids to specific `contracts/*.schema.json` files.
-
-Tasks and operators declare `output: <contract-id>`. The engine validates
-`checkpoint.data` against that schema on every completion, blocked
-checkpoint, and recovery checkpoint. A violation rejects the transition with
-the exact schema-path errors, and restore drops a run whose persisted
-artifacts no longer satisfy the current contracts.
-
-```json
-{
-  "type": "object",
-  "required": ["finding", "evidence"],
-  "additionalProperties": false,
-  "properties": {
-    "finding": { "type": "string", "minLength": 1 },
-    "evidence": { "type": "array", "items": { "type": "string" }, "maxItems": 8 },
-    "severity": { "enum": ["low", "medium", "high"] }
-  }
-}
-```
-
-The accepted schema subset is `type` (single or list), `properties`,
-`required`, `items`, `enum`, `const`, `additionalProperties` (boolean),
-`minItems`, `maxItems`, `minLength`, `maxLength`, `pattern`, `minimum`,
-`maximum`, `oneOf` (2 to 4 branches), `title`, and `description`. Every other
-keyword fails discovery, so schemas stay structural and bounded. Schemas nest
-at most 8 levels and each file stays under 64 KiB.
-
-### Input bindings
-
-A step that consumes earlier artifacts declares `inputs` instead of relying
-on checkpoint summaries:
-
-```yaml
-- run: steps/03-verify.md
-  id: verify
-  inputs:
-    brief:
-      from: observe
-      select: /data/scope
-    findings:
-      from: investigate
-      select: /nodes/0/result
-```
-
-- `from` names a block declared earlier in `steps` order.
-- `select` is an RFC 6901 JSON Pointer applied to the producer's artifact.
-- Task producers expose their latest checkpoint object, so `/data/...`
-  narrows to the structured payload.
-- Plan producers expose an engine-generated aggregate:
-  `{ "version": 1, "nodes": [{ "id", "operator", "objective", "evidence"?, "result" }] }`.
-  A pending node's `result` is `null`; a completed node's `result` is its
-  full checkpoint.
-- Loop producers expose the aggregate described above; script stdout/stderr
-  files and captures bind like any artifact reference.
-- A position with declared inputs receives only those artifacts; the
-  prior-checkpoint summaries are still listed, but the full payloads come
-  only through explicit bindings.
-
-### Input budget
-
-Rendered inputs share one budget of 24,576 bytes per position. The prompt
-drops the largest entries first and names what was cut plus the surviving
-top-level keys, so a `select` pointer can recover the missing data.
-Contract-bearing node dependency data shares the same budget.
-
-## Guards
-
-A task or plan block may carry one `when` guard. The engine evaluates it
-whenever the block becomes current: at start and after each transition. A
-guard that does not hold skips the block with a synthetic `skipped`
-checkpoint instead of running it.
-
-```yaml
-- run: steps/04-file-issues.md
-  id: file-issues
-  when:
-    from: deliver
-    select: /data/severity
-    op: in
-    value: [high, critical]
-```
+A task or plan block may carry one `when` guard, evaluated when the block
+becomes current. A guard that does not hold skips the block with a synthetic
+`skipped` checkpoint.
 
 | Field | Required | Effect |
 |---|---:|---|
-| `from` | Yes | Names a block declared earlier in `steps` order. |
-| `select` | No | RFC 6901 JSON Pointer into the producer's artifact. The whole artifact when omitted. |
-| `op` | Yes | One of `equals`, `not-equals`, `in`, `not-in`, `exists`, `not-exists`, `gt`, `gte`, `lt`, `lte`. |
-| `value` | Depends | Required by the eight value ops; forbidden for `exists` and `not-exists`. |
+| `from` | Yes | An earlier block in `steps` order. |
+| `select` | No | JSON Pointer into the producer's artifact. |
+| `op` | Yes | `equals`, `not-equals`, `in`, `not-in`, `exists`, `not-exists`, `gt`, `gte`, `lt`, `lte`. |
+| `value` | Depends | Required by the eight value ops; forbidden for `exists`/`not-exists`. |
 
-Evaluation rules:
+A missing operand or an unevaluable comparison fails the transition with an
+error naming the block, the op, and the pointer. Guards never skip silently.
 
-- Task producers expose their latest checkpoint; plan producers expose the
-  engine-generated aggregate.
-- A missing producer artifact or an unresolvable pointer fails the transition
-  with an error naming the block, the op, and the pointer; it never silently
-  skips. Use `exists` or `not-exists` to key off presence.
-- `equals` and `not-equals` compare canonical JSON. `in` and `not-in` test
-  membership against an array. The comparison ops require finite numbers on
-  both sides; anything else fails the transition with an error.
+### Runtime rules
 
-A skipped block records `{ summary, skipped: true }` and never prompts. A
-skipped plan block also drops its plan execution, so consumers never see a
-stale aggregate.
+* Each position ends with one `workflow_transition` call. The schema is
+  strict: extra properties, unknown statuses, and malformed checkpoints are
+  rejected. Copy `key` verbatim from the position envelope. A transition
+  applies only to the position it names; stale or replayed transitions change
+  nothing.
+* Incomplete work reports `needs-work` with diagnostic `issues[]`. The engine
+  retries the current position up to `max_attempts`, then parks the run and
+  waits for the user.
+* Snapshots are format v7; earlier formats are not resumable. Restoring a run
+  whose workflow was edited mid-flight is refused via a content digest.
+* Tools start from the Pi session baseline, intersected with `legalTools`,
+  task `tools`, and operator `tools`. `workflow_transition` and
+  `workflow_abort` stay available during a run.
 
-## Recovery
-
-A position reports incomplete work with `status: needs-work` and one or more
-issues:
-
-```json
-{
-  "status": "needs-work",
-  "checkpoint": { "summary": "The affected callers are not yet confirmed." },
-  "issues": [
-    { "target": "trace-callers", "reason": "No direct call-site evidence." }
-  ]
-}
-```
-
-The engine retries the current position while attempts remain. Each retry
-records the failed checkpoint first, so the next attempt sees the prior
-attempt's summary. When attempts are exhausted, the run parks at that
-position and waits for the user; `workflow_retry` resumes it. `issues` are
-diagnostics for the author, not engine directives: they never rewind or
-invalidate other positions.
-
-Every block has a `max_attempts` recovery policy from 1 to 3, default 2.
-Set it with `repair: { max_attempts: N }`.
-
-## Runtime behavior
-
-Each position must finish with one `workflow_transition` call:
-
-```json
-{
-  "status": "completed",
-  "key": "root/scope",
-  "met": ["scope-clear"],
-  "checkpoint": {
-    "summary": "The scope and affected components are confirmed.",
-    "evidence": ["src/example.ts:10"]
-  }
-}
-```
-
-The transition schema is strict: extra properties, unknown statuses, and
-malformed checkpoints are rejected with an exact error. `key` names the
-position the outcome concludes; copy it verbatim from the position
-envelope. The engine applies an outcome only to the position it names, so
-a stale or replayed transition is rejected and changes nothing.
-
-A completion must include every criterion from the task or plan node's `done`
-list. `checkpoint.data` holds the authoring interface's structured payload:
-when the position declares an `output` contract, the engine validates `data`
-against it, and the position's prompt shows the schema the model must
-satisfy. Positions without a contract may write any JSON value.
-
-`workflow_abort` stops the active run. choreograph saves a snapshot before
-moving between positions and resumes active runs from the current session
-branch. Snapshots are written in format v7; snapshots from earlier engine
-versions are not resumable. Pi shows a warning and leaves the session idle in
-that case.
-
-### Position prompts
-
-Each position receives one fixed prompt envelope, in this order:
-
-1. Workflow identity, run id, target, and definition digest.
-2. The current position key, type, and attempt number.
-3. The available controls (`workflow_transition`, `workflow_abort`) and tools.
-4. The workflow overview.
-5. Loop or plan context, when the position sits inside one.
-6. Declared inputs, or node dependencies for plan nodes.
-7. The prior attempt's checkpoint for this position, when one exists.
-8. Bounded summaries of earlier checkpoints (newest first, at most 8, 1 KiB
-   each, 8 KiB total).
-9. The current task or node instructions.
-10. The output contract and criteria.
-11. The transition contract.
-
-Data reaches a position only through its declared inputs. Summaries are
-always rendered so the model knows where it is; full payloads require
-bindings.
-
-### Session rollover
-
-After accepting a checkpoint, choreograph runs any intervening scripts,
-prepares a transfer, and uses an internal command to switch Pi to a new child
-session before the next model position. The final report also runs in a fresh
-child session. The child session carries the authoritative `Execution`
-snapshot and nothing else: no handoff capsule, no epoch projection, and no
-run journal. The parent session keeps its transcript, and it cannot leak into
-later provider requests. During a run, context isolation starts the live
-transcript at the latest control message, which names the run id, position
-key, and attempt.
-
-The terminal child session receives a report rendered from the final
-`Execution`: position history, checkpoints, and aggregated plan and loop
-results.
-
-### Tool access
-
-choreograph starts with the tools that Pi made available at session start.
-It then intersects that baseline with each configured ceiling:
-
-1. The workflow's `legalTools` list.
-2. The current task's `tools` list.
-3. The current operator's `tools` list.
-
-Active-run snapshots persist that baseline. Reloading a session restores the
-run's full tool set instead of the narrowed active one.
-
-`workflow_transition` and `workflow_abort` remain available during a run.
-When the session is idle, `workflow_start` (for visible workflows) returns.
-An unknown tool name has no effect and produces a warning at session start.
-
-## Limits
-
-choreograph enforces these main bounds:
+### Limits
 
 | Data | Limit |
 |---|---:|
 | Workflow or instruction file | 128,000 bytes |
-| Contract schema file | 64 KiB |
-| Contracts per workflow | 16 |
-| Inputs per position | 8 |
-| Rendered input budget per position | 24 KiB |
-| Prior checkpoint summaries per prompt | 8, 1 KiB each, 8 KiB total |
-| Dynamic plan | 32 KiB |
-| Plan nodes | 8 |
-| Checkpoint summary | 4 KiB |
-| Complete checkpoint | 16 KiB |
-| Plan node result | 8 KiB |
-| Items per loop (and cap) | 8 |
-| Recovery attempts per position | 1 to 3, default 2 |
-| Script argv entries | 64 |
-| Script env entries | 32 |
-| Script timeout | 1,000–600,000 ms |
-| Script capture (stdout + stderr) | 64 KiB default, 1 MiB max |
+| Contract schema file / count | 64 KiB / 16 per workflow |
+| Inputs per position / budget | 8 / 24 KiB |
+| Prior checkpoint summaries | 8, 1 KiB each, 8 KiB total |
+| Plan nodes / plan size | 8 / 32 KiB |
+| Checkpoint summary / complete | 4 KiB / 16 KiB |
+| Loop items (cap) | 8 |
+| Recovery attempts | 1-3, default 2 |
+| Settle-guard nudges | 3 |
+| Script argv / env entries | 64 / 32 |
+| Script timeout | 1,000-600,000 ms |
+| Script capture | 64 KiB default, 1 MiB max |
+| Snapshot entries / bytes per session | 256 / 16 MiB |
+| Run artifact retention | 20 runs / 256 MiB, oldest first |
+| Materialized copies | 64 MiB with 10 min grace |
 | Total workflow memory | 512 KiB |
 
-Workflows are ordered sequences plus dynamic plans, guards, and single-task
-`for_each` loops. They do not support nested loops, unbounded `while`,
-concurrency, or free-form expressions over earlier task data; use a `when`
-guard for conditional steps instead.
+Workflows do not support nested loops, unbounded `while`, concurrency, or
+free-form expressions. Use a `when` guard for conditional steps.
 
-## Development
+## [+] Common How-To Tasks
 
-Run the complete validation suite:
+Run a workflow from a fresh Pi process:
+
+```text
+/review-change path/to/change
+```
+
+The text after the command is optional. It reaches every position as the
+workflow target. Only one workflow can be active at a time.
+
+Resume a parked run or stop an active run by asking the agent in the Pi
+session:
+
+```text
+retry the parked workflow
+abort the workflow
+```
+
+choreograph exposes `workflow_retry` and `workflow_abort` as Pi tools. The
+agent calls them; there are no user-facing slash commands for them.
+
+Run the validation suite (strict TypeScript, then engine, authoring,
+planning, persistence, pi, runtime, and integration tests):
 
 ```bash
 npm test
 ```
 
-The command runs TypeScript in strict mode, then executes the engine,
-authoring, planning, persistence, pi, runtime, and integration tests.
-
-The project groups source by responsibility:
-
-```text
-src/
-  authoring/   Workflow parsing, validation, and definition freezing
-  domain/      Workflow and execution types, checkpoints, policy, limits
-  engine/      Pure interpreter and recovery logic
-  planning/    Dynamic plan schema and validation
-  persistence/ Snapshot codec and session store
-  runtime/     Tool access, prompts, delivery, context isolation, coordination
-  pi/          Pi tool, command, and lifecycle registration
-```
-
-## Uninstall
-
-Remove the extension symlink:
+Uninstall by removing the symlink, then start a new Pi process:
 
 ```bash
 unlink ~/.pi/agent/extensions/choreograph
 ```
 
-This leaves the repository, workflows, and saved session data untouched.
-Start a new Pi process afterward.
+## [?] Troubleshooting & Edge Cases
 
-## License
+* **Issue:** `run stalled at <key>: 3 replies ended without a workflow_transition call`
+* **Fix:** The model wrote the transition as text instead of calling the tool.
+  Send the agent a message to unstick it, or call `workflow_abort`.
+
+* **Issue:** The run parks at a position after `max_attempts` exhausted.
+* **Fix:** Address the reported `issues[]`, then resume with `workflow_retry`.
+  Retry is rejected while a script process is still in flight.
+
+* **Issue:** `workflow_transition` fails validation.
+* **Fix:** Copy `key` verbatim from the `Position` line. Pass only the
+  schema-defined checkpoint fields; extra properties such as `data` under
+  `checkpoint` are rejected.
+
+* **Issue:** A saved run will not resume after a choreograph update or a
+  workflow edit.
+* **Fix:** Snapshots resume only in format v7, and a workflow edited mid-run
+  fails the digest check. Abort or finish the run before editing; start a new
+  run after an update.
+
+* **Issue:** A script step fails with a contract or JSON error.
+* **Fix:** Check `acceptedExitCodes`, keep stdout valid JSON when
+  `stdout: json`, and keep the stdin payload under 24 KiB. Output past the
+  capture cap is truncated and flagged in the checkpoint.
+
+* **Issue:** `Unknown tool` warning at session start.
+* **Fix:** A `legalTools` or `tools` name is not in Pi's baseline tool set.
+  Remove the name or enable the tool in Pi.
+
+---
 
 [MIT](LICENSE) (c) 2026 choreograph contributors
