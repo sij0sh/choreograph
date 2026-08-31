@@ -1,10 +1,13 @@
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { LIMITS } from "../domain/limits.ts";
+import { runMarkerState } from "./run-marker.ts";
 import { workflowBlocks, type Workflow } from "../domain/workflow.ts";
 
 export interface SweepOutcome {
   readonly evicted: readonly string[];
+  /** Run dirs skipped because their active-run marker is stale (crash orphan); kept for manual reclaim. */
+  readonly staleMarkers: readonly string[];
   readonly error?: string;
 }
 
@@ -39,6 +42,7 @@ function isEnoent(error: unknown): boolean {
  */
 export function sweepRunArtifacts(runsDir: string, activeRunId: string | undefined): SweepOutcome {
   const evicted: string[] = [];
+  const staleMarkers: string[] = [];
   let entries: { name: string; mtimeMs: number; bytes: number }[];
   try {
     entries = readdirSync(runsDir, { withFileTypes: true })
@@ -51,24 +55,34 @@ export function sweepRunArtifacts(runsDir: string, activeRunId: string | undefin
       .sort((a, b) => a.mtimeMs - b.mtimeMs);
   } catch {
     // No runs dir yet, or unreadable: nothing to reclaim on this pass.
-    return { evicted };
+    return { evicted, staleMarkers };
+  }
+  // A live run dir may outlive this session's name match (another session, a
+  // crashed-and-restored run), so markers, not names, decide evictability.
+  const marked = new Set<string>();
+  for (const item of entries) {
+    if (item.name === activeRunId) continue;
+    const marker = runMarkerState(join(runsDir, item.name));
+    if (!marker.present) continue;
+    marked.add(item.name);
+    if (marker.stale) staleMarkers.push(item.name);
   }
   let count = entries.length;
   let total = 0;
   for (const item of entries) total += item.bytes;
   for (const item of entries) {
     if (count <= LIMITS.runArtifactsKeepRuns && total <= LIMITS.runArtifactsKeepBytes) break;
-    if (item.name === activeRunId) continue;
+    if (item.name === activeRunId || marked.has(item.name)) continue;
     try {
       rmSync(join(runsDir, item.name), { recursive: true, force: true });
     } catch (error) {
-      return { evicted, error: messageOf(error) };
+      return { evicted, staleMarkers, error: messageOf(error) };
     }
     count -= 1;
     total -= item.bytes;
     evicted.push(item.name);
   }
-  return { evicted };
+  return { evicted, staleMarkers };
 }
 
 /**
@@ -161,6 +175,7 @@ export function sweepWorkflowArtifacts(
       const outcome = sweepRunArtifacts(join(root, ".choreograph", "runs"), activeRunId);
       if (outcome.evicted.length) notify(`Artifact retention pruned ${outcome.evicted.length} old run(s): ${outcome.evicted.join(", ")}.`, "info");
       if (outcome.error) notify(`Artifact retention sweep stopped early: ${outcome.error}.`, "warning");
+      if (outcome.staleMarkers.length) notify(`Artifact retention kept ${outcome.staleMarkers.length} run dir(s) with stale active-run marker(s): ${outcome.staleMarkers.join(", ")}. Their runs likely crashed; reclaim manually by deleting the run dir under ${join(root, ".choreograph", "runs")}.`, "warning");
     } catch (error) {
       notify(`Artifact retention sweep failed: ${messageOf(error)}. Continuing.`, "warning");
     }

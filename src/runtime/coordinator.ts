@@ -6,6 +6,7 @@ import { RunnerRegistry } from "./registry.ts";
 import { AsyncMutex } from "./mutex.ts";
 import { refLoaderFor } from "./artifacts.ts";
 import { ArtifactStore } from "./artifact-store.ts";
+import { clearRunMarker, writeRunMarker } from "./run-marker.ts";
 import { dirname, isAbsolute } from "node:path";
 import { start as engineStart } from "../engine/interpreter.ts";
 import type { TaskOutcome } from "../engine/interpreter.ts";
@@ -156,14 +157,21 @@ export class RuntimeCoordinator {
     if (!dir) throw new Error(`run ${runId} cannot resolve an artifact store root for workflow ${workflow.name}`);
     const store = ArtifactStore.forRun(dir, runId);
     if (!store) throw new Error(`run ${runId} cannot resolve an absolute artifact store root`);
+    // Claim the run dir for the retention sweep: a marker-bearing dir is never
+    // evicted, even when the active run name alone would not protect it (another
+    // session, a crashed-and-restored run).
+    writeRunMarker(dirname(store.rootDir), runId);
     this.artifactStores.set(runId, store);
     return store;
   }
 
   /** Terminal release (fx3): the per-run ArtifactStore entry must not outlive the run
    * (about 789 B/entry on a session-lifetime Map); a later lookup re-creates it.
-   * Mid-run rollovers keep the entry - only terminal run states release it. */
+   * Mid-run rollovers keep the entry - only terminal run states release it.
+   * Every terminal release also clears the run dir's active marker. */
   private releaseArtifacts(runId: string): void {
+    const store = this.artifactStores.get(runId);
+    if (store) clearRunMarker(dirname(store.rootDir));
     this.artifactStores.delete(runId);
   }
 

@@ -41,6 +41,10 @@ export const LIMITS = {
   // (never the active run) so <workflowDir>/.choreograph/runs/ cannot grow without bound.
   runArtifactsKeepRuns: 20,
   runArtifactsKeepBytes: 268_435_456,
+  // Active-run markers older than this are stale: the run that wrote them died
+  // without a terminal release (crash). The sweep never auto-evicts marked dirs;
+  // it warns so the operator can reclaim them manually.
+  activeMarkerGraceMs: 604_800_000,
   // Materialize-copy retention: scripts consume copies from <cwd>/.choreograph/artifacts/
   // and evicted copies re-materialize on demand, so the newest bytes within this budget
   // are kept and older copies are swept at the session/run-start cadence.
