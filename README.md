@@ -61,29 +61,22 @@ and resume state instead of relying on conversation memory.
 
 ### Installation & Run
 
-Install from a clone of this repository:
+Install the package directly from GitHub:
 
 ```bash
-# 1. Clone & enter the repository
-git clone git@github.com:sij0sh/choreograph.git
-cd choreograph
-
-# 2. Install dependencies
-npm install
-
-# 3. Symlink the extension into Pi
-mkdir -p ~/.pi/agent/extensions
-ln -sfn "$PWD" ~/.pi/agent/extensions/choreograph
-
-# 4. Start Pi
-pi
+pi install git:github.com/sij0sh/choreograph
 ```
 
-The symlink points at the checkout. Future pulls need no reinstall. Start a
-new Pi process after installing or updating.
+Pi clones the repository, installs its dependencies, and loads the extension
+from the package manifest. Start a new Pi process after installing or updating.
 
-To try it without installing, run `pi -e ./src/index.ts` from the repository
-root. This loads choreograph for that Pi process only.
+Update all installed Pi packages with `pi update --extensions`.
+
+To try choreograph for one Pi process without adding it to settings, run:
+
+```bash
+pi -e git:github.com/sij0sh/choreograph
+```
 
 ## [=] Configuration
 
@@ -333,10 +326,10 @@ planning, persistence, pi, runtime, and integration tests):
 npm test
 ```
 
-Uninstall by removing the symlink, then start a new Pi process:
+Remove the installed package, then start a new Pi process:
 
 ```bash
-unlink ~/.pi/agent/extensions/choreograph
+pi remove git:github.com/sij0sh/choreograph
 ```
 
 ## [?] Troubleshooting & Edge Cases
