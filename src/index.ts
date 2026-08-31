@@ -9,9 +9,10 @@ import { registerWorkflowTools } from "./pi/tools.ts";
 
 const AGENT_ROOT = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const WORKFLOWS_ROOT = join(AGENT_ROOT, "workflows");
+const LOCAL_WORKFLOWS_ROOT = join(process.cwd(), ".agents", "workflows");
 
-export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WORKFLOWS_ROOT): void {
-  const { workflows, diagnostics } = discoverWorkflows(workflowsRoot);
+export default function piWorkflows(pi: ExtensionAPI, workflowsRoot: string = WORKFLOWS_ROOT, localWorkflowsRoot: string = LOCAL_WORKFLOWS_ROOT): void {
+  const { workflows, diagnostics } = discoverWorkflows(workflowsRoot, localWorkflowsRoot);
   const runtime = new RuntimeCoordinator(pi, workflows, undefined, join(AGENT_ROOT, "workflow-artifacts"));
   registerWorkflowTools(pi, runtime, workflows);
   registerWorkflowCommands(pi, runtime, workflows);

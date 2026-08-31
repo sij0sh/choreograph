@@ -42,7 +42,7 @@ function buildExtension(frontmatter, options = {}) {
     appendEntry: (type, data) => entries.push({ type: "custom", customType: type, data }),
     sendUserMessage: async (message) => sent.push(message),
   };
-  register(pi, root);
+  register(pi, root, join(root, "local"));
   return { pi, tools, commands, handlers, entries, sent, activeTools, notices, ctx };
 }
 
@@ -181,7 +181,7 @@ test("invalid workflow metadata surfaces one session-start warning", () => {
     appendEntry: () => {},
     sendUserMessage: async () => {},
   };
-  register(pi, root);
+  register(pi, root, join(root, "local"));
   const ctx = { ui: { setStatus: () => {}, notify: (message, level) => notices.push({ message, level }) }, sessionManager: { getBranch: () => [] } };
   handlers.get("session_start")(undefined, ctx);
   assert.ok(notices.some((notice) => /Skipped invalid workflow metadata/.test(notice.message)));

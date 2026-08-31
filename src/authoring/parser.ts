@@ -486,34 +486,38 @@ function resolvesToDirectory(root: string, entry: { name: string; isDirectory():
   }
 }
 
-export function discoverWorkflows(workflowsRoot: string): {
+export function discoverWorkflows(...roots: readonly string[]): {
   workflows: Workflow[];
   diagnostics: WorkflowDiagnostic[];
 } {
-  const workflows: Workflow[] = [];
+  const byName = new Map<string, Workflow>();
   const diagnostics: WorkflowDiagnostic[] = [];
-  let directoryEntries;
-  try {
-    directoryEntries = readdirSync(workflowsRoot, { withFileTypes: true });
-  } catch (error) {
-    if (!(error instanceof Error) || typeof (error as NodeJS.ErrnoException).errno !== "number") throw error;
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      diagnostics.push({ path: workflowsRoot, error: error.message });
-    }
-    return { workflows, diagnostics };
-  }
-  const directories = directoryEntries
-    .filter((entry) => resolvesToDirectory(workflowsRoot, entry))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  for (const entry of directories) {
-    const directory = join(workflowsRoot, entry.name);
-    if (!existsSync(join(directory, "WORKFLOW.md"))) continue;
+  // Later roots override earlier ones by workflow name: the repo-local
+  // installation is authoritative inside its own repository.
+  for (const root of roots) {
+    let directoryEntries;
     try {
-      const workflow = loadWorkflowManifest(directory);
-      workflows.push(workflow);
+      directoryEntries = readdirSync(root, { withFileTypes: true });
     } catch (error) {
-      diagnostics.push({ path: join(directory, "WORKFLOW.md"), error: error instanceof Error ? error.message : String(error) });
+      if (!(error instanceof Error) || typeof (error as NodeJS.ErrnoException).errno !== "number") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        diagnostics.push({ path: root, error: error.message });
+      }
+      continue;
+    }
+    const directories = directoryEntries
+      .filter((entry) => resolvesToDirectory(root, entry))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of directories) {
+      const directory = join(root, entry.name);
+      if (!existsSync(join(directory, "WORKFLOW.md"))) continue;
+      try {
+        const workflow = loadWorkflowManifest(directory);
+        byName.set(workflow.name, workflow);
+      } catch (error) {
+        diagnostics.push({ path: join(directory, "WORKFLOW.md"), error: error instanceof Error ? error.message : String(error) });
+      }
     }
   }
-  return { workflows, diagnostics };
+  return { workflows: [...byName.values()], diagnostics };
 }

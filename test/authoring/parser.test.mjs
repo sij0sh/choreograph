@@ -210,6 +210,45 @@ test("discovery accepts symlinked workflow directories and skips invalid links",
   assert.equal(diagnostics.length, 0, "non-directory and broken links stay silently skipped");
 });
 
+function workflowAt(root, name) {
+  roots.push(root);
+  const dir = join(root, name);
+  mkdirSync(join(dir, "steps"), { recursive: true });
+  writeFileSync(join(dir, "WORKFLOW.md"), `---\ndescription: ${name}\nsteps:\n  - steps/a.md\n---\n`);
+  writeFileSync(join(dir, "steps", "a.md"), "# A");
+  return dir;
+}
+
+test("discovery merges global and local roots and loads both workflows", () => {
+  const globalRoot = mkdtempSync(join(tmpdir(), "pwf-global-"));
+  const localRoot = mkdtempSync(join(tmpdir(), "pwf-local-"));
+  workflowAt(globalRoot, "global-only");
+  workflowAt(localRoot, "local-only");
+  const { workflows, diagnostics } = discoverWorkflows(globalRoot, localRoot);
+  assert.deepEqual(workflows.map((wf) => wf.name).sort(), ["global-only", "local-only"]);
+  assert.equal(diagnostics.length, 0);
+});
+
+test("a local workflow overrides a global workflow with the same name", () => {
+  const globalRoot = mkdtempSync(join(tmpdir(), "pwf-global-"));
+  const localRoot = mkdtempSync(join(tmpdir(), "pwf-local-"));
+  workflowAt(globalRoot, "shared");
+  workflowAt(globalRoot, "stays-global");
+  workflowAt(localRoot, "shared");
+  const { workflows, diagnostics } = discoverWorkflows(globalRoot, localRoot);
+  assert.deepEqual(workflows.map((wf) => wf.name).sort(), ["shared", "stays-global"]);
+  assert.ok(workflows.find((wf) => wf.name === "shared").overviewPath.startsWith(localRoot), "the loaded shared workflow comes from the local root");
+  assert.equal(diagnostics.length, 0);
+});
+
+test("discovery ignores an absent local root and keeps global workflows", () => {
+  const globalRoot = mkdtempSync(join(tmpdir(), "pwf-global-"));
+  workflowAt(globalRoot, "global-only");
+  const { workflows, diagnostics } = discoverWorkflows(globalRoot, join(tmpdir(), `absent-local-${Date.now()}`));
+  assert.deepEqual(workflows.map((wf) => wf.name), ["global-only"]);
+  assert.equal(diagnostics.length, 0);
+});
+
 
 test("script steps compile with defaults, spec fields, and recovery", () => {
   const dir = workflowDir("scripts", `
