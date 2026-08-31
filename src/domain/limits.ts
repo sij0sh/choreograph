@@ -3,7 +3,7 @@ export const LIMITS = {
   instructionFileBytes: 128_000,
   checkpointSummaryBytes: 4_096,
   checkpointBytes: 16_384,
-  targetBytes: 4_096,
+  targetBytes: 32_768,
   nodeResultBytes: 8_192,
   planBytes: 32_768,
   memoryBytes: 524_288,

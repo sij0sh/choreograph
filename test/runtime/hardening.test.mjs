@@ -199,7 +199,7 @@ test("oversized targets are refused before any snapshot is written", async () =>
   const ctx = h.ctx();
   runtime.handleSessionStart(ctx);
   const big = "x".repeat(LIMITS.targetBytes + 1);
-  await assert.rejects(() => runtime.startWorkflow(ctx, wf, big), /target exceeds 4096 bytes/);
+  await assert.rejects(() => runtime.startWorkflow(ctx, wf, big), new RegExp(`target exceeds ${LIMITS.targetBytes} bytes`));
   assert.equal(h.entries.length, 0, "no snapshot was appended for the refused start");
   assert.equal(runtime.state.status, "idle");
   await runtime.startWorkflow(ctx, wf, "x".repeat(LIMITS.targetBytes));

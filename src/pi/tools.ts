@@ -29,7 +29,7 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
       parameters: Type.Object(
         {
           name: Type.Unsafe<string>({ type: "string", enum: visible.map((workflow) => workflow.name), description: "The workflow to start." }),
-          target: Type.Optional(Type.String({ maxLength: 4096, description: `Optional: the concrete subject the workflow should focus on (files, area, question, or defect); at most 4,096 bytes. Omit or leave blank to target ${DEFAULT_TARGET}.` })),
+          target: Type.Optional(Type.String({ maxLength: LIMITS.targetBytes, description: `Optional: the concrete subject the workflow should focus on (files, area, question, or defect); at most ${LIMITS.targetBytes} bytes. Omit or leave blank to target ${DEFAULT_TARGET}.` })),
         },
         { additionalProperties: false },
       ),

@@ -47,15 +47,15 @@ test("one byte over the limit is a styled error and never starts", async () => {
   const result = await start.execute("id", { name: "demo", target: "x".repeat(LIMITS.targetBytes + 1) }, undefined, undefined, ctx);
   assert.equal(result.isError, true);
   assert.equal(result.details.status, "target-too-long");
-  assert.match(result.content[0].text, /target exceeds 4096 bytes/);
+  assert.match(result.content[0].text, new RegExp(`target exceeds ${LIMITS.targetBytes} bytes`));
   assert.equal(runtime.state.status, "idle", "startWorkflow was never reached, so nothing was created");
 });
 
 test("multi-byte text within UTF-16 limits is rejected by bytes", async () => {
   const { tools, runtime } = makeTools();
   const start = tools.get("workflow_start");
-  const cjk = "件".repeat(1400); // 1400 UTF-16 units, 4200 UTF-8 bytes
-  assert.ok(cjk.length <= 4096, "the schema maxLength cannot catch this; the byte check must");
+  const cjk = "件".repeat(11000); // 11000 UTF-16 units, 33000 UTF-8 bytes
+  assert.ok(cjk.length <= LIMITS.targetBytes, "the schema maxLength cannot catch this; the byte check must");
   const result = await start.execute("id", { name: "demo", target: cjk }, undefined, undefined, ctx);
   assert.equal(result.isError, true);
   assert.equal(result.details.status, "target-too-long");
@@ -75,7 +75,7 @@ test("the schema pre-filter and enforcement agree on units", () => {
   const { tools } = makeTools();
   const schema = tools.get("workflow_start").parameters;
   assert.equal(schema.properties.target.maxLength, LIMITS.targetBytes);
-  assert.match(schema.properties.target.description, /4,096 bytes/);
+  assert.match(schema.properties.target.description, new RegExp(`at most ${LIMITS.targetBytes} bytes`));
   assert.equal(Value.Check(schema, { name: "demo", target: "x".repeat(LIMITS.targetBytes) }), true);
   assert.equal(Value.Check(schema, { name: "demo", target: "x".repeat(LIMITS.targetBytes + 1) }), false);
 });
@@ -97,6 +97,6 @@ test("the command path rejects oversized targets with a notice", async () => {
   await commands.get("demo").handler("x".repeat(LIMITS.targetBytes + 1), ctx);
   assert.equal(notices.length, 1);
   assert.equal(notices[0].level, "error");
-  assert.match(notices[0].text, /target exceeds 4096 bytes/);
+  assert.match(notices[0].text, new RegExp(`target exceeds ${LIMITS.targetBytes} bytes`));
   assert.equal(runtime.state.status, "idle");
 });
