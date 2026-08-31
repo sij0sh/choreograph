@@ -27,8 +27,17 @@ export interface CoordinatorInternals {
   baselineTools: string[] | null;
   isolationRunId: string | undefined;
   runtimeArtifactRoot: string | undefined;
-  readonly defaultArtifactRoot: string | undefined;
   lastTerminal: "completed" | "aborted" | undefined;
+  // Settle-guard bookkeeping (see settle-guard.ts): whether an agent run started
+  // since the last delivery, whether it made an engine-accepted transition, and
+  // the bounded stall episode counters.
+  agentRunStarted: boolean;
+  transitionSeen: boolean;
+  stallCount: number;
+  nudgeSeq: number;
+  stalledNotified: boolean;
+  handleAgentStart(): void;
+  readonly defaultArtifactRoot: string | undefined;
   now(): number;
   commit(snapshot: unknown, operation: string, options?: { readonly bypassCap?: boolean }): void;
   snapshotOf(state: ActiveState | undefined, delivered: boolean): unknown;

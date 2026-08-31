@@ -92,7 +92,7 @@ const boundaryCheckpointShape = BOUNDARY_CHECKPOINT_FIELDS
 
 const TRANSITION_CONTRACT = [
   "## Transition contract",
-  "Conclude the current position with exactly one `workflow_transition` call.",
+  "Conclude the current position with exactly one `workflow_transition` tool call. Invoke it as a real tool call: a transition written as text or markup (including `<workflow_transition>` blocks) is not executed and stalls the run.",
   `- \`status\`: one of ${transitionStatuses}. Use \`completed\` when the criteria are met, \`needs-work\` when the output has problems, or \`blocked\` when you cannot proceed.`,
   "- `key`: the position key this outcome applies to, copied verbatim from the `Position` line of this envelope. A key mismatch is rejected.",
   "- `met`: the required criterion IDs below that are complete, copied verbatim. Only valid with `status: \"completed\"`; a completion must list every required criterion.",

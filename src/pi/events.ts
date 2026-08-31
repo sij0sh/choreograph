@@ -12,6 +12,8 @@ export function registerLifecycleHandlers(pi: ExtensionAPI, runtime: RuntimeCoor
     }
   });
 
+  pi.on("agent_start", () => runtime.handleAgentStart());
+
   pi.on("agent_settled", async (_event, ctx: ExtensionContext) => {
     await runtime.handleAgentSettled(ctx);
   });

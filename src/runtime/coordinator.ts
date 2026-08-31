@@ -23,6 +23,7 @@ import { deliverPending as deliverPendingNow, drive as driveRun, settleAgent as 
 import { performRollover as performRolloverNow, prepareRollover as prepareRolloverNow } from "./rollover.ts";
 import { sweepWorkflowArtifacts } from "./retention.ts";
 import { runTransition } from "./transition.ts";
+import { guardSettled } from "./settle-guard.ts";
 import { retryRun } from "./retry.ts";
 import { finishRun as finishRunNow, runAbort } from "./finish-run.ts";
 import { restoreRun as restoreRunNow, startSession } from "./session.ts";
@@ -68,6 +69,12 @@ export class RuntimeCoordinator {
   private readonly terminalLock = new AsyncMutex();
   /** Terminal status of the run-ending event that just landed; single-slot because abort and completion cannot interleave under the lock (corr-c8). */
   private lastTerminal: "completed" | "aborted" | undefined;
+  // Settle-guard bookkeeping; consumed and cleared by guardSettled on every settle.
+  private agentRunStarted = false;
+  private transitionSeen = false;
+  private stallCount = 0;
+  private nudgeSeq = 0;
+  private stalledNotified = false;
   private notifyCtx: { current?: UiContext } = {};
 
   constructor(pi: RuntimeCoordinator["pi"], workflows: readonly Workflow[], read?: ReturnType<typeof readBlockFrom>, defaultArtifactRoot?: string) {
@@ -253,6 +260,11 @@ export class RuntimeCoordinator {
     this.commit(this.snapshotOf(next, false), `start of ${workflow.title} run ${next.execution.runId}`);
     this.isolationRunId = next.execution.runId;
     this.lastTerminal = undefined;
+    this.agentRunStarted = false;
+    this.transitionSeen = false;
+    this.stallCount = 0;
+    this.nudgeSeq = 0;
+    this.stalledNotified = false;
     this.adoptActive(next, ctx);
     ctx.ui.notify(`${workflow.title} started.`, "info");
     return next;
@@ -300,9 +312,14 @@ export class RuntimeCoordinator {
     return startSession(this as unknown as CoordinatorInternals, ctx);
   }
 
+  handleAgentStart(): void {
+    if (this.state.status === "active") this.agentRunStarted = true;
+  }
+
   async handleAgentSettled(ctx: UiContext): Promise<void> {
     this.notifyCtx.current = ctx;
     await this.deliverPending();
+    await guardSettled(this as unknown as CoordinatorInternals, ctx);
     if (this.state.status === "idle") this.isolationRunId = undefined;
   }
 

@@ -19,6 +19,10 @@ export const LIMITS = {
   bindingInputs: 8,
   positionInputsBytes: 24_576,
   positionSummaryBytes: 8_192,
+  // Settle-guard nudges before a run is declared stalled: an agent position
+  // settles only on transition or abort; a reply that ends without either gets
+  // this many reminders to call workflow_transition before the user must step in.
+  settleNudges: 3,
   stackDepth: 24,
   advanceSteps: 10_000,
   scriptArgvItems: 64,

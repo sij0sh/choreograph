@@ -118,6 +118,7 @@ export function registerWorkflowTools(pi: ExtensionAPI, runtime: RuntimeCoordina
     label: "Transition workflow",
     description: [
       "Record the outcome of the current workflow position: completed (criteria met), needs-work (problems found; recovery policy decides what happens), or blocked (cannot proceed).",
+      "Invoke this as a real tool call; a transition written as text or markup is not executed.",
       `Exact shape: { ${transitionShape} }. Allowed statuses: ${TRANSITION_SHAPE.statuses.join(", ")}.`,
       "Copy `met` criterion ids verbatim from the position's required criteria; list every required id on completion.",
       "Copy `key` verbatim from the position's `Position` line; an outcome is applied only to the position it names.",

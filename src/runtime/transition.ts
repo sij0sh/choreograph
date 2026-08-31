@@ -72,6 +72,11 @@ export async function runTransition(c: CoordinatorInternals, params: unknown, si
       isError: true,
     };
   }
+  // Engine-accepted transition: this run concluded its position, so the settle
+  // guard must not nudge, and the stall episode resets (see settle-guard.ts).
+  c.transitionSeen = true;
+  c.stallCount = 0;
+  c.stalledNotified = false;
   if (result.effect.kind === "complete") {
     return c.runTerminalExclusive(signal, async () => {
       if (c.state.status !== "active") return runEndedText(c, current);

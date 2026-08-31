@@ -24,6 +24,11 @@ export function startSession(c: CoordinatorInternals, ctx: UiContext): { unknown
   c.snapshotByteLog.length = 0;
   c.delivery.reset();
   c.lastTerminal = undefined;
+  c.agentRunStarted = false;
+  c.transitionSeen = false;
+  c.stallCount = 0;
+  c.nudgeSeq = 0;
+  c.stalledNotified = false;
   void c.registry.cancelAll();
   c.notifyCtx.current = ctx;
   const sessionDir = ctx.sessionManager?.getSessionDir?.();
