@@ -8,6 +8,7 @@ import {
   isParked,
   type AgentDispatchFrame,
   type Execution,
+  upsertInvocation,
 } from "../domain/execution.ts";
 import { processLeafAt, transition as engineTransition, type TaskOutcome } from "../engine/interpreter.ts";
 import { activeSnapshot } from "../persistence/snapshot.ts";
@@ -17,7 +18,8 @@ import { consultFence, removeFence } from "./fence.ts";
 import { controlMessage } from "./prompts.ts";
 import { captureScriptFiles } from "./script-capture.ts";
 import type { NodeResult } from "./runner.ts";
-import type { ActiveState, UiContext } from "./coordinator.ts";
+import type { ActiveState, ToolResult, UiContext } from "./coordinator.ts";
+import { resultText } from "./commit-failures.ts";
 import type { CoordinatorInternals } from "./internal.ts";
 
 export async function deliverPending(c: CoordinatorInternals): Promise<void> {
@@ -30,7 +32,7 @@ export async function deliverPending(c: CoordinatorInternals): Promise<void> {
     ? [
         controlMessage(pending.execution),
         "",
-        "The process at this position failed and its retries are exhausted. The run stays parked here.",
+        "The process at this position failed and the run is parked here.",
         `Last failure: ${pending.execution.checkpoints[process.key]?.summary ?? "unavailable"}.`,
         "Fix the cause if needed, then call `workflow_retry` to re-run the process, or `workflow_abort` to stop the run.",
       ].join("\n")
@@ -42,6 +44,37 @@ export async function deliverPending(c: CoordinatorInternals): Promise<void> {
     isLive: () => c.state === pending,
   });
   if (delivered && c.state === pending) c.state = { ...pending, delivered: true };
+}
+
+/**
+ * corr-d4: a dispatch-time failure parks the run at the script leaf (invocation
+ * "waiting") instead of stranding it at a position that workflow_retry refuses
+ * and delivery skips. In-memory only: no commit is added on the failure path, so
+ * a crash here self-heals on restore via the fence-dead re-dispatch.
+ */
+async function parkOnDispatchFailure(
+  c: CoordinatorInternals,
+  current: ActiveState,
+  ctx: UiContext,
+  processKey: string,
+  detail: string,
+  attempt: number,
+): Promise<Execution> {
+  const leaf = current.execution.stack[current.execution.stack.length - 1];
+  const base = current.execution.invocations?.[processKey] ?? {
+    blockId: leaf?.blockId ?? processKey,
+    key: processKey,
+    runner: "process" as const,
+    attempt,
+  };
+  const execution: Execution = {
+    ...current.execution,
+    invocations: upsertInvocation(current.execution, processKey, { ...base, status: "waiting", attempt }),
+  };
+  ctx.ui.notify(`${detail} The run is parked at ${processKey}; fix the cause, then call workflow_retry to re-run it or workflow_abort to stop the run.`, "error");
+  c.adoptActive({ ...current, execution, delivered: false }, ctx);
+  await deliverPending(c);
+  return execution;
 }
 
 export function dispatchAgent(c: CoordinatorInternals, active: ActiveState, leaf: AgentDispatchFrame): void {
@@ -126,8 +159,7 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
       // previous instance admits the re-dispatch or parks the run.
       const fence = consultFence(processSpec.cwd, processKey);
       if (fence.status === "alive") {
-        ctx.ui.notify(`Script ${processKey} is still running in another process (pid ${fence.pid}; fence ${fence.path}). The run is parked here; stop that process or wait for it to exit, then call workflow_retry.`, "error");
-        return execution;
+        return await parkOnDispatchFailure(c, current, ctx, processKey, `Script ${processKey} is still running in another process (pid ${fence.pid}; fence ${fence.path}). Stop that process or wait for it to exit.`, attempt);
       }
       if (fence.status === "dead" && attempt < LIMITS.nodeAttempts + 1) attempt += 1;
     }
@@ -141,8 +173,7 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
       (ref) => store.materialize(ref, processSpec.cwd),
     );
     if (!resolved.ok) {
-      ctx.ui.notify(`Script ${processKey} could not run: ${resolved.error}. The run stays at ${processKey}.`, "error");
-      return execution;
+      return await parkOnDispatchFailure(c, current, ctx, processKey, `Script ${processKey} could not run: ${resolved.error}.`, attempt);
     }
     const result = await c.registry
       .dispatch(invocation, processSpec, resolved.inputs, invocation.attempt > 1 ? { acknowledgedRetry: true } : undefined)
@@ -153,8 +184,7 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
       return execution;
     }
     if (!result.exit) {
-      ctx.ui.notify(`Script ${processKey} could not run: ${result.reason ?? "unknown runner error"}. The run stays at ${processKey}.`, "error");
-      return execution;
+      return await parkOnDispatchFailure(c, current, ctx, processKey, `Script ${processKey} could not run: ${result.reason ?? "unknown runner error"}.`, attempt);
     }
     const exit = result.exit;
     if (exit.cancelled) {
@@ -165,15 +195,18 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
     publishLogs(c, current.execution.runId, processKey, sink, exit);
     const applied = engineTransition(current.workflow, current.execution, { type: "process-exit", key: processKey, exit, ...captured, store: sink }, store);
     if (!applied.ok) {
-      ctx.ui.notify(`Result for ${processKey} could not be applied: ${applied.error}. The run stays at ${processKey}.`, "error");
-      return execution;
+      return await parkOnDispatchFailure(c, current, ctx, processKey, `Result for ${processKey} could not be applied: ${applied.error}.`, attempt);
     }
     execution = applied.state;
     if (applied.effect.kind === "complete") {
+      let result: ToolResult | undefined;
       await c.runTerminalExclusive(undefined, async () => {
         // corr-c8: the lock wait can overlap an abort; never double-commit a terminal record.
-        if (c.state.status === "active") await c.finishRun(current, ctx, "completed", applied.state);
+        if (c.state.status === "active") result = await c.finishRun(current, ctx, "completed", applied.state);
       });
+      // corr-d3: the driver owns the completion result; a failed terminal commit
+      // must reach the user, not vanish inside a discarded ToolResult.
+      if (result?.isError) ctx.ui.notify(resultText(result), "error");
       return execution;
     }
     const parked = applied.effect.kind === "stay";

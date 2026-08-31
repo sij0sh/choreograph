@@ -13,6 +13,11 @@ export const byteCapPhraseLower = (error: SnapshotByteBudgetReached): string =>
 
 const text = (message: string) => [{ type: "text" as const, text: message }];
 
+/** The user-visible text of a tool result; the notify surface for unattended failures. */
+export function resultText(result: ToolResult): string {
+  return result.content.map((part) => part.text).join("").trim();
+}
+
 /** The recorded step continues in a fresh session. */
 export function rolloverPending(details: Record<string, unknown>, message: string): ToolResult {
   return { content: text(message), details: { ...details, status: "rollover-pending" }, terminate: true };
@@ -60,4 +65,26 @@ export function driveFailure(c: CoordinatorInternals, error: unknown, ctx: UiCon
     return byteStay(identity, `${byteCapPhrase(error)} (LIMITS.snapshotBytesPerSession) during script execution; the run is paused at ${position}. Continue in a fresh session or raise LIMITS.snapshotBytesPerSession.`, error);
   }
   throw error;
+}
+
+/**
+ * Notify-only twin of driveFailure for the unattended resume path (corr-d2):
+ * restore must never reject unobserved, because an unhandled rejection kills
+ * the host and re-crashes on every restart. Rollover-capable hosts roll over
+ * exactly like transition/retry; embedded hosts get the pause message; any
+ * other failure notifies with its detail instead of escaping.
+ */
+export function notifyDriveFailure(c: CoordinatorInternals, error: unknown, ctx: UiContext, identity: FailureIdentity, resume: ActiveState, fallbackPosition: string | undefined): void {
+  let result: ToolResult;
+  try {
+    result = driveFailure(c, error, ctx, identity, resume, fallbackPosition);
+  } catch (unhandled) {
+    // driveFailure rethrows non-cap errors, and prepareRollover can itself
+    // fail inside the rollover branch: fall back to a plain notify.
+    const detail = unhandled instanceof Error ? unhandled.message : String(unhandled);
+    const position = (c.state.status === "active" ? c.state.execution : resume.execution).stack.at(-1)?.key ?? fallbackPosition;
+    ctx.ui.notify(`${detail}. The run stays at ${position}.`, "error");
+    return;
+  }
+  ctx.ui.notify(resultText(result), result.isError ? "error" : "info");
 }

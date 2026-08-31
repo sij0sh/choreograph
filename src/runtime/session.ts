@@ -6,6 +6,7 @@ import { validateAgainstWorkflow } from "../persistence/validate-stored-executio
 import { WorkflowCompileError } from "./frozen-definition.ts";
 import { preparedTransfer, ROLLOVER_COMMAND } from "./transfer.ts";
 import { sweepWorkflowArtifacts } from "./retention.ts";
+import { notifyDriveFailure, type FailureIdentity } from "./commit-failures.ts";
 import type { ActiveState, UiContext } from "./types.ts";
 import type { CoordinatorInternals } from "./internal.ts";
 
@@ -113,5 +114,9 @@ export function restoreRun(c: CoordinatorInternals, ctx: UiContext): void {
   c.isolationRunId = state.execution.runId;
   c.adoptActive(state, ctx);
   ctx.ui.notify(`Resumed ${workflow.title} run \`${state.execution.runId}\` at ${state.execution.stack.at(-1)?.key}.`, "info");
-  void c.drive(state, ctx);
+  // corr-d2: the resumed drive owns its failures. An unobserved rejection here
+  // kills the host and re-crashes on every restart of a cap-full session.
+  const identity: FailureIdentity = { workflow: workflow.name, runId: state.execution.runId };
+  const position = state.execution.stack.at(-1)?.key;
+  c.drive(state, ctx).catch((error: unknown) => notifyDriveFailure(c, error, ctx, identity, state, position));
 }

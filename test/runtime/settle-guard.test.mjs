@@ -166,6 +166,11 @@ test("a process leaf is never nudged", async () => {
 
   await stallOnce(runtime, h.ctx);
 
-  assert.equal(h.sent.length, 1, "no nudge at a process leaf");
+  // corr-d4: the dispatch failure parks the leaf and delivers its own retry
+  // guidance; the settle guard must not add a nudge on top of it.
+  assert.equal(h.sent.length, 2, "the park guidance is the only follow-up message; no nudge");
+  assert.match(h.sent[1].message, /parked/);
+  assert.match(h.sent[1].message, /workflow_retry/);
+  assert.doesNotMatch(h.sent[1].message, /without a `workflow_transition`/, "no settle-guard nudge text");
   assert.equal(stallNotices(h).length, 0, "no stall notice");
 });
