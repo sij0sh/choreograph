@@ -43,12 +43,16 @@ function checkpointContractError(workflow: Workflow, state: Execution, leaf: Fra
 }
 
 function recordCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): Execution {
-  const checkpoints = state.checkpoints as Record<string, Checkpoint>;
-  const tracked = Object.hasOwn(checkpoints, key);
-  checkpoints[key] = checkpoint;
-  if (!tracked) (state.checkpointOrder as string[]).push(key);
-  noteCheckpointCommitted(state, key, checkpoint);
-  return { ...state };
+  // Copy-on-write (corr-d1), matching withCheckpoint in interpreter.ts: never
+  // mutate the input execution before the runtime commits the outcome.
+  const tracked = Object.hasOwn(state.checkpoints, key);
+  const next: Execution = {
+    ...state,
+    checkpoints: { ...state.checkpoints, [key]: checkpoint },
+    checkpointOrder: tracked ? state.checkpointOrder : [...state.checkpointOrder, key],
+  };
+  noteCheckpointCommitted(next, key, checkpoint);
+  return next;
 }
 
 export function applyNeedsWork(workflow: Workflow, state: Execution, outcome: Outcome): EngineResult {

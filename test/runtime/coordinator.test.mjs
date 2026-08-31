@@ -172,7 +172,9 @@ test("transitions persist the next snapshot before adopting it", async () => {
   assert.equal(runtime.handleBeforeAgentStart({ systemPrompt: "" }).systemPrompt.includes("deliver"), true, "the next position renders");
   const snapshots = h.entries.filter((entry) => entry.customType === "choreograph").map((entry) => entry.data);
   assert.ok(snapshots.some((snapshot) => snapshot.delivered === false), "the pending position snapshot commits first");
-  assert.equal(Object.keys(snapshots[0].execution.checkpoints).length + Object.keys(snapshots.at(-1).execution?.checkpoints ?? {}).length >= 1, true);
+  // corr-d1: snapshots hold per-generation executions, so the persisted frame
+  // checkpoint shows up in the snapshot that committed it, not retroactively.
+  assert.ok(snapshots.some((snapshot) => snapshot.execution && Object.keys(snapshot.execution.checkpoints).length >= 1), "the run's checkpoints are recorded in their committing snapshots");
   const stored = snapshots.find((snapshot) => snapshot.execution && Object.keys(snapshot.execution.checkpoints).length === 1);
   assert.ok(stored, "the frame checkpoint is persisted");
 });

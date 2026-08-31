@@ -1,11 +1,16 @@
-// c2 guard (audit 20260830181443-9c057767, f-c2-withcheckpoint-copy).
-// Operation-count through a real start + C transitions. Metrics: element reads
-// and writes on the checkpoints record and checkpointOrder, counted by Proxy
-// traps (record own-property get/set, order numeric get/set; Object.hasOwn
-// membership and the push length update are not element ops). Post-repair each
-// commit costs two element ops (one record set + one order append), so
-// cumulative ops(C) = 2C+k, the doubling ratio stays under 2.2 (the old
-// spread+includes+copy commits were exactly 4x), and C=2000 stays under 20k ops.
+// Checkpoint commit cost and purity guard.
+// History: audit 20260830181443-9c057767 (f-c2-withcheckpoint-copy) fixed
+// quadratic commits by recording checkpoints in place, asserting 2C+k element
+// ops. Audit 20260831023045-8711ec89 (corr-d1) proved that in-place recording
+// leaks refused outcomes into live state (the phantom-checkpoint defect) and
+// supersedes the constant-ops contract: commits are now copy-on-write, paying
+// one record copy per commit (the same convention as upsertInvocation).
+// This guard now asserts the corr-d1 contract: every commit (a) leaves the
+// input execution untouched (purity, deep-equal), (b) produces fresh record
+// and order objects (no aliasing with the caller's state), (c) costs element
+// ops linear in the current checkpoint count (counted honestly by re-proxying
+// each generation, so a regression to double-copying or hidden quadratic
+// helpers fails), and (d) never duplicates or loses order entries.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { task, workflow } from './helpers.mjs';
@@ -18,10 +23,9 @@ const transition = (wf, state, event, store) =>
     ? engineTransition(wf, state, { ...event, outcome: { key: state?.stack?.at(-1)?.key, ...event.outcome } }, store)
     : engineTransition(wf, state, event, store);
 
-
-function counted(started) {
+function countedView(state) {
   const counts = { recordOps: 0, orderOps: 0 };
-  const record = new Proxy(started.state.checkpoints, {
+  const record = new Proxy(state.checkpoints, {
     get(target, prop, receiver) {
       if (typeof prop === 'string' && Object.hasOwn(target, prop)) counts.recordOps++;
       return Reflect.get(target, prop, receiver);
@@ -31,7 +35,7 @@ function counted(started) {
       return Reflect.set(target, prop, value);
     },
   });
-  const order = new Proxy(started.state.checkpointOrder, {
+  const order = new Proxy(state.checkpointOrder, {
     get(target, prop, receiver) {
       if (typeof prop === 'string' && /^\d+$/.test(prop)) counts.orderOps++;
       return Reflect.get(target, prop, receiver);
@@ -41,32 +45,41 @@ function counted(started) {
       return Reflect.set(target, prop, value);
     },
   });
-  return { state: { ...started.state, checkpoints: record, checkpointOrder: order }, counts };
+  return { state: { ...state, checkpoints: record, checkpointOrder: order }, counts };
 }
 
 function run(C) {
   const wf = workflow(Array.from({ length: C }, (_, i) => task(`t${String(i).padStart(4, '0')}`)));
-  const countedRun = counted(start(wf, { runId: 'r1' }));
-  let state = countedRun.state;
+  let state = start(wf, { runId: 'r1' }).state;
+  let total = 0;
   for (let i = 0; i < C; i += 1) {
-    const result = transition(wf, state, { type: 'outcome', outcome: { status: 'completed', checkpoint: { summary: `s${i}` } } });
+    const before = structuredClone(state);
+    const view = countedView(state);
+    const size = state.checkpointOrder.length;
+    const result = transition(wf, view.state, { type: 'outcome', outcome: { status: 'completed', checkpoint: { summary: `s${i}` } } });
     assert.ok(result.ok, `C=${C} step ${i}: ${JSON.stringify(result.error)}`);
+    // corr-d1 purity: the input execution is untouched by the commit.
+    assert.deepEqual(state, before, `C=${C} step ${i}: the engine mutated its input execution`);
+    // corr-d1 freshness: record and order are new objects, never aliased.
+    assert.notEqual(result.state.checkpoints, state.checkpoints, `C=${C} step ${i}: record aliased`);
+    assert.notEqual(result.state.checkpointOrder, state.checkpointOrder, `C=${C} step ${i}: order aliased`);
+    // Cost: one record copy + one order copy per commit, linear in size.
+    const ops = view.counts.recordOps + view.counts.orderOps;
+    assert.ok(ops <= 2 * size + 8, `C=${C} step ${i}: ${ops} ops exceed 2*${size}+8 (multi-copy regression)`);
+    total += ops;
     state = result.state;
   }
-  return countedRun.counts.recordOps + countedRun.counts.orderOps;
+  // Order integrity: exactly one entry per committed position, no duplicates.
+  assert.equal(state.checkpointOrder.length, C, `C=${C}: order holds ${state.checkpointOrder.length} entries`);
+  assert.equal(Object.keys(state.checkpoints).length, C, `C=${C}: record holds ${Object.keys(state.checkpoints).length} checkpoints`);
+  return total;
 }
 
-const bound = (c, k = 32) => 2 * c + k;
+test('checkpoint commits are copy-on-write, pure, and linear per commit (corr-d1)', () => {
+  const total = run(200);
+  assert.ok(total > 0, 'the counting proxy observed the copy-on-write commits');
+});
 
-test('checkpoint commits cost two element ops per commit (c2 guard)', () => {
-  const sizes = [800, 1600];
-  const totals = sizes.map(run);
-  for (const [i, c] of sizes.entries()) {
-    assert.ok(totals[i] <= bound(c), `C=${c}: ${totals[i]} ops exceed 2C+k = ${bound(c)}`);
-  }
-  const ratio = totals[1] / totals[0];
-  assert.ok(ratio < 2.2, `doubling ratio ${ratio.toFixed(2)} reaches 2.2 (quadratic commits are 4x)`);
-
-  const big = run(2000);
-  assert.ok(big < 20_000, `C=2000: ${big} ops reach the 20000 budget`);
+test('copy-on-write commits stay honest at scale (corr-d1)', { timeout: 60_000 }, () => {
+  run(2000);
 });

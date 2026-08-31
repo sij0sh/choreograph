@@ -414,12 +414,16 @@ function blockedProblems(workflow: Workflow, state: Execution, leaf: Frame, outc
 }
 
 function withCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): Execution {
-  const checkpoints = state.checkpoints as Record<string, Checkpoint>;
-  const tracked = Object.hasOwn(checkpoints, key);
-  checkpoints[key] = checkpoint;
-  if (!tracked) (state.checkpointOrder as string[]).push(key);
-  noteCheckpointCommitted(state, key, checkpoint);
-  return { ...state };
+  // Copy-on-write (corr-d1): refusal branches in the runtime must find the
+  // input execution untouched, so a refused transition changes nothing.
+  const tracked = Object.hasOwn(state.checkpoints, key);
+  const next: Execution = {
+    ...state,
+    checkpoints: { ...state.checkpoints, [key]: checkpoint },
+    checkpointOrder: tracked ? state.checkpointOrder : [...state.checkpointOrder, key],
+  };
+  noteCheckpointCommitted(next, key, checkpoint);
+  return next;
 }
 
 function planKeyOfNode(node: NodeFrame): string {

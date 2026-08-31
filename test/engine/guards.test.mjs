@@ -118,8 +118,8 @@ test("value ops over missing operands reject the transition with an error (c2)",
   assert.equal(result.ok, false);
   assert.match(result.error, /guard for deep could not resolve/);
   assert.match(result.error, /data\/severity not found for not-equals/);
-  // The state is unchanged: no skip was recorded.
-  assert.equal(Object.keys(state.checkpoints).length, 1);
+  // The state is unchanged: nothing was recorded, and no skip was recorded (corr-d1: a refused transition changes nothing).
+  assert.equal(Object.keys(state.checkpoints).length, 0);
 });
 
 test("ordering ops over non-finite operands reject the transition with an error (c2)", () => {
