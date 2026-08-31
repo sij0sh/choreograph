@@ -1,9 +1,9 @@
 # choreograph
 
-> choreograph runs multi-step Pi workflows in fresh context windows, with
+> Choreograph runs multi-step Pi workflows in fresh context windows, with
 > explicit handoffs, checkpoints, and validation between steps.
 
-> **Status:** choreograph is an MVP. Workflow files, snapshots, and runtime
+> **Status:** Choreograph is an MVP. Workflow files, snapshots, and runtime
 > behavior can change between releases.
 
 A [Pi](https://github.com/earendil-works/pi-coding-agent) extension. See
@@ -14,42 +14,62 @@ contracts.
 
 ## [!] What Problem It Solves
 
-Pi skills use progressive disclosure: the agent loads more guidance into the
-same conversation as the work unfolds. That works for focused instructions,
-but long workflows must compete with an accumulating transcript, tool output,
-and intermediate reasoning. As context fills, the agent can lose the sequence,
-skip checks, or drift from the original task.
+Pi skills progressively add guidance to the current conversation. That works
+well for focused instructions. It becomes less reliable when a long process
+must share one growing context with tool output, intermediate reasoning, and
+past decisions. The agent can lose the sequence, skip a check, or drift from
+the original goal.
 
-choreograph makes each workflow step a context boundary. Every model step
-starts in a fresh child session with a bounded handoff: the workflow overview,
-current instructions, declared inputs, checkpoint summaries, completion
-criteria, and transition contract. The engine owns order, progress, retries,
-and resume state instead of relying on conversation memory.
+Choreograph moves the process out of conversation memory and into an explicit
+workflow. Every model step starts in a fresh child session. It receives only
+the workflow overview, its instructions, selected earlier outputs, completion
+criteria, and the transition contract. The engine owns order, progress,
+retries, and resume state.
+
+The result is not a larger prompt. It is a series of small, bounded prompts
+connected by validated state.
+
+## [*] How Workflows Stay on Track
+
+A workflow combines a few building blocks. Each one removes a different kind
+of ambiguity.
+
+| Building block | Problem it solves | How it solves it |
+|---|---|---|
+| **Task** | The next model action is known. | Runs one focused Markdown instruction in a fresh child context. |
+| **Plan** | The goal is known, but the necessary investigation is not. | Lets the model build a small dependency plan from an author-approved operator set. |
+| **Operator** | Dynamic plans need reusable expertise without becoming open-ended. | Defines one trusted capability, its instructions, tool ceiling, and optional output contract. |
+| **Script** | A deterministic command should not depend on model judgment. | Runs one bounded local process directly, with controlled input, output, environment, and timeout. |
+| **Loop** | The same model task must run over several items. | Repeats one task with a fresh context per item and a hard item cap. |
+| **Contract** | Prose handoffs are easy to omit, rename, or misunderstand. | Validates checkpoint data against JSON Schema before the workflow advances. |
+| **Input binding** | Later steps should not inherit the whole transcript. | Selects only declared outputs, or parts of them, from earlier checkpoints. |
+| **Guard** | A step applies only under a known condition. | Evaluates structured earlier output and either runs or explicitly skips the step. |
+
+Use tasks for a sequence you can design in advance. Use a plan when the model
+must choose the investigation path at runtime. Give that plan a small operator
+registry instead of unrestricted instructions. Use scripts for deterministic
+work and loops only for bounded repetition. Add contracts wherever later
+steps depend on structured output.
 
 ## [*] Key Features
 
-* **Fresh context for every step:** Each model position starts in a new child
-  session. A bounded handoff carries only the state that the next step needs.
-* **Author-controlled rails:** Ordered blocks, completion criteria, strict
-  transitions, guards, and tool ceilings define what may run and what counts
-  as complete.
-* **Validated handoffs:** JSON Schema contracts validate structured outputs.
-  Explicit JSON Pointer bindings select which earlier artifacts reach each
-  step.
-* **Durable progress:** choreograph checkpoints before advancing. Failed work
-  retries under a declared policy, then parks for inspection and resumes with
-  `workflow_retry`.
-* **User-first invocation:** Workflows are slash commands by default, so the
-  workflow catalog does not consume model context. Set `piVisibility: true`
-  only when the agent should discover and start a workflow itself.
-* **Tasks, plans, scripts, and loops:** Use direct model instructions, bounded
-  dependency plans, local processes without a model turn, or capped iteration.
-* **A workflow for authoring workflows:** The included
-  `.agents/workflows/choreograph` workflow frames, writes, validates, and
-  reports a new workflow package using the same engine it targets.
-* **Bounded runtime behavior:** Stall nudges, absolute script deadlines,
-  snapshot caps, and artifact retention turn silent hangs and unbounded growth
-  into explicit failures with recovery paths.
+* **Fresh context for every model position:** Context does not accumulate
+  across the workflow. A bounded handoff carries only what the next position
+  needs.
+* **Author-controlled execution:** Ordered blocks, trusted operators, tool
+  ceilings, completion criteria, guards, and hard limits define the rails.
+* **Validated state handoffs:** Contracts catch malformed or incomplete data
+  before it can mislead a later step.
+* **Explicit data flow:** Input bindings make dependencies visible and keep
+  unrelated history out of the prompt.
+* **Durable recovery:** Choreograph checkpoints before advancing. Failed work
+  retries under a declared policy, then parks for inspection and can resume
+  with `workflow_retry`.
+* **User-first invocation:** Every workflow gets a slash command. Workflows
+  stay out of model context by default. Enable `piVisibility` only when the
+  model should discover and start one itself.
+* **Bounded runtime behavior:** Plan size, loop length, process time, captured
+  output, retries, snapshots, and retained artifacts all have hard limits.
 
 ## [>] Quickstart
 
@@ -57,247 +77,76 @@ and resume state instead of relying on conversation memory.
 
 * Node.js 22.19+
 * [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) ~0.84.x
-* No API keys or environment variables are required.
+* No API keys or environment variables
 
-### Installation & Run
-
-Install the package directly from GitHub:
+### 1. Install Choreograph
 
 ```bash
 pi install git:github.com/sij0sh/choreograph
 ```
 
-Pi clones the repository, installs its dependencies, and loads the extension
-from the package manifest. Start a new Pi process after installing or updating.
+Pi clones the package and loads its extension from the package manifest.
 
-Update all installed Pi packages with `pi update --extensions`.
+### 2. Enable the workflow author
 
-To try choreograph for one Pi process without adding it to settings, run:
+The repository includes a Choreograph workflow that frames, writes, validates,
+and reports a new workflow package. Link it into the workflow directory:
 
 ```bash
-pi -e git:github.com/sij0sh/choreograph
+AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+mkdir -p "$AGENT_DIR/workflows"
+ln -s "$AGENT_DIR/git/github.com/sij0sh/choreograph/.agents/workflows/choreograph" \
+  "$AGENT_DIR/workflows/choreograph"
+```
+
+The link keeps the authoring workflow in sync with package updates. If the
+target already exists, keep it or remove it before creating the link.
+
+### 3. Author a workflow
+
+Start a new Pi process, then describe the outcome to `/choreograph`:
+
+```text
+/choreograph Create a workflow that reviews a change, verifies its tests, and reports only actionable findings.
+```
+
+The authoring workflow will:
+
+1. Frame the outcome, steps, handoffs, contracts, and conditions.
+2. Choose tasks, plans, scripts, or loops for each responsibility.
+3. Write the package under the workflow directory.
+4. Run the engine's workflow validation and address diagnostics.
+5. Report the files, validation result, and restart requirement.
+
+Restart Pi after authoring. The new workflow is then available as a slash
+command named after its directory:
+
+```text
+/review-change path/to/change
 ```
 
 ## [=] Configuration
 
-There are no environment variables. Configuration lives in workflow
-directories under `$PI_CODING_AGENT_DIR/workflows` (default
-`~/.pi/agent/workflows`). The directory name is the workflow id and slash
-command. Use lowercase kebab-case (`review-change`, not `Review_Change`).
-
-### Workflow frontmatter
-
-`WORKFLOW.md` must start with YAML frontmatter. Unknown fields are rejected.
-The Markdown body is the overview shown at every position.
-
-```yaml
----
-description: Inspect a code change and report actionable findings.
-piVisibility: true
-legalTools: [read, grep, bash]
-steps:
-  - run: steps/01-frame.md
-    id: frame
-    done: [scope-clear]
-  - id: investigate
-    plan:
-      operators: [inspect, trace]
-  - run: steps/03-deliver.md
-    id: deliver
-    when:
-      from: frame
-      select: /data/scope
-      op: exists
----
-```
-
-| Field | Required | Effect |
-|---|---:|---|
-| `description` | Yes | Describes the workflow in Pi and to the model. |
-| `steps` | Yes | A non-empty ordered list of task, plan, script, and loop blocks. |
-| `piVisibility` | No | Adds the workflow to the model-facing roster and `workflow_start` tool. Default `false`. |
-| `legalTools` | No | Limits Pi tools for the whole workflow. |
-| `contracts` | No | Maps contract ids to `contracts/*.schema.json` files. Discovery is automatic without it. |
-
-### Directory layout
+Workflow packages live under `$PI_CODING_AGENT_DIR/workflows`. The default is
+`~/.pi/agent/workflows`. A package uses this layout:
 
 ```text
 my-workflow/
-├── WORKFLOW.md          # Required frontmatter and overview
-├── steps/               # Convention only; any contained .md path works
-├── contracts/           # Optional JSON Schema files
-└── operators/           # Optional trusted operator registry
+├── WORKFLOW.md          # Workflow overview and block sequence
+├── steps/               # Focused task instructions
+├── contracts/           # Optional JSON Schema handoff contracts
+└── operators/           # Optional capabilities available to plans
 ```
 
-`operators/` and `contracts/` are enforced names. choreograph reads only
-direct children and validates every discovered file, used or not. Paths cannot
-escape the workflow directory through `..`, absolute paths, or symlinks.
+The directory name becomes the slash command. Use lowercase kebab-case, such
+as `review-change`.
 
-### Task blocks
+Prefer `/choreograph` when creating or changing a package. It applies the
+engine rules and runs validation as part of the process. For manual authoring,
+all frontmatter fields, block parameters, schema keywords, runtime rules, and
+limits are documented in [WORKFLOW_REFERENCE.md](WORKFLOW_REFERENCE.md).
 
-A task runs one Markdown instruction file to completion.
-
-| Field | Required | Effect |
-|---|---:|---|
-| `run` | Yes | Names a contained Markdown instruction file. |
-| `id` | No | Defaults to the file stem minus a leading numeric prefix. |
-| `tools` | No | Narrows tools for this task. |
-| `done` | No | Criterion ids a successful transition must report. |
-| `repair` | No | `{ max_attempts: 1..3 }`, default 2. |
-| `inputs` | No | Binds earlier artifacts. |
-| `output` | No | Contract that `checkpoint.data` must satisfy. |
-| `when` | No | Guard on an earlier artifact. |
-
-Block ids are unique per workflow and use lowercase kebab-case.
-
-### Plan blocks
-
-A plan asks the model to build 2 to 8 nodes from trusted operators. The engine
-runs each node in dependency order, one node per turn. Every node needs a
-non-empty `done` list. Dependencies may name only earlier nodes.
-
-```yaml
-- id: investigate
-  plan:
-    operators: [inspect, trace]
-    repair: { max_attempts: 2 }
-```
-
-Operators live under `operators/*.md`; the stem is the id. Operator
-frontmatter accepts `description`, `tools`, and `output`. Plan blocks accept
-`inputs`, `repair`, and `when`; they reject `output`. A completed plan emits
-an engine-generated aggregate instead of a contract-validated checkpoint.
-
-### Script steps
-
-A script step runs one bounded local process. No model turn runs.
-
-```yaml
-- id: run-tests
-  script:
-    argv: [npm, test]        # Required; no shell, literal arguments
-    cwd: .                   # Inside the workflow directory
-    env: { CI: "1" }         # Overrides; inheritEnv allowlists the rest
-    inheritEnv: [PATH, HOME]
-    timeoutMs: 120000        # 1,000-600,000, default 60,000
-    acceptedExitCodes: [0]
-    stdout: json             # json | text | none
-    stderr: text             # none | text | json
-    maxCaptureBytes: 65536   # Shared stdout+stderr cap, 1 MiB max
-    files:                   # Up to 4 { name, path } captures
-      - { name: log, path: out/log.txt }
-  output: test-report        # Optional contract id
-```
-
-* `timeoutMs` ends with SIGTERM, then SIGKILL after a 5 second grace, then a
-  1 second drain. The deadline is absolute from spawn, so descendants that
-  escape the process group cannot wedge settlement.
-* Declared `inputs` arrive as one JSON object on stdin (24 KiB budget). No
-  implicit interpolation into `argv` or `env`.
-* `stdout: json` parses stdout into `checkpoint.data`. Script stdout keys win
-  over runtime side keys (`stderr`, `files`) in the merged data.
-* A timeout, rejected exit code, invalid JSON, contract violation, or spawn
-  failure retries the step through `repair`; exhausted attempts park the run.
-
-### Loop blocks
-
-A loop runs one task body once per item under a hard cap.
-
-```yaml
-- id: review-files
-  for_each:
-    items: { from: gather, select: /data/files }
-    body:
-      run: steps/review-one.md
-      id: review-one
-      inputs: { item: { from: "$item" } }
-    maxItems: 8
-```
-
-`items` must resolve to a list, materialized once at loop start. `maxItems` is
-1 to 8. The body is exactly one `run` step and may bind `$item`. Recovery is
-per iteration; earlier iterations stay untouched. The loop finishes with one
-aggregate checkpoint: `{ mode, iterations, results }`.
-
-### Contracts and input bindings
-
-Contracts are JSON Schema files under `contracts/`; the stem is the id. Tasks
-and operators declare `output: <contract-id>`. The engine validates
-`checkpoint.data` on completion, blocked, and recovery checkpoints.
-
-Accepted keywords: `type` (single or list), `properties`, `required`, `items`,
-`enum`, `const`, `additionalProperties` (boolean), `minItems`, `maxItems`,
-`minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, `oneOf` (2-4
-branches), `title`, `description`. Schemas nest at most 8 levels and stay
-under 64 KiB.
-
-Inputs resolve with RFC 6901 JSON Pointers:
-
-```yaml
-inputs:
-  brief: { from: observe, select: /data/scope }
-```
-
-`from` names an earlier block. Rendered inputs share a 24 KiB budget per
-position; the prompt drops the largest entries first and names what was cut.
-
-### Guards
-
-A task or plan block may carry one `when` guard, evaluated when the block
-becomes current. A guard that does not hold skips the block with a synthetic
-`skipped` checkpoint.
-
-| Field | Required | Effect |
-|---|---:|---|
-| `from` | Yes | An earlier block in `steps` order. |
-| `select` | No | JSON Pointer into the producer's artifact. |
-| `op` | Yes | `equals`, `not-equals`, `in`, `not-in`, `exists`, `not-exists`, `gt`, `gte`, `lt`, `lte`. |
-| `value` | Depends | Required by the eight value ops; forbidden for `exists`/`not-exists`. |
-
-A missing operand or an unevaluable comparison fails the transition with an
-error naming the block, the op, and the pointer. Guards never skip silently.
-
-### Runtime rules
-
-* Each position ends with one `workflow_transition` call. The schema is
-  strict: extra properties, unknown statuses, and malformed checkpoints are
-  rejected. Copy `key` verbatim from the position envelope. A transition
-  applies only to the position it names; stale or replayed transitions change
-  nothing.
-* Incomplete work reports `needs-work` with diagnostic `issues[]`. The engine
-  retries the current position up to `max_attempts`, then parks the run and
-  waits for the user.
-* Snapshots are format v7; earlier formats are not resumable. Restoring a run
-  whose workflow was edited mid-flight is refused via a content digest.
-* Tools start from the Pi session baseline, intersected with `legalTools`,
-  task `tools`, and operator `tools`. `workflow_transition` and
-  `workflow_abort` stay available during a run.
-
-### Limits
-
-| Data | Limit |
-|---|---:|
-| Workflow or instruction file | 128,000 bytes |
-| Contract schema file / count | 64 KiB / 16 per workflow |
-| Inputs per position / budget | 8 / 24 KiB |
-| Prior checkpoint summaries | 8, 1 KiB each, 8 KiB total |
-| Plan nodes / plan size | 8 / 32 KiB |
-| Checkpoint summary / complete | 4 KiB / 16 KiB |
-| Loop items (cap) | 8 |
-| Recovery attempts | 1-3, default 2 |
-| Settle-guard nudges | 3 |
-| Script argv / env entries | 64 / 32 |
-| Script timeout | 1,000-600,000 ms |
-| Script capture | 64 KiB default, 1 MiB max |
-| Snapshot entries / bytes per session | 256 / 16 MiB |
-| Run artifact retention | 20 runs / 256 MiB, oldest first |
-| Materialized copies | 64 MiB with 10 min grace |
-| Total workflow memory | 512 KiB |
-
-Workflows do not support nested loops, unbounded `while`, concurrency, or
-free-form expressions. Use a `when` guard for conditional steps.
-
-## [+] Common How-To Tasks
+## [+] Common Tasks
 
 Run a workflow from a fresh Pi process:
 
@@ -305,22 +154,32 @@ Run a workflow from a fresh Pi process:
 /review-change path/to/change
 ```
 
-The text after the command is optional. It reaches every position as the
-workflow target. Only one workflow can be active at a time.
+The optional text after the command becomes the workflow target and reaches
+every position. Only one workflow can be active at a time.
 
-Resume a parked run or stop an active run by asking the agent in the Pi
-session:
+Resume a parked run or stop an active run by asking the agent:
 
 ```text
 retry the parked workflow
 abort the workflow
 ```
 
-choreograph exposes `workflow_retry` and `workflow_abort` as Pi tools. The
-agent calls them; there are no user-facing slash commands for them.
+Choreograph exposes `workflow_retry` and `workflow_abort` as Pi tools. The
+agent calls them. There are no user-facing slash commands for these actions.
 
-Run the validation suite (strict TypeScript, then engine, authoring,
-planning, persistence, pi, runtime, and integration tests):
+Update installed Pi packages, then start a new Pi process:
+
+```bash
+pi update --extensions
+```
+
+Try only the extension for one Pi process without installing it:
+
+```bash
+pi -e git:github.com/sij0sh/choreograph
+```
+
+Run the project validation suite:
 
 ```bash
 npm test
@@ -332,36 +191,6 @@ Remove the installed package, then start a new Pi process:
 pi remove git:github.com/sij0sh/choreograph
 ```
 
-## [?] Troubleshooting & Edge Cases
-
-* **Issue:** `run stalled at <key>: 3 replies ended without a workflow_transition call`
-* **Fix:** The model wrote the transition as text instead of calling the tool.
-  Send the agent a message to unstick it, or call `workflow_abort`.
-
-* **Issue:** The run parks at a position after `max_attempts` exhausted.
-* **Fix:** Address the reported `issues[]`, then resume with `workflow_retry`.
-  Retry is rejected while a script process is still in flight.
-
-* **Issue:** `workflow_transition` fails validation.
-* **Fix:** Copy `key` verbatim from the `Position` line. Pass only the
-  schema-defined checkpoint fields; extra properties such as `data` under
-  `checkpoint` are rejected.
-
-* **Issue:** A saved run will not resume after a choreograph update or a
-  workflow edit.
-* **Fix:** Snapshots resume only in format v7, and a workflow edited mid-run
-  fails the digest check. Abort or finish the run before editing; start a new
-  run after an update.
-
-* **Issue:** A script step fails with a contract or JSON error.
-* **Fix:** Check `acceptedExitCodes`, keep stdout valid JSON when
-  `stdout: json`, and keep the stdin payload under 24 KiB. Output past the
-  capture cap is truncated and flagged in the checkpoint.
-
-* **Issue:** `Unknown tool` warning at session start.
-* **Fix:** A `legalTools` or `tools` name is not in Pi's baseline tool set.
-  Remove the name or enable the tool in Pi.
-
 ---
 
-[MIT](LICENSE) (c) 2026 choreograph contributors
+[MIT](LICENSE) (c) 2026 Josh Simon
