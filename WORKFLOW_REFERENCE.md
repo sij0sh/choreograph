@@ -5,6 +5,20 @@ with the authoring workflow in the [README](README.md#3-author-a-workflow).
 Use this document when reviewing generated files or authoring a package by
 hand.
 
+## Vocabulary
+
+One name for each concept, in code and in these documents:
+
+| Term | Meaning |
+| --- | --- |
+| Workflow | The thing the user authors: a `WORKFLOW.md` package under a discovery root. |
+| Definition | The workflow's frozen compiled representation (`WorkflowDefinition`), fixed by a content digest. |
+| Run | One execution of a workflow, identified by its `runId`. |
+| Step | A declared unit in the authored tree: a task, script, plan, loop, or sequence block. |
+| Position | The site the model currently occupies. One key addresses one position; a retry re-enters the same position with a higher attempt. |
+| Invocation | One actual attempt to execute a position. It records the runner, the status, and the attempt number. |
+| Checkpoint | The durable result committed at a boundary. |
+
 ## Discovery and layout
 
 Choreograph discovers direct child directories under two roots: the global

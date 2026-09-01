@@ -51,6 +51,21 @@ registry instead of unrestricted instructions. Use scripts for deterministic
 work and loops only for bounded repetition. Add contracts wherever later
 steps depend on structured output.
 
+## [*] Vocabulary
+
+| Term | Meaning |
+|---|---|
+| **Workflow** | The thing you author: a `WORKFLOW.md` package under a discovery root. |
+| **Definition** | The workflow's frozen compiled representation, fixed by a content digest. |
+| **Run** | One execution of a workflow. |
+| **Step** | A declared unit in the workflow tree: task, script, plan, loop, or sequence. |
+| **Position** | The site the model currently occupies, addressed by one key. |
+| **Invocation** | One actual attempt to execute a position. |
+| **Checkpoint** | The durable result committed at a boundary. |
+
+The full reference for these terms and the file formats is
+[WORKFLOW_REFERENCE.md](WORKFLOW_REFERENCE.md#vocabulary).
+
 ## [*] Key Features
 
 * **Fresh context for every model position:** Context does not accumulate

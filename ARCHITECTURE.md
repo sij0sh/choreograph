@@ -2,6 +2,18 @@
 
 This document identifies the source module for cross-package contracts. Consumers must import these contracts instead of reconstructing kind sets, field lists, or representation shapes.
 
+The code uses one name per boundary concept. The glossary in [WORKFLOW_REFERENCE.md](WORKFLOW_REFERENCE.md#vocabulary) defines workflow, definition, run, step, position, invocation, and checkpoint.
+
+## Engine modules
+
+`src/engine/interpreter.ts` owns the transition core: `start`, `transition`, `advance`, and the effect union. It re-exports `TaskOutcome` and `Issue` for its existing consumers.
+
+`src/engine/outcome.ts` owns the `TaskOutcome` union, `Issue`, and outcome validation.
+
+`src/engine/progress.ts` owns stack progression: block push, guard skip, loop finish, and checkpoint commits.
+
+`src/engine/position.ts` owns `currentPosition`, the ephemeral position projection.
+
 ## Kind sets
 
 ### Run frames
@@ -35,7 +47,7 @@ The spec owns statuses, top-level fields, checkpoint fields, required fields, co
 
 `Checkpoint.skipped` is an intentional divergence. The engine accepts and persists `skipped: true` for engine-generated guard skips. The model-facing `workflow_transition` schema rejects `checkpoint.skipped`, and `skipped` is not a transition status.
 
-`TaskOutcome` remains the engine's discriminated semantic union. Runtime modules import it instead of restating its structure.
+`src/engine/outcome.ts` owns `TaskOutcome`, the engine's discriminated semantic union. `src/engine/interpreter.ts` re-exports it. Runtime modules import it instead of restating its structure.
 
 ## Producer artifacts
 
