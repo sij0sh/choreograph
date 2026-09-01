@@ -57,6 +57,6 @@ The spec owns statuses, top-level fields, checkpoint fields, required fields, co
 
 `src/domain/run.ts` owns the `Run` domain type. `src/persistence/run-state-schema.ts` owns its runtime persistence field table and is compiler-linked to every `Run` key.
 
-`src/persistence/snapshot.ts` derives strict top-level and collection allowlists plus decoded projection from that table. `src/persistence/validate-stored-run.ts` keeps the separate workflow-semantic validation layer. Both validation layers stay required. Unknown fields are still rejected. The active snapshot version gate is unchanged.
+`src/persistence/snapshot.ts` derives strict top-level and collection allowlists plus decoded projection from that table. Its decode allowlists (`NODE_STATUSES`, `RUNNER_KINDS`, `FRAME_DECODERS`) are exhaustiveness-linked to the domain unions they admit: a stale list or a new union member without a decode entry fails compilation, and the member sets are pinned in the ownership test. `src/persistence/validate-stored-run.ts` keeps the separate workflow-semantic validation layer. Both validation layers stay required. Unknown fields are still rejected. The active snapshot version gate is unchanged.
 
 The workflow UI (`src/runtime/workflow-ui.ts`) is an ephemeral derivation of `Workflow` and `Run` and is never persisted.

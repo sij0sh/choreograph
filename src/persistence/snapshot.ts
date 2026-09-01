@@ -1,4 +1,5 @@
-import { isStructuralFrame, type Run, type Frame } from "../domain/run.ts";
+import { isStructuralFrame, type Run, type Frame,
+  type SequenceFrame, type TaskFrame, type PlanFrame, type PlanNodeFrame, type LoopFrame } from "../domain/run.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
 import { LIMITS } from "../domain/limits.ts";
@@ -8,8 +9,20 @@ import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.
 import type { Invocation, InvocationStatus, RunnerKind } from "../domain/invocation.ts";
 import { loopFrameKeys, loopStateForFrame, RUN_STATE_FIELDS, RUN_STATE_SCHEMA } from "./run-state-schema.ts";
 
-const NODE_STATUSES: readonly InvocationStatus[] = ["running", "waiting", "succeeded", "failed", "canceled", "skipped"];
-const RUNNER_KINDS: readonly RunnerKind[] = ["agent", "process"];
+/**
+ * A decode allowlist is exhaustiveness-linked to its domain union: a stale
+ * member or a missing union member fails compilation, so the list cannot
+ * drift from its owner.
+ */
+type ExhaustiveMembers<T extends readonly string[], U extends string> =
+  [T[number]] extends [U] ? ([Exclude<U, T[number]>] extends [never] ? T : never) : never;
+
+export const NODE_STATUSES: ExhaustiveMembers<
+  readonly ["running", "waiting", "succeeded", "failed", "canceled", "skipped"],
+  InvocationStatus
+> = ["running", "waiting", "succeeded", "failed", "canceled", "skipped"] as const;
+
+export const RUNNER_KINDS: ExhaustiveMembers<readonly ["agent", "process"], RunnerKind> = ["agent", "process"] as const;
 
 function invocationsAt(value: unknown, label: string): Record<string, Invocation> {
   const raw = objectAt(value, label);
@@ -66,35 +79,40 @@ export type ParsedSnapshot =
   | { readonly status: "terminal" }
   | { readonly status: "invalid"; readonly error: string };
 
-const FRAME_KINDS = ["sequence", "task", "plan", "node", "loop"] as const;
-type FrameKind = (typeof FRAME_KINDS)[number];
+interface FrameSeed {
+  readonly blockId: string;
+  readonly key: string;
+}
+
+function intAt(raw: Record<string, unknown>, label: string, field: string, max: number): number {
+  const n = raw[field];
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > max) throw new Error(`${label}.${field} must be an integer between 0 and ${max}`);
+  return n;
+}
+
+/** One decoder per frame kind; the mapped satisfies clause is the compile link between the decode table and the Frame union. */
+const FRAME_DECODERS = {
+  sequence: (seed: FrameSeed, raw: Record<string, unknown>, label: string): SequenceFrame =>
+    ({ kind: "sequence", ...seed, index: intAt(raw, label, "index", 100_000) }),
+  task: (seed: FrameSeed, raw: Record<string, unknown>, label: string): TaskFrame =>
+    ({ kind: "task", ...seed, attempt: intAt(raw, label, "attempt", LIMITS.nodeAttempts + 1) || 1 }),
+  plan: (seed: FrameSeed, raw: Record<string, unknown>, label: string): PlanFrame => {
+    if (raw.mode !== "create" && raw.mode !== "execute") throw new Error(`${label}.mode must be create or execute`);
+    return { kind: "plan", ...seed, mode: raw.mode, attempt: intAt(raw, label, "attempt", LIMITS.nodeAttempts + 1) || 1 };
+  },
+  node: (seed: FrameSeed, raw: Record<string, unknown>, label: string): PlanNodeFrame =>
+    ({ kind: "node", ...seed, nodeId: requireString(raw.nodeId, `${label}.nodeId`), attempt: intAt(raw, label, "attempt", LIMITS.nodeAttempts + 1) || 1 }),
+  loop: (seed: FrameSeed): LoopFrame => ({ kind: "loop", ...seed }),
+} as const satisfies { [K in Frame["kind"]]: (seed: FrameSeed, raw: Record<string, unknown>, label: string) => Extract<Frame, { kind: K }> };
+
+export const FRAME_KINDS = Object.keys(FRAME_DECODERS) as Frame["kind"][];
 
 function frameAt(value: unknown, label: string): Frame {
   const raw = objectAt(value, label);
-  if (!FRAME_KINDS.includes(raw.kind as FrameKind)) throw new Error(`${label}.kind must be one of: ${FRAME_KINDS.join(", ")}`);
-  const kind = raw.kind as FrameKind;
-  const blockId = requireString(raw.blockId, `${label}.blockId`);
-  const key = requireString(raw.key, `${label}.key`);
-  const indexAt = (field: string, max: number): number => {
-    const n = raw[field];
-    if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > max) throw new Error(`${label}.${field} must be an integer between 0 and ${max}`);
-    return n;
-  };
-  switch (kind) {
-    case "sequence":
-      return { kind, blockId, key, index: indexAt("index", 100_000) };
-    case "task":
-      return { kind, blockId, key, attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
-    case "plan": {
-      if (raw.mode !== "create" && raw.mode !== "execute") throw new Error(`${label}.mode must be create or execute`);
-      const attemptMax = LIMITS.nodeAttempts + 1;
-      return { kind, blockId, key, mode: raw.mode, attempt: indexAt("attempt", attemptMax) || 1 };
-    }
-    case "node":
-      return { kind, blockId, key, nodeId: requireString(raw.nodeId, `${label}.nodeId`), attempt: indexAt("attempt", LIMITS.nodeAttempts + 1) || 1 };
-    case "loop":
-      return { kind, blockId, key };
-  }
+  const decode = FRAME_DECODERS[raw.kind as Frame["kind"]];
+  if (!decode) throw new Error(`${label}.kind must be one of: ${FRAME_KINDS.join(", ")}`);
+  const seed: FrameSeed = { blockId: requireString(raw.blockId, `${label}.blockId`), key: requireString(raw.key, `${label}.key`) };
+  return decode(seed, raw, label);
 }
 
 function stackAt(value: unknown, label: string): Frame[] {

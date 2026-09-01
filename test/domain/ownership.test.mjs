@@ -16,6 +16,7 @@ import {
   isRestorableBlock,
 } from "../../src/domain/workflow.ts";
 import { BOUNDARY_CHECKPOINT_FIELDS, TRANSITION_SHAPE } from "../../src/domain/checkpoint.ts";
+import { FRAME_KINDS, NODE_STATUSES, RUNNER_KINDS } from "../../src/persistence/snapshot.ts";
 import { start } from "../../src/engine/interpreter.ts";
 import { renderPositionEnvelope } from "../../src/runtime/prompts.ts";
 import { task, workflow } from "../engine/helpers.mjs";
@@ -54,6 +55,14 @@ test("block keys and roles are owned beside the Block union", () => {
     assert.equal(isBindableBlock(block), bind, block.kind);
     assert.equal(isCheckpointContractBlock(block), contract, block.kind);
   }
+});
+
+test("every snapshot decode allowlist is exhaustiveness-linked to its domain union", () => {
+  // The member sets are pinned here: a stale hand-edited list fails this test,
+  // and a new union member without a list entry fails compilation (linkedMembers).
+  assert.deepEqual([...NODE_STATUSES], ["running", "waiting", "succeeded", "failed", "canceled", "skipped"]);
+  assert.deepEqual([...RUNNER_KINDS], ["agent", "process"]);
+  assert.deepEqual([...FRAME_KINDS], ["sequence", "task", "plan", "node", "loop"]);
 });
 
 test("the model-facing transition prompt derives its enumerations", () => {
