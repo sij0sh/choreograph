@@ -20,7 +20,7 @@ function statOverBound(path: string, bound: number): boolean | undefined {
 }
 
 /** A frozen workflow definition: a content digest plus the frozen prompt sources by their workflow-relative paths. */
-export interface FrozenDefinition {
+export interface WorkflowDefinition {
   readonly digest: string;
   readonly contents: Readonly<Record<string, string>>;
 }
@@ -32,7 +32,7 @@ export interface FrozenDefinition {
  * relocating the workflow directory does not.
  * Unreadable required files fail the freeze.
  */
-export function freezeDefinition(workflow: Workflow, read: InstructionReader, workflowDir?: string): FrozenDefinition {
+export function freezeDefinition(workflow: Workflow, read: InstructionReader, workflowDir?: string): WorkflowDefinition {
   const dir = workflowDir ?? dirname(workflow.overviewPath);
   const rel = (path: string): string => relative(dir, path);
   const contents: Record<string, string> = {};

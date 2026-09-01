@@ -3,7 +3,7 @@ import type { TaskOutcome } from "../engine/interpreter.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { ArtifactStore } from "./artifact-store.ts";
 import type { DeliveryCoordinator } from "./delivery.ts";
-import type { FrozenSources } from "./frozen-definition.ts";
+import type { FrozenSources } from "./workflow-definition.ts";
 import type { RunnerRegistry } from "./registry.ts";
 import type { ActiveState, PiFacade, RunState, ToolResult, UiContext } from "./types.ts";
 

@@ -3,7 +3,7 @@ import type { Workflow } from "../domain/workflow.ts";
 import { workflowBlocks } from "../domain/workflow.ts";
 import { countSnapshotEntries, latestSnapshot, snapshotBytesInBranch } from "../persistence/store.ts";
 import { validateAgainstWorkflow } from "../persistence/validate-stored-run.ts";
-import { WorkflowCompileError } from "./frozen-definition.ts";
+import { WorkflowCompileError } from "./workflow-definition.ts";
 import { preparedTransfer, ROLLOVER_COMMAND } from "./transfer.ts";
 import { sweepWorkflowArtifacts } from "./retention.ts";
 import { notifyDriveFailure, type FailureIdentity } from "./commit-failures.ts";
