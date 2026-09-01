@@ -1,10 +1,38 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RuntimeCoordinator } from "../runtime/coordinator.ts";
+import { parseWorkflowUiMode } from "../runtime/workflow-ui.ts";
 import { LIMITS } from "../domain/limits.ts";
+import { inspectWorkflow } from "./workflow-inspector.ts";
 import { ROLLOVER_COMMAND } from "../runtime/transfer.ts";
 
 export function registerRuntimeCommands(pi: ExtensionAPI, runtime: RuntimeCoordinator): void {
+  pi.registerCommand("workflow-tui", {
+    description: "Show or change the workflow progress view. Arguments: off, compact, detailed.",
+    handler: async (args, ctx) => {
+      const requested = (args ?? "").trim().toLowerCase();
+      if (!requested) {
+        const mode = runtime.cycleWorkflowUiMode(ctx);
+        ctx.ui.notify(`Workflow view: ${mode}.`, "info");
+        return;
+      }
+      const mode = parseWorkflowUiMode(requested);
+      if (!mode) {
+        ctx.ui.notify("Usage: /workflow-tui [off|compact|detailed]", "error");
+        return;
+      }
+      runtime.setWorkflowUiMode(mode, ctx);
+      ctx.ui.notify(`Workflow view: ${mode}.`, "info");
+    },
+  });
+
+  pi.registerCommand("workflow-inspect", {
+    description: "Open a snapshot panel of the active workflow run.",
+    handler: async (_args, ctx) => {
+      await inspectWorkflow(runtime, ctx);
+    },
+  });
+
   pi.registerCommand(ROLLOVER_COMMAND, {
     description: "Internal command that moves a workflow into its next bounded child session.",
     handler: async (args, ctx) => {

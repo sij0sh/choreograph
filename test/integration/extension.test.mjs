@@ -23,13 +23,20 @@ function buildExtension(frontmatter, options = {}) {
   const sent = [];
   const activeTools = new Set(options.baseline ?? ["read", "bash"]);
   const notices = [];
-  const ctx = () => ({
-    ui: {
-      setStatus: () => {},
+  const ctx = () => {
+    const ui = {
+      status: undefined,
+      widgets: {},
+      setStatus: (id, value) => {
+        ui.status = value;
+      },
+      setWidget: (id, content, options) => {
+        ui.widgets[id] = content === undefined ? undefined : { content, options };
+      },
       notify: (message, level) => notices.push({ message, level }),
-    },
-    sessionManager: { getBranch: () => entries },
-  });
+    };
+    return { ui, sessionManager: { getBranch: () => entries } };
+  };
   const pi = {
     registerTool: (tool) => tools.set(tool.name, tool),
     registerCommand: (name, command) => commands.set(name, command),
@@ -302,4 +309,101 @@ test("a persisted run restores through the script position", async () => {
   await settle(revived.handlers, freshCtx);
   const prompt = revived.handlers.get("before_agent_start")({ systemPrompt: "base" });
   assert.match(prompt.systemPrompt, /# steps\/deliver\.md/, "the restored run re-drives the script and continues at the next task");
+});
+
+test("both workflow UI commands are registered", () => {
+  const ext = buildExtension(LEGACY);
+  assert.ok(ext.commands.has("workflow-tui"));
+  assert.ok(ext.commands.has("workflow-inspect"));
+});
+
+test("bare /workflow-tui cycles modes and notifies the selection", async () => {
+  const ext = buildExtension(LEGACY);
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  await ext.commands.get("workflow-tui").handler("", ctx);
+  assert.ok(ext.notices.some((notice) => /Workflow view: detailed\./.test(notice.message)));
+  await ext.commands.get("workflow-tui").handler("", ctx);
+  assert.ok(ext.notices.some((notice) => /Workflow view: off\./.test(notice.message)));
+});
+
+test("explicit /workflow-tui mode selection installs the rail above the editor", async () => {
+  const ext = buildExtension(LEGACY);
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "" }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+  await ext.commands.get("workflow-tui").handler("compact", ctx);
+  const installed = ctx.ui.widgets["choreograph"];
+  assert.ok(installed, "compact installs the widget");
+  assert.deepEqual(installed.options, { placement: "aboveEditor" });
+  await ext.commands.get("workflow-tui").handler("off", ctx);
+  assert.equal(ctx.ui.widgets["choreograph"], undefined, "off clears the widget");
+  assert.equal(ctx.ui.status, undefined, "the footer status stays clear");
+});
+
+test("invalid /workflow-tui input reports usage without changing the mode", async () => {
+  const ext = buildExtension(LEGACY);
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  await ext.commands.get("workflow-tui").handler("detailed", ctx);
+  await ext.commands.get("workflow-tui").handler("bogus", ctx);
+  assert.ok(ext.notices.some((notice) => notice.level === "error" && /Usage: \/workflow-tui/.test(notice.message)));
+  await ext.commands.get("workflow-tui").handler("", ctx);
+  assert.ok(ext.notices.some((notice) => /Workflow view: off\./.test(notice.message)), "detailed -> off, so bogus did not change the mode");
+});
+
+test("/workflow-inspect reports no active run when idle", async () => {
+  const ext = buildExtension(LEGACY);
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  await ext.commands.get("workflow-inspect").handler("", ctx);
+  assert.ok(ext.notices.some((notice) => /No active workflow run\./.test(notice.message)));
+});
+
+test("/workflow-inspect falls back to a bounded notification outside the TUI", async () => {
+  const ext = buildExtension(LEGACY);
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "inspect me" }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+  await ext.commands.get("workflow-inspect").handler("", ctx);
+  const inspectNotice = ext.notices.find((notice) => notice.message.includes("WORKFLOW"));
+  assert.ok(inspectNotice, "the fallback renders the inspect view");
+  for (const line of inspectNotice.message.split("\n")) {
+    assert.ok(line.length <= 96, `fallback lines stay bounded: ${JSON.stringify(line)}`);
+  }
+});
+
+test("the inspector overlay closes on Escape", async () => {
+  const ext = buildExtension(LEGACY);
+  const baseCtx = ext.ctx();
+  let captured = undefined;
+  const ui = {
+    ...baseCtx.ui,
+    custom: async (factory, options) => {
+      captured = { options };
+      let resolveDone;
+      const done = () => resolveDone();
+      const theme = { fg: (color, text) => text };
+      const tui = { terminal: { columns: 120, rows: 40 } };
+      const component = factory(tui, theme, undefined, done);
+      const closed = new Promise((resolve) => {
+        resolveDone = resolve;
+      });
+      component.handleInput("\u001b");
+      await closed;
+      captured.lines = component.render(44);
+      return undefined;
+    },
+  };
+  const ctx = { ...baseCtx, mode: "tui", ui };
+  ext.handlers.get("session_start")(undefined, baseCtx);
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "overlay" }, undefined, () => {}, baseCtx);
+  await settle(ext.handlers, baseCtx);
+  await ext.commands.get("workflow-inspect").handler("", ctx);
+  assert.ok(captured, "the overlay opened");
+  assert.equal(captured.options.overlay, true);
+  assert.equal(captured.options.overlayOptions().anchor, "right-center", "wide terminals anchor the sidecar right");
+  assert.ok(captured.lines[0].startsWith("+"), "the panel is bordered");
 });
