@@ -62,6 +62,10 @@ The spec owns statuses, top-level fields, checkpoint fields, required fields, co
 
 A paused run is a session-level park: the engine's `Run.status` never holds `paused`. `src/persistence/snapshot.ts` owns the paused snapshot record, its parse row in the status decoder table (a lifecycle status without a parse row fails compilation), and the O(1) pause marker; `src/persistence/store.ts` folds markers into paused records the way it folds delivered tombstones. `/workflow-resume` owns the in-session resume.
 
+## Runtime concerns
+
+Each coordinator runtime concern owns its state and reset policy as a collaborator (the `DeliveryCoordinator` pattern): the settle guard owns its episode counters in `src/runtime/settle-guard.ts` and hosts call `reset()` / `note*()` instead of assigning concern fields. The shared `CoordinatorInternals` delegate interface shrinks as concerns become self-contained; its member count is pinned non-increasing in the ownership test. Remaining flat concerns (terminal bookkeeping, delivery suppression, snapshot accounting) migrate one concern per change, deleting each field's consumer wiring as it moves.
+
 ## Producer artifacts
 
 `src/domain/artifacts.ts` owns the block-kind to artifact-source and artifact-shape dispatch. `resolveBinding` adds loud binding errors around that shared dispatch. `producerArtifact` remains total for incomplete producers. Prompt and planning consumers use exported plan-result accessors instead of probing `PlanRecord.results`.

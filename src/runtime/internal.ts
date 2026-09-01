@@ -5,6 +5,7 @@ import type { ArtifactStore } from "./artifact-store.ts";
 import type { DeliveryCoordinator } from "./delivery.ts";
 import type { FrozenSources } from "./workflow-definition.ts";
 import type { RunnerRegistry } from "./registry.ts";
+import type { SettleGuard } from "./settle-guard.ts";
 import type { ActiveState, PiFacade, RunState, ToolResult, UiContext } from "./types.ts";
 
 /**
@@ -28,14 +29,7 @@ export interface CoordinatorInternals {
   isolationRunId: string | undefined;
   runtimeArtifactRoot: string | undefined;
   lastTerminal: "completed" | "aborted" | undefined;
-  // Settle-guard bookkeeping (see settle-guard.ts): whether an agent run started
-  // since the last delivery, whether it made an engine-accepted transition, and
-  // the bounded stall episode counters.
-  agentRunStarted: boolean;
-  transitionSeen: boolean;
-  stallCount: number;
-  nudgeSeq: number;
-  stalledNotified: boolean;
+  readonly settleGuard: SettleGuard;
   handleAgentStart(): void;
   readonly defaultArtifactRoot: string | undefined;
   now(): number;

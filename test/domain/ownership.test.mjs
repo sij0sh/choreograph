@@ -167,6 +167,32 @@ test("runner classification, view types, and runtime routing have one owner each
   assert.deepEqual(processLeafImporters, [join(src, "runtime", "run-driver.ts")], "only the driver dispatch consults the script-leaf payload");
 });
 
+test("a concern's reset policy lives only in its owner, and the coordinator interface shrinks", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const src = join(import.meta.dirname, "..", "..", "src");
+  // Settle-guard episode fields are assigned only inside settle-guard.ts; hosts call reset()/note*().
+  const assignment = /(agentRunStarted|transitionSeen|stallCount|nudgeSeq|stalledNotified)\s*=[^=]/;
+  const { readdirSync } = await import("node:fs");
+  const violators = [];
+  const scan = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) scan(path);
+      else if (entry.name.endsWith(".ts") && path.replace(/\\/g, "/").endsWith("settle-guard.ts") === false && assignment.test(readFileSync(path, "utf8"))) {
+        violators.push(path);
+      }
+    }
+  };
+  scan(join(src, "runtime"));
+  assert.deepEqual(violators, [], "concern fields are assigned only by their owner");
+  // The shared delegate interface only shrinks (R4, increment 1: settle-guard).
+  const internal = readFileSync(join(src, "runtime", "internal.ts"), "utf8");
+  const block = internal.slice(internal.indexOf("export interface CoordinatorInternals"), internal.indexOf("\n}", internal.indexOf("export interface CoordinatorInternals")));
+  const memberCount = block.split("\n").filter((line) => /^  [a-zA-Z]/.test(line)).length;
+  assert.ok(memberCount <= 38, `CoordinatorInternals member count must be non-increasing (now ${memberCount})`);
+});
+
 test("the model-facing transition prompt derives its enumerations", () => {
   const wf = workflow([task("frame")]);
   const state = start(wf, { runId: "r1" }).state;
