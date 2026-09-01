@@ -15,7 +15,7 @@ import { LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { SnapshotByteBudgetReached, SnapshotCapReached, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
 import { activeSnapshot, deliveredTombstone, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
-import { effectiveTools, CONTROL_TOOLS } from "./capabilities.ts";
+import { effectiveTools, CONTROL_TOOLS, RETRY_TOOL_NAME } from "./capabilities.ts";
 import { readBlockFrom, renderPositionEnvelope, renderReportEnvelope, rosterPrompt } from "./prompts.ts";
 import { createContextIsolator, type IsolatableMessage } from "./isolation.ts";
 import {
@@ -198,7 +198,7 @@ export class RuntimeCoordinator {
     });
   }
 
-  private readonly isWorkflowTool = (name: string): boolean => [START_TOOL_NAME, ...CONTROL_TOOLS].includes(name);
+  private readonly isWorkflowTool = (name: string): boolean => [START_TOOL_NAME, ...CONTROL_TOOLS, RETRY_TOOL_NAME].includes(name);
   private readonly knownTools = (): string[] => this.pi.getAllTools?.().map((tool) => tool.name) ?? this.pi.getActiveTools();
   private readonly captureBaseline = (): string[] => this.pi.getActiveTools().filter((name) => !this.isWorkflowTool(name));
 

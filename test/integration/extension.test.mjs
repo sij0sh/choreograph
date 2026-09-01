@@ -79,6 +79,16 @@ test("registration exposes commands and exactly four workflow tools", () => {
   assert.equal(ext.tools.get("workflow_start").parameters.properties.name.enum.length, 1);
 });
 
+test("workflow_retry stays hidden unless the run is parked at a failed script", async () => {
+  const ext = buildExtension(LEGACY);
+  const ctx = ext.ctx();
+  ext.handlers.get("session_start")(undefined, ctx);
+  assert.ok(![...ext.activeTools].includes("workflow_retry"), "idle sessions never see workflow_retry");
+  await ext.tools.get("workflow_start").execute("id", { name: "demo-run", target: "t" }, undefined, () => {}, ctx);
+  await settle(ext.handlers, ctx);
+  assert.ok(![...ext.activeTools].includes("workflow_retry"), "task positions never see workflow_retry");
+});
+
 test("workflow_start defaults a blank target to the entire project", async () => {
   const ext = buildExtension(LEGACY);
   const ctx = ext.ctx();

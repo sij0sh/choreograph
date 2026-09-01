@@ -108,9 +108,9 @@ export function restoreRun(c: CoordinatorInternals, ctx: UiContext): void {
     execution: migrated.execution,
     delivered: snapshot.delivered,
   };
-  c.baselineTools = snapshot.baselineTools
-    ? [...snapshot.baselineTools]
-    : c.knownTools().filter((name) => !c.isWorkflowTool(name));
+  // Snapshots written before workflow_retry was gated may carry it in baselineTools.
+  c.baselineTools = (snapshot.baselineTools ?? c.knownTools())
+    .filter((name) => !c.isWorkflowTool(name));
   c.isolationRunId = state.execution.runId;
   c.adoptActive(state, ctx);
   ctx.ui.notify(`Resumed ${workflow.title} run \`${state.execution.runId}\` at ${state.execution.stack.at(-1)?.key}.`, "info");
