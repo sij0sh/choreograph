@@ -66,6 +66,7 @@ function spyAgentRunner() {
     cancels,
     get kind() { return inner.kind; },
     get retrySafety() { return inner.retrySafety; },
+    get executesOn() { return inner.executesOn; },
     execute(invocation, spec, ctx) {
       invocations.push(invocation);
       return inner.execute(invocation, spec, ctx);
@@ -298,6 +299,7 @@ test("the registry settles agent invocations with the real outcome, not a fabric
   runtime.registry.register({
     kind: "agent",
     retrySafety: "idempotent",
+    executesOn: "model",
     execute: (invocation, spec, ctx) => real.execute(invocation, spec, ctx),
     settle: (key, result) => {
       settled.push([key, result]);
@@ -350,6 +352,7 @@ function manualAgentRunner() {
     pending,
     kind: "agent",
     retrySafety: "idempotent",
+    executesOn: "model",
     execute(invocation) {
       return new Promise((resolve) => pending.set(invocation.key, resolve));
     },
@@ -423,6 +426,7 @@ test("a script exit resolving during abort commits exactly one terminal snapshot
   runtime.registry.register({
     kind: "process",
     retrySafety: "at-least-once",
+    executesOn: "runtime",
     execute(invocation) {
       return new Promise((resolve) => pending.set(invocation.key, resolve));
     },

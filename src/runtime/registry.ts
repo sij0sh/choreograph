@@ -1,4 +1,7 @@
 import type { Invocation, RunnerSpec } from "../domain/invocation.ts";
+import type { Run } from "../domain/run.ts";
+import type { Workflow } from "../domain/workflow.ts";
+import { runnerOfLeaf } from "../engine/interpreter.ts";
 import type { NodeResult, Runner, RunnerContext } from "./runner.ts";
 
 export type RunnerKind = Invocation["runner"];
@@ -44,6 +47,13 @@ export class RunnerRegistry {
     const runner = this.runners.get(kind);
     if (!runner) throw new Error(`no runner registered for "${kind}" invocations`);
     return runner;
+  }
+
+  /** True when the run's current leaf executes in the runtime; derived from each runner's declared execution mode, never a kind list. */
+  executesCurrentLeaf(workflow: Workflow, state: Run): boolean {
+    const leaf = state.stack[state.stack.length - 1];
+    if (!leaf) return false;
+    return this.runnerFor(runnerOfLeaf(workflow, leaf)).executesOn === "runtime";
   }
 
   dispatch(invocation: Invocation, spec: RunnerSpec, inputs?: RunnerContext["inputs"], options?: DispatchOptions): DispatchHandle {

@@ -26,6 +26,8 @@ export interface NodeResult {
 export interface Runner {
   readonly kind: RunnerKind;
   readonly retrySafety: "at-least-once" | "idempotent";
+  /** Where the runner's dispatches execute; the runtime-leaf routing predicate derives from this declaration. */
+  readonly executesOn: "model" | "runtime";
   execute(invocation: Invocation, spec: RunnerSpec, ctx: RunnerContext): Promise<NodeResult>;
   cancel?(invocation: Invocation): void;
 }
@@ -33,6 +35,7 @@ export interface Runner {
 export class ProcessRunner implements Runner {
   readonly kind = "process" as const;
   readonly retrySafety = "at-least-once" as const;
+  readonly executesOn = "runtime" as const;
 
   execute(invocation: Invocation, spec: RunnerSpec, ctx: RunnerContext): Promise<NodeResult> {
     if (spec.runner !== "process") return Promise.resolve({ status: "failed", reason: `ProcessRunner does not run ${spec.runner} specs` });
@@ -64,6 +67,7 @@ export class ProcessRunner implements Runner {
 export class AgentRunner implements Runner {
   readonly kind = "agent" as const;
   readonly retrySafety = "idempotent" as const;
+  readonly executesOn = "model" as const;
   private readonly awaiting = new Map<string, { readonly result: Promise<NodeResult>; readonly resolve: (result: NodeResult) => void }>();
 
   execute(invocation: Invocation, spec: RunnerSpec, _ctx: RunnerContext): Promise<NodeResult> {

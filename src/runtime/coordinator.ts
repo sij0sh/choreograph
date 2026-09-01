@@ -210,7 +210,7 @@ export class RuntimeCoordinator {
       const idle = [...this.baselineTools];
       return this.visibleWorkflows.length ? [...idle, START_TOOL_NAME] : idle;
     }
-    const active = effectiveTools(state.workflow, state.execution, this.baselineTools);
+    const active = effectiveTools(state.workflow, state.execution, this.baselineTools, this.registry);
     const registered = new Set(this.knownTools());
     const names = active.filter((name) => registered.has(name) || CONTROL_TOOLS.includes(name));
     // A paused run keeps abort; transition and retry return only after a resume.

@@ -21,6 +21,7 @@ test("both runners satisfy one shared contract", () => {
   for (const runner of [new AgentRunner(), new ProcessRunner()]) {
     assert.ok(["agent", "process"].includes(runner.kind), "runner declares its kind");
     assert.ok(["at-least-once", "idempotent"].includes(runner.retrySafety), "runner declares retry safety");
+    assert.ok(["model", "runtime"].includes(runner.executesOn), "runner declares its execution mode");
     assert.equal(typeof runner.execute, "function");
   }
 });

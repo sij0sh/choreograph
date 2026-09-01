@@ -50,6 +50,12 @@ The spec owns statuses, top-level fields, checkpoint fields, required fields, co
 
 `src/engine/outcome.ts` owns `TaskOutcome`, the engine's discriminated semantic union. `src/engine/interpreter.ts` re-exports it. Runtime modules import it instead of restating its structure.
 
+`src/engine/outcome.ts` owns `TaskOutcome`, the engine's discriminated semantic union. `src/engine/interpreter.ts` re-exports it. Runtime modules import it instead of restating its structure.
+
+## Runner routing
+
+`src/engine/interpreter.ts` owns the leaf-to-runner classification (`runnerOfLeaf`); no other module defines it. Each runner declares its execution mode (`executesOn: "model" | "runtime"`), and `RunnerRegistry.executesCurrentLeaf` answers whether the run's current leaf executes in the runtime from those declarations - never from a runner-kind list. The workflow UI derives runner identity from the classifier or the persisted invocation, and its view type uses `RunnerKind`, not literal runner unions. `processLeafAt` stays the script-leaf payload for the driver's dispatch.
+
 ## Run lifecycle
 
 `src/domain/run.ts` owns `RunLifecycleStatus` and the lifecycle roles table (`lifecycleRoles`): the live and abortable answers per status. `src/runtime/types.ts` maps the coordinator's `RunState` onto that table (`runStateRoles`, `liveRunState`, `runPayloadState`); runtime modules ask those helpers instead of comparing run-state status literals, and the session-lifecycle vocabulary never appears below the runtime layer.

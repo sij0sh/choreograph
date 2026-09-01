@@ -1,6 +1,6 @@
 import { frameAttempt, isAttemptBearingFrame, upsertInvocation, type Run } from "../domain/run.ts";
+import { runnerOfLeaf } from "../engine/interpreter.ts";
 import { LIMITS } from "../domain/limits.ts";
-import { processLeafAt } from "../engine/interpreter.ts";
 import { terminalSnapshot } from "../persistence/snapshot.ts";
 import { SnapshotByteBudgetReached, SnapshotCapReached, WorkflowStorageError } from "../persistence/store.ts";
 import { renderReportEnvelope, summaryMessage } from "./prompts.ts";
@@ -36,13 +36,12 @@ export async function runAbort(c: CoordinatorInternals, signal: AbortSignal | un
       };
     }
     const active = c.state;
-    const process = processLeafAt(active.workflow, active.execution);
     const leaf = active.execution.stack[active.execution.stack.length - 1];
     const execution = leaf && isAttemptBearingFrame(leaf)
       ? { ...active.execution, status: "aborted" as const, invocations: upsertInvocation(active.execution, leaf.key, {
           blockId: leaf.blockId,
           key: leaf.key,
-          runner: process ? "process" : "agent",
+          runner: runnerOfLeaf(active.workflow, leaf),
           status: "canceled",
           attempt: frameAttempt(leaf),
         }) }

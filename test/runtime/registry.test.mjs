@@ -100,3 +100,14 @@ test("re-dispatching an at-least-once runner requires an explicit retry acknowle
   assert.equal(reg.complete("root/frame", { status: "succeeded" }), true, "idempotent runners re-dispatch without an acknowledgment");
   assert.deepEqual(await handle.result, { status: "succeeded" });
 });
+
+test("runtime-executed routing derives from the runners' declared execution modes", async () => {
+  const { start } = await import("../../src/engine/interpreter.ts");
+  const { script, task, workflow } = await import("../engine/helpers.mjs");
+  const reg = registry();
+  const scriptRun = workflow([script("go")]);
+  assert.equal(reg.executesCurrentLeaf(scriptRun, start(scriptRun, { runId: "r1" }).state), true, "a script leaf executes in the runtime");
+  const taskRun = workflow([task("step")]);
+  assert.equal(reg.executesCurrentLeaf(taskRun, start(taskRun, { runId: "r2" }).state), false, "an agent leaf executes in the model");
+  assert.equal(reg.executesCurrentLeaf(taskRun, { ...start(taskRun, { runId: "r3" }).state, stack: [] }), false, "no leaf, no routing");
+});

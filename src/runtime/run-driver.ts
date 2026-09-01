@@ -10,7 +10,7 @@ import {
   type Run,
   upsertInvocation,
 } from "../domain/run.ts";
-import { processLeafAt, transition as engineTransition, type TaskOutcome } from "../engine/interpreter.ts";
+import { processLeafAt, runnerOfLeaf, transition as engineTransition, type TaskOutcome } from "../engine/interpreter.ts";
 import { activeSnapshot } from "../persistence/snapshot.ts";
 import { withinMemoryBound, SnapshotByteBudgetReached, SnapshotCapReached, WorkflowStorageError } from "../persistence/store.ts";
 import { resolveScriptInputs } from "./artifacts.ts";
@@ -26,15 +26,15 @@ import { liveRunState } from "./types.ts";
 export async function deliverPending(c: CoordinatorInternals): Promise<void> {
   const pending = liveRunState(c.state);
   if (c.suppressDelivery || !pending || pending.delivered) return;
-  const process = processLeafAt(pending.workflow, pending.execution);
-  if (process && !isParked(pending.execution)) return;
+  const runtimeExecuted = c.registry.executesCurrentLeaf(pending.workflow, pending.execution);
+  if (runtimeExecuted && !isParked(pending.execution)) return;
   const leaf = pending.execution.stack[pending.execution.stack.length - 1];
-  const message = process && isParked(pending.execution)
+  const message = runtimeExecuted && leaf
     ? [
         controlMessage(pending.execution),
         "",
         "The process at this position failed and the run is parked here.",
-        `Last failure: ${pending.execution.checkpoints[process.key]?.summary ?? "unavailable"}.`,
+        `Last failure: ${pending.execution.checkpoints[leaf.key]?.summary ?? "unavailable"}.`,
         "Fix the cause if needed, then call `workflow_retry` to re-run the process, or `workflow_abort` to stop the run.",
       ].join("\n")
     : controlMessage(pending.execution);
@@ -65,7 +65,7 @@ async function parkOnDispatchFailure(
   const base = current.execution.invocations?.[processKey] ?? {
     blockId: leaf?.blockId ?? processKey,
     key: processKey,
-    runner: "process" as const,
+    runner: leaf ? runnerOfLeaf(current.workflow, leaf) : "process",
     attempt,
   };
   const run: Run = {
@@ -82,7 +82,7 @@ export function dispatchAgent(c: CoordinatorInternals, active: ActiveState, leaf
   const invocation = active.execution.invocations?.[leaf.key] ?? {
     blockId: leaf.blockId,
     key: leaf.key,
-    runner: "agent" as const,
+    runner: runnerOfLeaf(active.workflow, leaf),
     status: "running" as const,
     attempt: frameAttempt(leaf),
   };
@@ -129,7 +129,7 @@ export function publishLogs(c: CoordinatorInternals, runId: string, key: string,
 }
 
 export async function drive(c: CoordinatorInternals, active: ActiveState, ctx: UiContext, rerun = false): Promise<Run> {
-  if (!rerun && processLeafAt(active.workflow, active.execution) && isParked(active.execution)) {
+  if (!rerun && c.registry.executesCurrentLeaf(active.workflow, active.execution) && isParked(active.execution)) {
     await deliverPending(c);
     return active.execution;
   }
@@ -164,7 +164,7 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
       }
       if (fence.status === "dead" && attempt < LIMITS.nodeAttempts + 1) attempt += 1;
     }
-    const invocation = { ...(recorded ?? { blockId: process.blockId, key: processKey, runner: "process" as const, attempt }), status: "running" as const, attempt };
+    const invocation = { ...(recorded ?? { blockId: process.blockId, key: processKey, runner: leaf ? runnerOfLeaf(current.workflow, leaf) : "process", attempt }), status: "running" as const, attempt };
     const store = c.artifactStoreFor(current.workflow, current.execution.runId);
     const sink = store.sinkFor(processKey);
     const resolved = resolveScriptInputs(

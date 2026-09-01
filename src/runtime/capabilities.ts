@@ -1,14 +1,14 @@
 import { currentPosition } from "../engine/position.ts";
-import { processLeafAt } from "../engine/interpreter.ts";
 import type { Run } from "../domain/run.ts";
 import type { Workflow } from "../domain/workflow.ts";
+import type { RunnerRegistry } from "./registry.ts";
 
 export const TRANSITION_TOOL_NAME = "workflow_transition";
 export const ABORT_TOOL_NAME = "workflow_abort";
 export const RETRY_TOOL_NAME = "workflow_retry";
 export const CONTROL_TOOLS: readonly string[] = [TRANSITION_TOOL_NAME, ABORT_TOOL_NAME];
 
-export function effectiveTools(workflow: Workflow, state: Run, baseline: readonly string[]): string[] {
+export function effectiveTools(workflow: Workflow, state: Run, baseline: readonly string[], registry: RunnerRegistry): string[] {
   let tools = [...baseline];
   if (workflow.tools) {
     const ceiling = new Set(workflow.tools);
@@ -27,6 +27,6 @@ export function effectiveTools(workflow: Workflow, state: Run, baseline: readonl
     }
   }
   const names = [...new Set([...tools, ...CONTROL_TOOLS])];
-  if (processLeafAt(workflow, state)) names.push(RETRY_TOOL_NAME);
+  if (registry.executesCurrentLeaf(workflow, state)) names.push(RETRY_TOOL_NAME);
   return names;
 }

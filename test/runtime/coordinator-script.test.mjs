@@ -309,7 +309,7 @@ test("workflow_retry rejects while a script is still in flight", async () => {
   const snapshotsBefore = h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").length;
   const result = await runtime.retry(undefined, h.ctx);
   assert.ok(result.isError, "the mid-flight retry is rejected");
-  assert.match(result.content[0].text, /parked at a failed script/, "the rejection states the parked precondition");
+  assert.match(result.content[0].text, /parked at a failed runtime-executed step/, "the rejection states the parked precondition");
   assert.equal(result.details.status, "not-script");
   assert.equal(
     h.entries.filter((entry) => entry.customType === "choreograph" && entry.data.status === "active").length,

@@ -1,7 +1,9 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { isAttemptBearingFrame, type Run, type Frame, type RunLifecycleStatus } from "../domain/run.ts";
-import { blockOf, type Block, type Workflow } from "../domain/workflow.ts";
+import { isAttemptBearingFrame, type Run, type RunLifecycleStatus } from "../domain/run.ts";
+import type { RunnerKind } from "../domain/invocation.ts";
+import { type Block, type Workflow } from "../domain/workflow.ts";
+import { runnerOfLeaf } from "../engine/interpreter.ts";
 
 /** Persistent view selector; `inspect` exists only for the on-demand panel. */
 export type WorkflowUiMode = "off" | "compact" | "detailed";
@@ -44,7 +46,7 @@ export type WorkflowView = {
   readonly phases: readonly PhaseView[];
   readonly current?: {
     readonly path: string;
-    readonly runner: "agent" | "process";
+    readonly runner: RunnerKind;
     readonly attempt: number;
     readonly loop?: { readonly iteration: number; readonly total: number };
     readonly plan?: { readonly completed: number; readonly total: number };
@@ -74,11 +76,6 @@ function clipText(value: string, maxBytes: number): string {
 
 function stripKeyPrefix(rootId: string, key: string): string {
   return key === rootId || !key.startsWith(`${rootId}/`) ? key : key.slice(rootId.length + 1);
-}
-
-function runnerOfLeaf(workflow: Workflow, leaf: Frame | undefined): "agent" | "process" {
-  if (leaf?.kind === "task") return blockOf(workflow, leaf.blockId)?.kind === "script" ? "process" : "agent";
-  return "agent";
 }
 
 /**

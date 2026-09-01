@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { effectiveTools, CONTROL_TOOLS } from "../../src/runtime/capabilities.ts";
+import { RunnerRegistry } from "../../src/runtime/registry.ts";
+import { AgentRunner, ProcessRunner } from "../../src/runtime/runner.ts";
 import { readBlockFrom, renderPositionEnvelope, renderReportEnvelope, rosterPrompt, controlMessage } from "../../src/runtime/prompts.ts";
 import { completed, cp, loop, sequence, task, workflow } from "../engine/helpers.mjs";
 import { start, transition as engineTransition } from "../../src/engine/interpreter.ts";
@@ -32,8 +34,10 @@ function memFs(files, hooks = {}) {
   };
 }
 
+const registry = new RunnerRegistry([new AgentRunner(), new ProcessRunner()]);
+
 function toolsFor(wf, state, baseline = BASE) {
-  return effectiveTools(wf, state, baseline);
+  return effectiveTools(wf, state, baseline, registry);
 }
 
 test("capabilities intersect workflow and task ceilings with the baseline", () => {

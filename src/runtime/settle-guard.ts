@@ -1,5 +1,4 @@
 import { frameAttempt, isAgentDispatchFrame } from "../domain/run.ts";
-import { processLeafAt } from "../engine/interpreter.ts";
 import { LIMITS } from "../domain/limits.ts";
 import { controlMessage } from "./prompts.ts";
 import type { ActiveState, UiContext } from "./types.ts";
@@ -33,7 +32,7 @@ export async function guardSettled(c: CoordinatorInternals, ctx: UiContext): Pro
     leaf
     && isAgentDispatchFrame(leaf)
     && active.delivered
-    && !processLeafAt(active.workflow, active.execution),
+    && !c.registry.executesCurrentLeaf(active.workflow, active.execution),
   );
   if (!stalled) {
     c.agentRunStarted = false;

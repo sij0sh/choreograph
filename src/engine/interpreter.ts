@@ -168,15 +168,16 @@ export function processLeafAt(workflow: Workflow, state: Run): ProcessLeaf | und
   return { key: staticLeaf.key, blockId: staticLeaf.block.id, script: staticLeaf.block.script, ...(staticLeaf.block.inputs ? { inputs: staticLeaf.block.inputs } : {}) };
 }
 
-function runnerOfLeaf(workflow: Workflow, state: Run, leaf: Frame): RunnerKind {
-  if (leaf.kind === "task") return blockOf(workflow, leaf.blockId)?.kind === "script" ? "process" : "agent";
-  return "agent";
+/** The one leaf-to-runner classification; consumers import it instead of restating the rule. */
+export function runnerOfLeaf(workflow: Workflow, leaf: Frame): RunnerKind {
+  return leaf.kind === "task" && blockOf(workflow, leaf.blockId)?.kind === "script" ? "process" : "agent";
 }
+
 export function enterInvocation(workflow: Workflow, state: Run, leaf: Frame, status: InvocationStatus = "running", attempt?: number): Run {
   const invocation: Invocation = {
     blockId: leaf.blockId,
     key: leaf.key,
-    runner: runnerOfLeaf(workflow, state, leaf),
+    runner: runnerOfLeaf(workflow, leaf),
     status,
     attempt: attempt ?? frameAttempt(leaf),
   };

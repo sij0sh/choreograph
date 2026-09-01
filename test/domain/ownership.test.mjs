@@ -140,6 +140,33 @@ test("session-lifecycle status literals never leak below the runtime layer", asy
   assert.deepEqual(violations, [], "only the runtime and persistence layers may branch on session lifecycle states");
 });
 
+test("runner classification, view types, and runtime routing have one owner each", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const src = join(import.meta.dirname, "..", "..", "src");
+  const read = (file) => readFileSync(join(src, file), "utf8");
+  // The engine module owns leaf-to-runner classification; no other module defines it.
+  const definers = ["engine/interpreter.ts", "runtime/workflow-ui.ts"]
+    .filter((file) => /function runnerOfLeaf/.test(read(file)));
+  assert.deepEqual(definers, ["engine/interpreter.ts"]);
+  // View types use RunnerKind, not literal runner unions.
+  assert.ok(!read("runtime/workflow-ui.ts").includes('"agent" | "process"'), "the view type derives from RunnerKind");
+  // Runtime-executed routing is answered by the owned predicate; processLeafAt stays in the driver's dispatch payload.
+  const { readdirSync } = await import("node:fs");
+  const processLeafImporters = [];
+  const scan = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) scan(path);
+      else if (entry.name.endsWith(".ts") && /from "[^\"]*interpreter\.ts"/.test(readFileSync(path, "utf8")) && /processLeafAt/.test(readFileSync(path, "utf8"))) {
+        processLeafImporters.push(path);
+      }
+    }
+  };
+  scan(join(src, "runtime"));
+  assert.deepEqual(processLeafImporters, [join(src, "runtime", "run-driver.ts")], "only the driver dispatch consults the script-leaf payload");
+});
+
 test("the model-facing transition prompt derives its enumerations", () => {
   const wf = workflow([task("frame")]);
   const state = start(wf, { runId: "r1" }).state;
