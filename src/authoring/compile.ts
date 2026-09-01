@@ -3,7 +3,7 @@ import { statSync } from "node:fs";
 import { dirname, relative } from "node:path";
 import { canonicalJson, type JsonValue } from "../domain/json.ts";
 import { LIMITS } from "../domain/limits.ts";
-import { workflowBlocks, type Block, type TaskBlock, type Workflow } from "../domain/workflow.ts";
+import { workflowBlocks, instructionFileOf, type Block, type TaskBlock, type Workflow } from "../domain/workflow.ts";
 
 type InstructionReader = (path: string) => string | undefined;
 
@@ -52,7 +52,8 @@ export function freezeDefinition(workflow: Workflow, read: InstructionReader, wo
   add(workflow.overviewPath, "workflow overview file");
   for (const operator of workflow.operators.values()) add(operator.path, `operator ${operator.id} file`);
   for (const block of workflowBlocks(workflow)) {
-    if (block.kind === "task") add(block.instructionPath, `task ${block.id} instruction file`);
+    const instruction = instructionFileOf(block);
+    if (instruction) add(instruction, `task ${block.id} instruction file`);
   }
   const convert = (block: Block): Block => {
     if (block.kind === "sequence") return { ...block, children: block.children.map(convert) };

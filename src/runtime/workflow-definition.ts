@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { dirname, relative } from "node:path";
 import { freezeDefinition, type WorkflowDefinition } from "../authoring/compile.ts";
-import { workflowBlocks, type Workflow } from "../domain/workflow.ts";
+import { workflowBlocks, instructionFileOf, type Workflow } from "../domain/workflow.ts";
 import { readBlockFrom } from "./prompts.ts";
 
 /** A workflow definition failed strict compilation (for example, a required file is unreadable); the run must not start. */
@@ -58,7 +58,8 @@ export class FrozenSources {
     set(workflow.overviewPath);
     for (const operator of workflow.operators.values()) set(operator.path);
     for (const block of workflowBlocks(workflow)) {
-      if (block.kind === "task") set(block.instructionPath);
+      const instruction = instructionFileOf(block);
+      if (instruction) set(instruction);
     }
   }
 

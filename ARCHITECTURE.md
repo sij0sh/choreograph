@@ -32,7 +32,8 @@ The driver projection intentionally differs from the leaf projection. A plan-exe
 
 `src/domain/workflow.ts` owns the `Block` union, `BLOCK_KIND_KEYS`, and block-role classifiers.
 
-- `BLOCK_KIND_KEYS` owns top-level authoring-key membership.
+- `BLOCK_KIND_KEYS` owns top-level authoring-key membership, and `BLOCK_KIND_DISCRIMINATORS` owns the per-kind selecting key (compile-linked to those key lists). The parser derives its rejection logic and kind selection from them.
+- `instructionFileOf` answers which blocks contribute instruction files; `scriptCwdOf` answers which blocks declare a script working directory; `isToolsBearingBlock` answers which blocks may declare a tools list. Consumers query these projections instead of restating kind checks.
 - `src/authoring/parser.ts` owns parsing flow and error messages.
 - Role classifiers stay separate from the key registry.
 - README grammar remains hand-maintained documentation.

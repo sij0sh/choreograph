@@ -2,7 +2,7 @@ import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { LIMITS } from "../domain/limits.ts";
 import { runMarkerState } from "./run-marker.ts";
-import { workflowBlocks, type Workflow } from "../domain/workflow.ts";
+import { workflowBlocks, scriptCwdOf, type Workflow } from "../domain/workflow.ts";
 
 export interface SweepOutcome {
   readonly evicted: readonly string[];
@@ -154,8 +154,8 @@ function materializeDirs(workflow: Workflow, root: string): readonly string[] {
   const workflowDir = dirname(workflow.overviewPath);
   if (!isAbsolute(workflowDir)) return [...dirs];
   for (const block of workflowBlocks(workflow)) {
-    if (block.kind !== "script") continue;
-    dirs.add(join(resolve(workflowDir, block.script.cwd), ".choreograph", "artifacts"));
+    const cwd = scriptCwdOf(block);
+    if (cwd) dirs.add(join(resolve(workflowDir, cwd), ".choreograph", "artifacts"));
   }
   return [...dirs];
 }

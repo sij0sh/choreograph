@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import type { Workflow } from "../domain/workflow.ts";
+import { isToolsBearingBlock, type Workflow } from "../domain/workflow.ts";
 import { workflowBlocks } from "../domain/workflow.ts";
 import { countSnapshotEntries, latestSnapshot, snapshotBytesInBranch } from "../persistence/store.ts";
 import { validateAgainstWorkflow } from "../persistence/validate-stored-run.ts";
@@ -12,8 +12,8 @@ import type { CoordinatorInternals } from "./internal.ts";
 
 function blocksWithTools(workflow: Workflow): readonly (readonly string[])[] {
   return workflowBlocks(workflow)
-    .filter((block) => block.kind === "task" && block.tools)
-    .map((block) => (block as { tools: readonly string[] }).tools ?? []);
+    .filter(isToolsBearingBlock)
+    .map((block) => block.tools ?? []);
 }
 
 export function startSession(c: CoordinatorInternals, ctx: UiContext): { unknownTools: string[] } {

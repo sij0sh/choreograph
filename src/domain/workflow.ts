@@ -91,26 +91,37 @@ export const BLOCK_KIND_KEYS = {
   loop: ["id", "for_each", "inputs", "when"],
 } as const satisfies Record<AuthoredBlockKind, readonly string[]>;
 
+/** The top-level key whose presence selects each grammar; each one is a member of its kind's own keys. */
+export const BLOCK_KIND_DISCRIMINATORS = {
+  task: "run",
+  plan: "plan",
+  script: "script",
+  loop: "for_each",
+} as const satisfies { [K in AuthoredBlockKind]: (typeof BLOCK_KIND_KEYS)[K][number] };
+
+export const STEP_DISCRIMINATORS = Object.values(BLOCK_KIND_DISCRIMINATORS);
+
 type BlockRoles = {
   readonly guardBearing: boolean;
   readonly agentFacing: boolean;
   readonly restorable: boolean;
   readonly bindable: boolean;
   readonly checkpointContract: boolean;
+  readonly toolsBearing: boolean;
 };
 
 function blockRoles(block: Block): BlockRoles {
   switch (block.kind) {
     case "task":
-      return { guardBearing: true, agentFacing: true, restorable: true, bindable: true, checkpointContract: true };
+      return { guardBearing: true, agentFacing: true, restorable: true, bindable: true, checkpointContract: true, toolsBearing: true };
     case "plan":
-      return { guardBearing: true, agentFacing: true, restorable: true, bindable: true, checkpointContract: false };
+      return { guardBearing: true, agentFacing: true, restorable: true, bindable: true, checkpointContract: false, toolsBearing: false };
     case "script":
-      return { guardBearing: true, agentFacing: false, restorable: true, bindable: true, checkpointContract: true };
+      return { guardBearing: true, agentFacing: false, restorable: true, bindable: true, checkpointContract: true, toolsBearing: false };
     case "loop":
-      return { guardBearing: true, agentFacing: false, restorable: true, bindable: true, checkpointContract: false };
+      return { guardBearing: true, agentFacing: false, restorable: true, bindable: true, checkpointContract: false, toolsBearing: false };
     case "sequence":
-      return { guardBearing: false, agentFacing: false, restorable: false, bindable: false, checkpointContract: false };
+      return { guardBearing: false, agentFacing: false, restorable: false, bindable: false, checkpointContract: false, toolsBearing: false };
     default: {
       const exhaustive: never = block;
       return exhaustive;
@@ -140,6 +151,20 @@ export function isCheckpointContractBlock(block: Block): block is CheckpointCont
 
 export function isTaskFrameBlock(block: Block): block is TaskFrameBlock {
   return isCheckpointContractBlock(block);
+}
+
+export function isToolsBearingBlock(block: Block): block is TaskBlock {
+  return blockRoles(block).toolsBearing;
+}
+
+/** The instruction file a block contributes to the frozen definition, if any; membership is answered here, not re-derived per traversal. */
+export function instructionFileOf(block: Block): string | undefined {
+  return block.kind === "task" ? block.instructionPath : undefined;
+}
+
+/** The working directory a block's script declares, if any; retention and dispatch answer through here. */
+export function scriptCwdOf(block: Block): string | undefined {
+  return block.kind === "script" ? block.script.cwd : undefined;
 }
 
 export interface OperatorDescriptor {

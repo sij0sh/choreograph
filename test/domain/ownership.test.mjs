@@ -8,12 +8,17 @@ import {
   isStructuralFrame,
 } from "../../src/domain/run.ts";
 import {
+  BLOCK_KIND_DISCRIMINATORS,
   BLOCK_KIND_KEYS,
+  STEP_DISCRIMINATORS,
+  instructionFileOf,
   isAgentFacingBlock,
   isBindableBlock,
   isCheckpointContractBlock,
   isGuardBearingBlock,
   isRestorableBlock,
+  isToolsBearingBlock,
+  scriptCwdOf,
 } from "../../src/domain/workflow.ts";
 import { BOUNDARY_CHECKPOINT_FIELDS, TRANSITION_SHAPE } from "../../src/domain/checkpoint.ts";
 import { FRAME_KINDS, NODE_STATUSES, RUNNER_KINDS } from "../../src/persistence/snapshot.ts";
@@ -43,18 +48,60 @@ test("frame roles have one exhaustive truth table", () => {
 test("block keys and roles are owned beside the Block union", () => {
   assert.deepEqual(Object.keys(BLOCK_KIND_KEYS), ["task", "plan", "script", "loop"]);
   const cases = [
-    [{ kind: "task" }, true, true, true, true, true],
-    [{ kind: "plan" }, true, true, true, true, false],
-    [{ kind: "script" }, true, false, true, true, true],
-    [{ kind: "loop" }, true, false, true, true, false],
-    [{ kind: "sequence" }, false, false, false, false, false],
+    [{ kind: "task" }, true, true, true, true, true, true],
+    [{ kind: "plan" }, true, true, true, true, false, false],
+    [{ kind: "script" }, true, false, true, true, true, false],
+    [{ kind: "loop" }, true, false, true, true, false, false],
+    [{ kind: "sequence" }, false, false, false, false, false, false],
   ];
-  for (const [block, guard, agent, restore, bind, contract] of cases) {
+  for (const [block, guard, agent, restore, bind, contract, tools] of cases) {
     assert.equal(isGuardBearingBlock(block), guard, block.kind);
     assert.equal(isAgentFacingBlock(block), agent, block.kind);
     assert.equal(isRestorableBlock(block), restore, block.kind);
     assert.equal(isBindableBlock(block), bind, block.kind);
     assert.equal(isCheckpointContractBlock(block), contract, block.kind);
+    assert.equal(isToolsBearingBlock(block), tools, block.kind);
+  }
+});
+
+test("BLOCK_KIND_KEYS is the only source of authoring keys and per-kind discriminators", () => {
+  const discriminators = Object.entries(BLOCK_KIND_DISCRIMINATORS);
+  assert.deepEqual(discriminators.map(([, key]) => key), ["run", "plan", "script", "for_each"]);
+  for (const [kind, discriminator] of discriminators) {
+    assert.ok(
+      Object.values(BLOCK_KIND_KEYS[kind]).includes(discriminator),
+      `${discriminator} must be one of ${kind}'s own keys`,
+    );
+  }
+  assert.equal(new Set(discriminators.map(([, key]) => key)).size, discriminators.length, "discriminators select exactly one grammar");
+  assert.deepEqual([...STEP_DISCRIMINATORS], ["run", "plan", "script", "for_each"]);
+});
+
+test("instruction files, script cwds, and tool lists are answered by the owned projections", () => {
+  const task = { kind: "task", id: "t", instructionPath: "steps/t.md", tools: ["read"] };
+  const script = { kind: "script", id: "s", script: { argv: [], cwd: "scripts", timeoutMs: 1, acceptedExitCodes: [0], stdout: "text", stderr: "text", maxCaptureBytes: 1 } };
+  const loop = { kind: "loop", id: "l" };
+  assert.equal(instructionFileOf(task), "steps/t.md");
+  assert.equal(instructionFileOf(script), undefined);
+  assert.equal(scriptCwdOf(script), "scripts");
+  assert.equal(scriptCwdOf(task), undefined);
+  assert.equal(scriptCwdOf(loop), undefined);
+});
+
+test("kind-fact consumers import the owned projections, not hand-rolled checks", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const src = join(import.meta.dirname, "..", "..", "src");
+  const mustUse = [
+    ["authoring/parser.ts", "BLOCK_KIND_DISCRIMINATORS"],
+    ["authoring/compile.ts", "instructionFileOf"],
+    ["runtime/workflow-definition.ts", "instructionFileOf"],
+    ["runtime/session.ts", "isToolsBearingBlock"],
+    ["runtime/retention.ts", "scriptCwdOf"],
+  ];
+  for (const [file, symbol] of mustUse) {
+    const text = readFileSync(join(src, file), "utf8");
+    assert.ok(text.includes(symbol), `${file} must answer through ${symbol}`);
   }
 });
 

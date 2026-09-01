@@ -13,7 +13,7 @@ import type {
   TaskBlock,
   Workflow,
 } from "../domain/workflow.ts";
-import { BLOCK_KIND_KEYS, type AuthoredBlockKind } from "../domain/workflow.ts";
+import { BLOCK_KIND_DISCRIMINATORS, BLOCK_KIND_KEYS, STEP_DISCRIMINATORS, type AuthoredBlockKind } from "../domain/workflow.ts";
 import { compileContract } from "../domain/contract.ts";
 import { LIMITS } from "../domain/limits.ts";
 import { DEFAULT_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
@@ -273,28 +273,18 @@ function scriptStep(entry: ObjectValue, id: string, label: string, context: Comp
   };
 }
 
-const STEP_DISCRIMINATORS = ["run", "plan", "script", "for_each"] as const;
 const AUTHORED_STEP_KEYS = new Set<string>(Object.values(BLOCK_KIND_KEYS).flat());
+
+const KIND_OF_DISCRIMINATOR = new Map(
+  Object.entries(BLOCK_KIND_DISCRIMINATORS).map(([kind, key]) => [key, kind as AuthoredBlockKind]),
+);
 
 function authoredKindOf(entry: ObjectValue, label: string): AuthoredBlockKind {
   const declared = STEP_DISCRIMINATORS.filter((key) => entry[key] !== undefined);
   const effective = declared.length > 1 && declared.includes("run") ? declared.filter((key) => key !== "run") : declared;
   if (effective.length > 1) throw new Error(`${label} declares more than one of: ${effective.join(", ")}`);
-  switch (effective[0]) {
-    case "plan":
-      return "plan";
-    case "script":
-      return "script";
-    case "for_each":
-      return "loop";
-    case "run":
-    case undefined:
-      return "task";
-    default: {
-      const exhaustive: never = effective[0];
-      return exhaustive;
-    }
-  }
+  if (effective.length === 0) return "task";
+  return KIND_OF_DISCRIMINATOR.get(effective[0]) ?? "task";
 }
 
 function assertAuthoredBlockKeys(entry: ObjectValue, kind: AuthoredBlockKind, label: string): void {
