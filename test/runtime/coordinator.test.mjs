@@ -33,8 +33,12 @@ function harness(options = {}) {
     ui: {
       status: undefined,
       notices: [],
+      widgets: {},
       setStatus: (id, value) => {
         ctx.ui.status = value;
+      },
+      setWidget: (id, content, options) => {
+        ctx.ui.widgets[id] = content === undefined ? undefined : { content, options };
       },
       notify: (message, level) => ctx.ui.notices.push({ message, level }),
     },

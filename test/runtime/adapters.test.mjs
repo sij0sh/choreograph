@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { effectiveTools, CONTROL_TOOLS } from "../../src/runtime/capabilities.ts";
-import { statusValue } from "../../src/runtime/status.ts";
 import { readBlockFrom, renderPositionEnvelope, renderReportEnvelope, rosterPrompt, controlMessage } from "../../src/runtime/prompts.ts";
 import { completed, cp, loop, sequence, task, workflow } from "../engine/helpers.mjs";
 import { start, transition as engineTransition } from "../../src/engine/interpreter.ts";
@@ -69,14 +68,6 @@ test("operator ceilings narrow node positions", () => {
   assert.deepEqual(toolsFor(wf, state), ["read", ...CONTROL_TOOLS], "the inspect operator narrows to read");
   state = transition(wf, state, { type: "outcome", outcome: { status: "completed", met: ["a-done"], checkpoint: cp("a") } }).state;
   assert.deepEqual(toolsFor(wf, state), ["read", "bash", "edit", ...CONTROL_TOOLS], "the trace operator has no ceiling");
-});
-
-test("status renders the workflow name and position path", () => {
-  const wf = workflow([task("a"), sequence("s", [task("b")])]);
-  let state = start(wf, { runId: "r1" }).state;
-  assert.equal(statusValue(wf, state), "demo: a");
-  state = transition(wf, state, { type: "outcome", outcome: completed(cp("a")) }).state;
-  assert.equal(statusValue(wf, state), "demo: s/b");
 });
 
 function reader(files) {

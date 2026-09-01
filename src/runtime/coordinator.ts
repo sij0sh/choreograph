@@ -18,7 +18,15 @@ import { activeSnapshot, deliveredTombstone, SNAPSHOT_TYPE, terminalSnapshot } f
 import { effectiveTools, CONTROL_TOOLS } from "./capabilities.ts";
 import { readBlockFrom, renderPositionEnvelope, renderReportEnvelope, rosterPrompt } from "./prompts.ts";
 import { createContextIsolator, type IsolatableMessage } from "./isolation.ts";
-import { statusValue } from "./status.ts";
+import {
+  buildWorkflowView,
+  nextWorkflowUiMode,
+  renderWorkflow,
+  themePalette,
+  workflowUiModeFromEnv,
+  type WorkflowUiMode,
+  type WorkflowView,
+} from "./workflow-ui.ts";
 import { DeliveryCoordinator } from "./delivery.ts";
 import { deliverPending as deliverPendingNow, drive as driveRun, settleAgent as settleAgentNow } from "./execution-driver.ts";
 import { performRollover as performRolloverNow, prepareRollover as prepareRolloverNow } from "./rollover.ts";
@@ -35,6 +43,9 @@ export type { ActiveState, PiFacade, RunState, ToolResult, UiContext } from "./t
 import { assertNotCancelled, type CoordinatorInternals } from "./internal.ts";
 
 export const START_TOOL_NAME = "workflow_start";
+
+/** The single above-editor widget key; also the stale footer status key it replaces. */
+const WORKFLOW_UI_KEY = "choreograph";
 
 /** Used when a workflow is started without an explicit target. */
 export const DEFAULT_TARGET = "the entire project";
@@ -77,6 +88,7 @@ export class RuntimeCoordinator {
   private nudgeSeq = 0;
   private stalledNotified = false;
   private notifyCtx: { current?: UiContext } = {};
+  private workflowUiMode = workflowUiModeFromEnv(process.env.CHOREOGRAPH_TUI);
 
   constructor(pi: RuntimeCoordinator["pi"], workflows: readonly Workflow[], read?: ReturnType<typeof readBlockFrom>, defaultArtifactRoot?: string) {
     this.pi = pi;
@@ -205,10 +217,42 @@ export class RuntimeCoordinator {
     this.pi.setActiveTools(this.activeToolsFor(this.state));
   }
 
-  private showStatus(ctx: UiContext): void {
+  getWorkflowUiMode(): WorkflowUiMode {
+    return this.workflowUiMode;
+  }
+
+  setWorkflowUiMode(mode: WorkflowUiMode, ctx: UiContext): void {
+    this.workflowUiMode = mode;
+    this.showStatus(ctx);
+  }
+
+  cycleWorkflowUiMode(ctx: UiContext): WorkflowUiMode {
+    this.setWorkflowUiMode(nextWorkflowUiMode(this.workflowUiMode), ctx);
+    return this.workflowUiMode;
+  }
+
+  /** The same ephemeral view the widget renders; never stored or persisted. */
+  activeWorkflowView(): WorkflowView | undefined {
     const active = this.state.status === "active" ? this.state : undefined;
-    ctx.ui.setWidget?.("choreograph-details", undefined);
-    ctx.ui.setStatus("choreograph", active ? statusValue(active.workflow, active.execution) : undefined);
+    return active ? buildWorkflowView(active.workflow, active.execution) : undefined;
+  }
+
+  private showStatus(ctx: UiContext): void {
+    // The old footer status is stale after a reload; every refresh clears it.
+    ctx.ui.setStatus(WORKFLOW_UI_KEY, undefined);
+    const view = this.activeWorkflowView();
+    if (!view || this.workflowUiMode === "off") {
+      ctx.ui.setWidget?.(WORKFLOW_UI_KEY, undefined);
+      return;
+    }
+    const verbosity = this.workflowUiMode === "detailed" ? "detailed" as const : "compact" as const;
+    ctx.ui.setWidget?.(WORKFLOW_UI_KEY, (_tui, theme) => {
+      const palette = themePalette(theme);
+      return {
+        render: (width: number) => renderWorkflow(view, verbosity, width, palette),
+        invalidate: () => {},
+      };
+    }, { placement: "aboveEditor" });
   }
 
   private requireActive(): ActiveState {

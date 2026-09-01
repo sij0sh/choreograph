@@ -1,3 +1,5 @@
+import type { Component, TUI } from "@earendil-works/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { Execution } from "../domain/execution.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RolloverTransferV2 } from "./transfer.ts";
@@ -17,10 +19,12 @@ export type PiFacade = {
   sendUserMessage(message: string, options?: { deliverAs?: "steer" | "followUp"; expandPromptTemplates?: boolean }): void;
 };
 
+export type WidgetContent = string[] | ((tui: TUI, theme: Theme) => Component & { dispose?(): void });
+
 export type UiContext = {
   ui: {
     setStatus(id: string, value: string | undefined): void;
-    setWidget?(id: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
+    setWidget?(id: string, content: WidgetContent | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
     notify(message: string, level: "info" | "error" | "warning"): void;
   };
   cwd?: string;
