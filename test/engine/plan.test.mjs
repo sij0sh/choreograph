@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { start, transition as engineTransition, currentPosition } from "../../src/engine/interpreter.ts";
+import { start, transition as engineTransition } from "../../src/engine/interpreter.ts";
+import { currentPosition } from "../../src/engine/position.ts";
 import { sequence, task, workflow } from "./helpers.mjs";
 
 // Keyed outcomes (corr-c1): the engine requires each outcome event to carry the

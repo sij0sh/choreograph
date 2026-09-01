@@ -1,6 +1,6 @@
 import { dirname } from "node:path";
 import { LIMITS } from "../domain/limits.ts";
-import { processSpecFor } from "../domain/node.ts";
+import { processSpecFor } from "../domain/invocation.ts";
 import type { ArtifactSink } from "../domain/artifacts.ts";
 import {
   frameAttempt,

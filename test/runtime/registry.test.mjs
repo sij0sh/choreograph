@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { RunnerRegistry } from "../../src/runtime/registry.ts";
 import { AgentRunner, ProcessRunner } from "../../src/runtime/runner.ts";
-import { processSpecFor } from "../../src/domain/node.ts";
+import { processSpecFor } from "../../src/domain/invocation.ts";
 
 function registry() {
   return new RunnerRegistry([new AgentRunner(), new ProcessRunner()]);

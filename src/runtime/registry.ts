@@ -1,7 +1,7 @@
-import type { NodeInvocation, RunnerSpec } from "../domain/node.ts";
+import type { Invocation, RunnerSpec } from "../domain/invocation.ts";
 import type { NodeResult, Runner, RunnerContext } from "./runner.ts";
 
-export type RunnerKind = NodeInvocation["runner"];
+export type RunnerKind = Invocation["runner"];
 
 /** A runner whose dispatches wait for an external completion signal, such as the agent settling a position. */
 interface AwaitingRunner extends Runner {
@@ -9,7 +9,7 @@ interface AwaitingRunner extends Runner {
 }
 
 interface DispatchHandle {
-  readonly invocation: NodeInvocation;
+  readonly invocation: Invocation;
   readonly runner: Runner;
   readonly result: Promise<NodeResult>;
 }
@@ -46,7 +46,7 @@ export class RunnerRegistry {
     return runner;
   }
 
-  dispatch(invocation: NodeInvocation, spec: RunnerSpec, inputs?: RunnerContext["inputs"], options?: DispatchOptions): DispatchHandle {
+  dispatch(invocation: Invocation, spec: RunnerSpec, inputs?: RunnerContext["inputs"], options?: DispatchOptions): DispatchHandle {
     const existing = this.active.get(invocation.key);
     if (existing) return existing.handle;
     const runner = this.runnerFor(invocation.runner);

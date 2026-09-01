@@ -1,4 +1,4 @@
-import type { Checkpoint, TransitionStatus } from "../domain/checkpoint.ts";
+import type { Checkpoint } from "../domain/checkpoint.ts";
 import { checkpointErrors, validateCheckpoint } from "../domain/checkpoint.ts";
 import {
   frameAttempt,
@@ -7,46 +7,29 @@ import {
   upsertInvocation,
   type Run,
   type Frame,
-  type LoopFrame,
-  type LoopState,
-  type NodeFrame,
+  type PlanNodeFrame,
   type PlanRecord,
   type SequenceFrame,
   type TaskFrame,
 } from "../domain/run.ts";
 import { applyNeedsWork } from "./recovery.ts";
 import { contractError as contractErrorFor } from "../domain/contract.ts";
-import { ID_PATTERN, LIMITS } from "../domain/limits.ts";
-import { lastSegment, planKeyOf, scopeKey } from "../domain/keys.ts";
-import { noteCheckpointCommitted, noteCheckpointRemoved, notePlanKeyCreated, notePlanKeyRemoved } from "../domain/checkpoint-index.ts";
-import { evaluateGuard, skipReason, type GuardClause } from "../domain/guard.ts";
-import type { LoopBlock, OperatorDescriptor, PlanBlock, ScriptBlock, ScriptSpec, SequenceBlock, TaskBlock, Workflow } from "../domain/workflow.ts";
+import { LIMITS } from "../domain/limits.ts";
+import { scopeKey } from "../domain/keys.ts";
+import { noteCheckpointRemoved, notePlanKeyCreated } from "../domain/checkpoint-index.ts";
+import { evaluateGuard } from "../domain/guard.ts";
+import type { OperatorDescriptor, ScriptBlock, ScriptSpec, Workflow } from "../domain/workflow.ts";
 import { blockOf, isGuardBearingBlock } from "../domain/workflow.ts";
-import { type NodeInvocation, type NodeStatus, type RunnerKind } from "../domain/node.ts";
-import { isArtifactRef, resolveBinding, type ArtifactSinkProvider } from "../domain/artifacts.ts";
+import { type Invocation, type InvocationStatus, type RunnerKind } from "../domain/invocation.ts";
+import { type ArtifactSinkProvider } from "../domain/artifacts.ts";
 import { canonicalJsonBytes, type JsonValue } from "../domain/json.ts";
 import { firstIncompleteNode } from "../planning/graph.ts";
 import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
-import { processOutput, utf8Preview, type ProcessExitEvent } from "./script-output.ts";
+import { processOutput, type ProcessExitEvent } from "./script-output.ts";
+import { blockedProblems, checkCriteria, completedProblems, joined, outcomeShapeErrors, planKeyOfNode, type Issue, type TaskOutcome } from "./outcome.ts";
+import { clipSummary, finishLoop, loopAt, pushBlock, sequenceAt, skipBlock, withCheckpoint } from "./progress.ts";
 
-export type Issue = {
-  readonly target: string;
-  readonly reason: string;
-};
-
-type OutcomePayloads = {
-  completed: { readonly met?: readonly string[] };
-  "needs-work": { readonly issues?: readonly Issue[] };
-  blocked: {};
-};
-
-type AssertNever<T extends never> = T;
-type MissingOutcomeStatus = AssertNever<Exclude<TransitionStatus, keyof OutcomePayloads>>;
-type UnexpectedOutcomeStatus = AssertNever<Exclude<keyof OutcomePayloads, TransitionStatus>>;
-
-export type TaskOutcome = {
-  [Status in keyof OutcomePayloads]: { readonly status: Status; readonly key: string; readonly checkpoint: Checkpoint } & OutcomePayloads[Status];
-}[keyof OutcomePayloads];
+export type { Issue, TaskOutcome } from "./outcome.ts";
 
 type WorkflowEvent =
   | { readonly type: "outcome"; readonly outcome: TaskOutcome }
@@ -87,133 +70,7 @@ function scriptLeafAt(workflow: Workflow, state: Run): { key: string; block: Scr
   return block?.kind === "script" ? { key: leaf.key, block } : undefined;
 }
 
-function sequenceAt(workflow: Workflow, frame: SequenceFrame): SequenceBlock | undefined {
-  const block = blockOf(workflow, frame.blockId);
-  return block?.kind === "sequence" ? block : undefined;
-}
-
-function loopAt(workflow: Workflow, blockId: string): LoopBlock | undefined {
-  const block = blockOf(workflow, blockId);
-  return block?.kind === "loop" ? block : undefined;
-}
-
-function childKey(parentKey: string, childId: string): string {
-  return `${parentKey}/${childId}`;
-}
-
-type PushResult = { leaf: boolean; loops?: Record<string, LoopState> } | { error: string };
-
-function pushBlock(workflow: Workflow, state: Run, stack: Frame[], parentKey: string, childId: string): PushResult {
-  const child = blockOf(workflow, childId);
-  if (!child) return { error: `unknown block id: ${childId}` };
-  const key = childKey(parentKey, child.id);
-  const view: Run = { ...state, stack };
-  switch (child.kind) {
-    case "task":
-      stack.push({ kind: "task", blockId: child.id, key, attempt: 1 });
-      return { leaf: true };
-    case "script":
-      stack.push({ kind: "task", blockId: child.id, key, attempt: 1 });
-      return { leaf: true };
-    case "sequence":
-      stack.push({ kind: "sequence", blockId: child.id, key, index: 0 });
-      return { leaf: false };
-    case "loop": {
-      const existing = state.loops[key];
-      if (existing) {
-        stack.push({ kind: "loop", blockId: child.id, key });
-        return { leaf: false };
-      }
-      const resolved = resolveBinding(workflow, view, child.itemsBinding);
-      if (!resolved.ok) return { error: `loop ${child.id} could not resolve items: ${resolved.error}` };
-      if (!Array.isArray(resolved.value)) return { error: `loop ${child.id} items must resolve to a list` };
-      if (resolved.value.length > child.maxIterations) {
-        return { error: `loop ${child.id} has ${resolved.value.length} items, above its cap of ${child.maxIterations}` };
-      }
-      stack.push({ kind: "loop", blockId: child.id, key });
-      return {
-        leaf: false,
-        loops: { ...state.loops, [key]: { iteration: 1, items: resolved.value as readonly JsonValue[] } },
-      };
-    }
-    case "plan": {
-      const existing = state.plans[key];
-      if (existing && firstIncompleteNode(existing)) {
-        stack.push({ kind: "plan", blockId: child.id, key, mode: "execute", attempt: 1 });
-        return { leaf: false };
-      }
-      if (existing) return { leaf: false };
-      stack.push({ kind: "plan", blockId: child.id, key, mode: "create", attempt: 1 });
-      return { leaf: true };
-    }
-    default:
-      return { error: `block kind "${(child as { kind: string }).kind}" is not supported yet` };
-  }
-}
-
 type AdvanceResult = { ok: true; state: Run } | { ok: false; error: string };
-
-function clipSummary(value: string): string {
-  return utf8Preview(value, LIMITS.checkpointSummaryBytes - 64);
-}
-
-function skipBlock(state: Run, parentKey: string, guard: GuardClause, blockId: string, isPlan: boolean): Run {
-  const key = childKey(parentKey, blockId);
-  const withCp = withCheckpoint(state, key, { summary: clipSummary(skipReason(guard)), skipped: true });
-  if (!isPlan) return withCp;
-  const plans = { ...withCp.plans };
-  for (const [planKey, execution] of Object.entries(plans)) {
-    if (execution.blockId === blockId) {
-      delete plans[planKey];
-      notePlanKeyRemoved(withCp, blockId, planKey);
-    }
-  }
-  return { ...withCp, plans };
-}
-
-/**
- * The loop aggregate has one fixed shape: mode, iteration count, and per-iteration records
- * whose outputs are artifact references into the run's store. The schema never varies with
- * output size, so downstream consumers always know what a binding resolves to.
- */
-function finishLoop(state: Run, loopKey: string, block: LoopBlock, store: ArtifactSinkProvider): { state: Run } | { error: string } {
-  const loopState = state.loops[loopKey];
-  if (!loopState) return { error: `loop frame ${loopKey} has no loop state` };
-  const items = loopState.items ?? [];
-  const iterations = items.length;
-  const sink = store.sinkFor(loopKey);
-  const results: JsonValue[] = [];
-  for (let iteration = 1; iteration <= iterations; iteration += 1) {
-    const record: Record<string, JsonValue> = { iteration, item: items[iteration - 1] };
-    const outputs: Record<string, JsonValue> = {};
-    const scoped = `${scopeKey(loopKey, iteration)}/`;
-    for (const key of state.checkpointOrder) {
-      if (!key.startsWith(scoped)) continue;
-      const data = state.checkpoints[key]?.data;
-      if (data === undefined) continue;
-      const stepId = lastSegment(key);
-      if (isArtifactRef(data)) {
-        outputs[stepId] = data as unknown as JsonValue;
-        continue;
-      }
-      try {
-        outputs[stepId] = sink.publishJson(`${iteration}/${stepId}`, data) as unknown as JsonValue;
-      } catch (error) {
-        return { error: `loop ${block.id} could not store the iteration ${iteration} output of ${stepId}: ${error instanceof Error ? error.message : String(error)}` };
-      }
-    }
-    record.outputs = outputs;
-    results.push(record as JsonValue);
-  }
-  const data: Record<string, JsonValue> = { mode: "for-each", iterations, results: results as JsonValue };
-  const summaryText = `Loop ${block.id} completed ${iterations} iteration${iterations === 1 ? "" : "s"}.`;
-  const checkpoint: Checkpoint = { summary: clipSummary(summaryText), data: data as JsonValue };
-  const errors = checkpointErrors(checkpoint, `loop ${loopKey}`);
-  if (errors.length > 0) return { error: joined(errors) ?? `loop ${loopKey} aggregate exceeded its checkpoint budget` };
-  const loops = { ...state.loops };
-  delete loops[loopKey];
-  return { state: withCheckpoint({ ...state, loops }, loopKey, checkpoint) };
-}
 
 export function advance(workflow: Workflow, state: Run, store?: ArtifactSinkProvider): AdvanceResult {
   const stack = [...state.stack];
@@ -295,152 +152,6 @@ export function advance(workflow: Workflow, state: Run, store?: ArtifactSinkProv
   return { ok: true, state: { ...working, stack } };
 }
 
-function checkCriteria(criteria: readonly string[], met: readonly string[]): string | undefined {
-  const known = new Set(criteria);
-  const unknownIds = met.filter((id) => !known.has(id));
-  const metSet = new Set(met);
-  const missingIds = criteria.filter((id) => !metSet.has(id));
-  if (metSet.size !== met.length) return "met must not contain duplicates";
-  if (unknownIds.length === 0 && missingIds.length === 0) return undefined;
-  const parts: string[] = [];
-  if (unknownIds.length > 0) parts.push(`unknown criterion id: ${unknownIds.join(", ")}`);
-  if (missingIds.length > 0) parts.push(`completion must list every required criterion; missing: ${missingIds.join(", ")}`);
-  if (criteria.length > 0) parts.push(`required ids for this position: ${criteria.map((id) => `\`${id}\``).join(", ")}`);
-  return parts.join("; ");
-}
-
-function joined(errors: readonly string[]): string | undefined {
-  const unique = [...new Set(errors.filter((error) => error.trim().length > 0))];
-  return unique.length > 0 ? unique.join("; ") : undefined;
-}
-
-function outcomeShapeErrors(outcome: TaskOutcome): string[] {
-  const errors: string[] = [];
-  const raw = outcome as { met?: unknown; issues?: unknown };
-  if (outcome.status !== "completed" && raw.met !== undefined) errors.push("met is only valid with status \"completed\"");
-  if (outcome.status !== "needs-work" && raw.issues !== undefined) errors.push("issues is only valid with status \"needs-work\"");
-  if (raw.met !== undefined) {
-    if (!Array.isArray(raw.met)) {
-      errors.push("met must be a list of criterion ids");
-    } else {
-      const offending = [...new Set(raw.met.filter((id) => typeof id !== "string" || !ID_PATTERN.test(id)))];
-      if (offending.length > 0) errors.push(`met entries must match ${ID_PATTERN} (offending: ${offending.map((id) => JSON.stringify(id)).join(", ")}); use the required ids below verbatim`);
-    }
-  }
-  if (raw.issues !== undefined) {
-    if (!Array.isArray(raw.issues)) {
-      errors.push("issues must be a list");
-    } else {
-      raw.issues.forEach((issue, index) => {
-        if (!issue || typeof issue !== "object" || Array.isArray(issue)) {
-          errors.push(`issues[${index}] must be an object`);
-          return;
-        }
-        const entry = issue as { target?: unknown; reason?: unknown };
-        if (typeof entry.target !== "string" || !entry.target.trim()) errors.push(`issues[${index}].target must be a non-empty string`);
-        if (typeof entry.reason !== "string" || !entry.reason.trim()) errors.push(`issues[${index}].reason must be a non-empty string`);
-      });
-    }
-  }
-  return errors;
-}
-
-function completedProblems(workflow: Workflow, state: Run, leaf: Frame, outcome: Extract<TaskOutcome, { status: "completed" }>, planExempt: boolean): string[] {
-  const errors = [...outcomeShapeErrors(outcome), ...checkpointErrors(outcome.checkpoint, "checkpoint", planExempt)];
-  const met = outcome.met ?? [];
-  if (leaf.kind === "task") {
-    const block = blockOf(workflow, leaf.blockId);
-    if (!block || block.kind !== "task") {
-      errors.push(`frame ${leaf.key} does not name a task`);
-      return errors;
-    }
-    const criteria = checkCriteria(block.done ?? [], met);
-    if (criteria) errors.push(criteria);
-    const contract = contractErrorFor(workflow, block.output, outcome.checkpoint.data, `task ${leaf.key} output`);
-    if (contract) errors.push(contract);
-    return errors;
-  }
-  if (leaf.kind === "plan") {
-    const block = blockOf(workflow, leaf.blockId);
-    if (!block || block.kind !== "plan") {
-      errors.push(`frame ${leaf.key} does not name a plan block`);
-      return errors;
-    }
-    const planValue = (outcome.checkpoint.data as { plan?: unknown } | undefined)?.plan;
-    if (planValue === undefined) {
-      errors.push("plan creation completion must carry checkpoint.data.plan");
-      return errors;
-    }
-    const validation = validateDynamicPlan(planValue, planInputFor(workflow, block.operators));
-    if ("errors" in validation) errors.push(`invalid plan: ${validation.errors.join("; ")}`);
-    return errors;
-  }
-  if (leaf.kind === "node") {
-    const planKey = planKeyOfNode(leaf);
-    const record = state.plans[planKey];
-    if (!record || record.blockId !== leaf.blockId) {
-      errors.push(`node frame ${leaf.key} has no plan execution`);
-      return errors;
-    }
-    const node = record.plan.nodes.find((entry) => entry.id === leaf.nodeId);
-    if (!node) {
-      errors.push(`node ${leaf.nodeId} is not in the active plan`);
-      return errors;
-    }
-    const criteria = checkCriteria(node.done, met);
-    if (criteria) errors.push(criteria);
-    const operator = workflow.operators.get(node.operator);
-    const contract = contractErrorFor(workflow, operator?.output, outcome.checkpoint.data, `node result ${node.id}`);
-    if (contract) errors.push(contract);
-    try {
-      const result = validateCheckpoint(outcome.checkpoint, `node result ${node.id}`);
-      const bytes = canonicalJsonBytes(result as unknown as JsonValue);
-      if (bytes > LIMITS.nodeResultBytes) {
-        errors.push(`node result ${node.id} exceeds ${LIMITS.nodeResultBytes} bytes (was ${bytes}); trim \`evidence\`/\`data\` or narrow the node result`);
-      }
-    } catch (error) {
-      errors.push(error instanceof Error ? error.message : String(error));
-    }
-    return errors;
-  }
-  return errors;
-}
-
-function blockedProblems(workflow: Workflow, state: Run, leaf: Frame, outcome: Extract<TaskOutcome, { status: "blocked" }>, planExempt: boolean): string[] {
-  const errors = [...outcomeShapeErrors(outcome), ...checkpointErrors(outcome.checkpoint, "checkpoint", planExempt)];
-  const contract = contractErrorFor(workflow, outputContractFor(workflow, state, leaf), outcome.checkpoint.data, `checkpoint ${leaf.key}`);
-  if (contract) errors.push(contract);
-  return errors;
-}
-
-function withCheckpoint(state: Run, key: string, checkpoint: Checkpoint): Run {
-  // Copy-on-write (corr-d1): refusal branches in the runtime must find the
-  // input execution untouched, so a refused transition changes nothing.
-  const tracked = Object.hasOwn(state.checkpoints, key);
-  const next: Run = {
-    ...state,
-    checkpoints: { ...state.checkpoints, [key]: checkpoint },
-    checkpointOrder: tracked ? state.checkpointOrder : [...state.checkpointOrder, key],
-  };
-  noteCheckpointCommitted(next, key, checkpoint);
-  return next;
-}
-
-function planKeyOfNode(node: NodeFrame): string {
-  return planKeyOf(node.key);
-}
-
-function outputContractFor(workflow: Workflow, state: Run, leaf: Frame): string | undefined {
-  if (leaf.kind === "task") {
-    const block = blockOf(workflow, leaf.blockId);
-    return block?.kind === "task" ? block.output : undefined;
-  }
-  if (leaf.kind !== "node") return undefined;
-  const record = state.plans[planKeyOfNode(leaf)];
-  const node = record?.plan.nodes.find((entry) => entry.id === leaf.nodeId);
-  return node ? workflow.operators.get(node.operator)?.output : undefined;
-}
-
 function finishAdvance(workflow: Workflow, state: Run, stack: readonly Frame[], store?: ArtifactSinkProvider): EngineResult {
   const advanced = advance(workflow, { ...state, stack }, store);
   if (!advanced.ok) return fail(advanced.error);
@@ -461,8 +172,8 @@ function runnerOfLeaf(workflow: Workflow, state: Run, leaf: Frame): RunnerKind {
   if (leaf.kind === "task") return blockOf(workflow, leaf.blockId)?.kind === "script" ? "process" : "agent";
   return "agent";
 }
-export function enterInvocation(workflow: Workflow, state: Run, leaf: Frame, status: NodeStatus = "running", attempt?: number): Run {
-  const invocation: NodeInvocation = {
+export function enterInvocation(workflow: Workflow, state: Run, leaf: Frame, status: InvocationStatus = "running", attempt?: number): Run {
+  const invocation: Invocation = {
     blockId: leaf.blockId,
     key: leaf.key,
     runner: runnerOfLeaf(workflow, state, leaf),
@@ -521,7 +232,7 @@ function stripPlanPayload(checkpoint: Checkpoint): Checkpoint {
     : withoutData;
 }
 
-function completeNode(workflow: Workflow, state: Run, leaf: NodeFrame, outcome: Extract<TaskOutcome, { status: "completed" }>): EngineResult {
+function completeNode(workflow: Workflow, state: Run, leaf: PlanNodeFrame, outcome: Extract<TaskOutcome, { status: "completed" }>): EngineResult {
   const planKey = planKeyOfNode(leaf);
   const record = state.plans[planKey];
   if (!record || record.blockId !== leaf.blockId) return fail(`node frame ${leaf.key} has no plan execution`);
@@ -659,44 +370,3 @@ function scriptFailure(workflow: Workflow, state: Run, leaf: Extract<Frame, Task
   return { ...result, state: enterInvocation(workflow, result.state, leaf, "waiting") };
 }
 
-interface PositionInfo {
-  readonly type: "task" | "plan-create" | "node";
-  readonly key: string;
-  readonly attempt: number;
-  readonly task?: TaskBlock;
-  readonly plan?: PlanBlock;
-  readonly node?: import("../planning/schema.ts").PlanNode;
-  readonly execution?: PlanRecord;
-  readonly stack: readonly Frame[];
-}
-
-export function currentPosition(workflow: Workflow, state: Run): PositionInfo | undefined {
-  if (state.status !== "active") return undefined;
-  const leaf = state.stack[state.stack.length - 1];
-  if (!leaf || !isLeafFrame(leaf)) return undefined;
-  if (leaf.kind === "task") {
-    const block = blockOf(workflow, leaf.blockId);
-    if (block?.kind === "task") {
-      return { type: "task", key: leaf.key, attempt: leaf.attempt, task: block, stack: state.stack };
-    }
-    return undefined;
-  }
-  if (leaf.kind === "plan") {
-    const block = blockOf(workflow, leaf.blockId);
-    if (block?.kind === "plan") {
-      return { type: "plan-create", key: leaf.key, attempt: leaf.attempt, plan: block, execution: state.plans[leaf.key], stack: state.stack };
-    }
-    return undefined;
-  }
-  if (leaf.kind === "node") {
-    const block = blockOf(workflow, leaf.blockId);
-    const planKey = planKeyOf(leaf.key);
-    const record = state.plans[planKey];
-    const node = record?.plan.nodes.find((entry) => entry.id === leaf.nodeId);
-    if (block?.kind === "plan" && record && node) {
-      return { type: "node", key: leaf.key, attempt: leaf.attempt, plan: block, node, execution: record, stack: state.stack };
-    }
-    return undefined;
-  }
-  return undefined;
-}

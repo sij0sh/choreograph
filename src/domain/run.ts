@@ -1,7 +1,7 @@
 import type { JsonValue } from "./json.ts";
 import type { Checkpoint } from "./checkpoint.ts";
 import type { DynamicPlan } from "../planning/schema.ts";
-import type { NodeInvocation } from "./node.ts";
+import type { Invocation } from "./invocation.ts";
 import { LIMITS } from "./limits.ts";
 
 export interface SequenceFrame {
@@ -32,7 +32,7 @@ export interface LoopFrame {
   readonly key: string;
 }
 
-export interface NodeFrame {
+export interface PlanNodeFrame {
   readonly kind: "node";
   readonly blockId: string;
   readonly key: string;
@@ -40,10 +40,10 @@ export interface NodeFrame {
   readonly attempt: number;
 }
 
-export type Frame = SequenceFrame | TaskFrame | PlanFrame | NodeFrame | LoopFrame;
+export type Frame = SequenceFrame | TaskFrame | PlanFrame | PlanNodeFrame | LoopFrame;
 
-export type AttemptBearingFrame = TaskFrame | PlanFrame | NodeFrame;
-export type LeafFrame = TaskFrame | NodeFrame | (PlanFrame & { readonly mode: "create" });
+export type AttemptBearingFrame = TaskFrame | PlanFrame | PlanNodeFrame;
+export type LeafFrame = TaskFrame | PlanNodeFrame | (PlanFrame & { readonly mode: "create" });
 export type StructuralFrame = SequenceFrame | LoopFrame | (PlanFrame & { readonly mode: "execute" });
 export type AgentDispatchFrame = AttemptBearingFrame;
 
@@ -124,15 +124,15 @@ export interface Run {
   readonly plans: Readonly<Record<string, PlanRecord>>;
   readonly loops: Readonly<Record<string, LoopState>>;
   readonly definitionDigest?: string;
-  readonly invocations?: Readonly<Record<string, NodeInvocation>>;
+  readonly invocations?: Readonly<Record<string, Invocation>>;
 }
 
 export function upsertInvocation(
   state: Run,
   key: string,
-  invocation: NodeInvocation,
+  invocation: Invocation,
 ): Run["invocations"] {
-  const invocations: Record<string, NodeInvocation> = { ...(state.invocations ?? {}), [key]: invocation };
+  const invocations: Record<string, Invocation> = { ...(state.invocations ?? {}), [key]: invocation };
   const keys = Object.keys(invocations);
   if (keys.length <= LIMITS.stackDepth) return invocations;
   for (const candidate of keys) {

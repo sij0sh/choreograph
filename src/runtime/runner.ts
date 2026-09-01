@@ -1,4 +1,4 @@
-import type { NodeInvocation, NodeSpec, RunnerSpec } from "../domain/node.ts";
+import type { Invocation, RunnerKind, RunnerSpec } from "../domain/invocation.ts";
 import type { JsonValue } from "../domain/json.ts";
 import type { ScriptSpec } from "../domain/workflow.ts";
 import type { Issue } from "../engine/interpreter.ts";
@@ -24,17 +24,17 @@ export interface NodeResult {
 }
 
 export interface Runner {
-  readonly kind: NodeSpec["runner"];
+  readonly kind: RunnerKind;
   readonly retrySafety: "at-least-once" | "idempotent";
-  execute(invocation: NodeInvocation, spec: RunnerSpec, ctx: RunnerContext): Promise<NodeResult>;
-  cancel?(invocation: NodeInvocation): void;
+  execute(invocation: Invocation, spec: RunnerSpec, ctx: RunnerContext): Promise<NodeResult>;
+  cancel?(invocation: Invocation): void;
 }
 
 export class ProcessRunner implements Runner {
   readonly kind = "process" as const;
   readonly retrySafety = "at-least-once" as const;
 
-  execute(invocation: NodeInvocation, spec: RunnerSpec, ctx: RunnerContext): Promise<NodeResult> {
+  execute(invocation: Invocation, spec: RunnerSpec, ctx: RunnerContext): Promise<NodeResult> {
     if (spec.runner !== "process") return Promise.resolve({ status: "failed", reason: `ProcessRunner does not run ${spec.runner} specs` });
     const processSpec = spec;
     const payload = stdinOf(ctx.inputs);
@@ -66,7 +66,7 @@ export class AgentRunner implements Runner {
   readonly retrySafety = "idempotent" as const;
   private readonly awaiting = new Map<string, { readonly result: Promise<NodeResult>; readonly resolve: (result: NodeResult) => void }>();
 
-  execute(invocation: NodeInvocation, spec: RunnerSpec, _ctx: RunnerContext): Promise<NodeResult> {
+  execute(invocation: Invocation, spec: RunnerSpec, _ctx: RunnerContext): Promise<NodeResult> {
     if (spec.runner !== "agent") return Promise.resolve({ status: "failed", reason: `AgentRunner does not run ${spec.runner} specs` });
     const existing = this.awaiting.get(invocation.key);
     if (existing) return existing.result;
@@ -86,7 +86,7 @@ export class AgentRunner implements Runner {
     return true;
   }
 
-  cancel(invocation: NodeInvocation): void {
+  cancel(invocation: Invocation): void {
     this.settle(invocation.key, { status: "canceled" });
   }
 }

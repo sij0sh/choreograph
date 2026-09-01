@@ -1,4 +1,5 @@
-import { currentPosition, processLeafAt } from "../engine/interpreter.ts";
+import { currentPosition } from "../engine/position.ts";
+import { processLeafAt } from "../engine/interpreter.ts";
 import type { Run } from "../domain/run.ts";
 import type { Workflow } from "../domain/workflow.ts";
 

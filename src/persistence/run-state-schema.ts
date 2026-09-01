@@ -1,5 +1,5 @@
 import type { Run, Frame, LoopState, PlanRecord } from "../domain/run.ts";
-import type { NodeInvocation } from "../domain/node.ts";
+import type { Invocation } from "../domain/invocation.ts";
 
 type RunStateFieldSchema = {
   readonly entryFields?: readonly string[];
@@ -27,7 +27,7 @@ export const RUN_STATE_SCHEMA = {
   },
   definitionDigest: {},
   invocations: {
-    entryFields: ["blockId", "key", "runner", "status", "attempt"] as const satisfies readonly (keyof NodeInvocation)[],
+    entryFields: ["blockId", "key", "runner", "status", "attempt"] as const satisfies readonly (keyof Invocation)[],
   },
 } as const satisfies { [K in keyof Run]-?: RunStateFieldSchema };
 

@@ -6,7 +6,7 @@ import type { PlanNode } from "../planning/schema.ts";
 import { checkpointIndexFor } from "./checkpoint-index.ts";
 import type { Checkpoint } from "./checkpoint.ts";
 import type { InputBinding } from "./workflow.ts";
-import type { ArtifactRef } from "./node.ts";
+import type { ArtifactRef } from "./invocation.ts";
 
 export type { ArtifactRef };
 

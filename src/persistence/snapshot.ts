@@ -5,15 +5,15 @@ import { LIMITS } from "../domain/limits.ts";
 import type { PlanRecord } from "../domain/run.ts";
 import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.ts";
-import type { NodeInvocation, NodeStatus, RunnerKind } from "../domain/node.ts";
+import type { Invocation, InvocationStatus, RunnerKind } from "../domain/invocation.ts";
 import { loopFrameKeys, loopStateForFrame, RUN_STATE_FIELDS, RUN_STATE_SCHEMA } from "./run-state-schema.ts";
 
-const NODE_STATUSES: readonly NodeStatus[] = ["running", "waiting", "succeeded", "failed", "canceled", "skipped"];
+const NODE_STATUSES: readonly InvocationStatus[] = ["running", "waiting", "succeeded", "failed", "canceled", "skipped"];
 const RUNNER_KINDS: readonly RunnerKind[] = ["agent", "process"];
 
-function invocationsAt(value: unknown, label: string): Record<string, NodeInvocation> {
+function invocationsAt(value: unknown, label: string): Record<string, Invocation> {
   const raw = objectAt(value, label);
-  const invocations: Record<string, NodeInvocation> = {};
+  const invocations: Record<string, Invocation> = {};
   for (const [key, entry] of Object.entries(raw)) {
     const item = objectAt(entry, `${label}.${key}`);
     for (const field of Object.keys(item)) {
@@ -25,13 +25,13 @@ function invocationsAt(value: unknown, label: string): Record<string, NodeInvoca
     if (invocationKey !== key) throw new Error(`${label}.${key}.key must match its map key`);
     const blockId = requireString(item.blockId, `${label}.${key}.blockId`);
     if (!RUNNER_KINDS.includes(item.runner as RunnerKind)) throw new Error(`${label}.${key}.runner must be one of: ${RUNNER_KINDS.join(", ")}`);
-    if (!NODE_STATUSES.includes(item.status as NodeStatus)) throw new Error(`${label}.${key}.status must be one of: ${NODE_STATUSES.join(", ")}`);
+    if (!NODE_STATUSES.includes(item.status as InvocationStatus)) throw new Error(`${label}.${key}.status must be one of: ${NODE_STATUSES.join(", ")}`);
     const attempt = item.attempt;
     const attemptMax = LIMITS.nodeAttempts + 1;
     if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 1 || attempt > attemptMax) {
       throw new Error(`${label}.${key}.attempt must be an integer between 1 and ${attemptMax}`);
     }
-    invocations[key] = { blockId, key: invocationKey, runner: item.runner as RunnerKind, status: item.status as NodeStatus, attempt };
+    invocations[key] = { blockId, key: invocationKey, runner: item.runner as RunnerKind, status: item.status as InvocationStatus, attempt };
   }
   return invocations;
 }

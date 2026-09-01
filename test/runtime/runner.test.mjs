@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { AgentRunner, ProcessRunner } from "../../src/runtime/runner.ts";
-import { processSpecFor } from "../../src/domain/node.ts";
+import { processSpecFor } from "../../src/domain/invocation.ts";
 
 const invocation = { blockId: "probe", key: "root/probe", runner: "process", status: "running", attempt: 1 };
 

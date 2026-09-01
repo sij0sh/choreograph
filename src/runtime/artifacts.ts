@@ -1,5 +1,5 @@
 import { ARTIFACT_MEDIA_TYPES, isArtifactRef, resolveBinding, type ResolvedInput } from "../domain/artifacts.ts";
-import type { ArtifactRef } from "../domain/node.ts";
+import type { ArtifactRef } from "../domain/invocation.ts";
 import type { ArtifactStore } from "./artifact-store.ts";
 import type { Run } from "../domain/run.ts";
 import { isJsonValue, type JsonValue } from "../domain/json.ts";

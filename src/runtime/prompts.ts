@@ -1,5 +1,5 @@
 import { parseDocument } from "yaml";
-import { currentPosition } from "../engine/interpreter.ts";
+import { currentPosition } from "../engine/position.ts";
 import { CONTROL_TOOLS, RETRY_TOOL_NAME } from "./capabilities.ts";
 import { frameAttempt, type Run, type LoopFrame } from "../domain/run.ts";
 import { BOUNDARY_CHECKPOINT_FIELDS, TRANSITION_SHAPE } from "../domain/checkpoint.ts";
