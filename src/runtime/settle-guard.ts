@@ -1,4 +1,4 @@
-import { frameAttempt, isAgentDispatchFrame } from "../domain/execution.ts";
+import { frameAttempt, isAgentDispatchFrame } from "../domain/run.ts";
 import { processLeafAt } from "../engine/interpreter.ts";
 import { LIMITS } from "../domain/limits.ts";
 import { controlMessage } from "./prompts.ts";

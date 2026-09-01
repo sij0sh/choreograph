@@ -1,7 +1,7 @@
 import { parseDocument } from "yaml";
 import { currentPosition } from "../engine/interpreter.ts";
 import { CONTROL_TOOLS, RETRY_TOOL_NAME } from "./capabilities.ts";
-import { frameAttempt, type Execution, type LoopFrame } from "../domain/execution.ts";
+import { frameAttempt, type Run, type LoopFrame } from "../domain/run.ts";
 import { BOUNDARY_CHECKPOINT_FIELDS, TRANSITION_SHAPE } from "../domain/checkpoint.ts";
 import { completedPlanNodeOf } from "../domain/artifacts.ts";
 import { canonicalJson, canonicalJsonBytes } from "../domain/json.ts";
@@ -108,7 +108,7 @@ const TRANSITION_CONTRACT = [
  * The bounded prior-checkpoint section. Checkpoint summaries are selected
  * newest-first within a fixed byte budget, then rendered in execution order.
  */
-function priorSummaries(state: Execution, positionKey: string): string {
+function priorSummaries(state: Run, positionKey: string): string {
   const order = state.checkpointOrder ?? Object.keys(state.checkpoints);
   const newestFirst: string[] = [];
   let used = 0;
@@ -126,7 +126,7 @@ function priorSummaries(state: Execution, positionKey: string): string {
 }
 
 /** The current key's own checkpoint, when one exists: it describes a prior attempt here. */
-function priorAttempt(state: Execution, positionKey: string): string {
+function priorAttempt(state: Run, positionKey: string): string {
   const checkpoint = state.checkpoints[positionKey];
   if (!checkpoint) return "";
   return [
@@ -141,7 +141,7 @@ function criteriaList(done: readonly string[] | undefined): string {
   return ["Required criteria:", ...done.map((id) => `- \`${id}\``)].join("\n");
 }
 
-function loopContext(workflow: Workflow, state: Execution, positionKey: string): string {
+function loopContext(workflow: Workflow, state: Run, positionKey: string): string {
   const frame = [...state.stack].reverse().find((entry): entry is LoopFrame => entry.kind === "loop" && positionKey.startsWith(`${entry.key}/`));
   if (!frame) return "";
   const block = blockOf(workflow, frame.blockId);
@@ -194,7 +194,7 @@ const PLAN_SCHEMA_SECTION = [
  * The one envelope a position ever sees. Sections render in a fixed order;
  * the only variable content is the position kind's instructions and inputs.
  */
-export function renderPositionEnvelope(workflow: Workflow, state: Execution, read: ReadBlock, load?: RefValueLoader, tools?: readonly string[]): string {
+export function renderPositionEnvelope(workflow: Workflow, state: Run, read: ReadBlock, load?: RefValueLoader, tools?: readonly string[]): string {
   const position = currentPosition(workflow, state);
   if (!position) return "";
   const header = [
@@ -317,10 +317,10 @@ export function renderPositionEnvelope(workflow: Workflow, state: Execution, rea
     .join("\n\n");
 }
 
-/** The bounded report inputs a terminal session needs, rendered entirely from the Execution. */
-export function renderReportEnvelope(workflow: Workflow, execution: Execution, read: ReadBlock): string {
-  const checkpointLines = (execution.checkpointOrder ?? []).map((key) => {
-    const checkpoint = execution.checkpoints[key];
+/** The bounded report inputs a terminal session needs, rendered entirely from the Run. */
+export function renderReportEnvelope(workflow: Workflow, run: Run, read: ReadBlock): string {
+  const checkpointLines = (run.checkpointOrder ?? []).map((key) => {
+    const checkpoint = run.checkpoints[key];
     if (!checkpoint) return `- \`${lastSegment(key)}\`: (checkpoint unavailable)`;
     const lines = [`- \`${lastSegment(key)}\`: ${clip(checkpoint.summary, PRIOR_SUMMARY_ITEM_BYTES)}`];
     for (const [label, items] of [["Evidence", checkpoint.evidence], ["Decisions", checkpoint.decisions], ["Unknowns", checkpoint.unknowns]] as const) {
@@ -332,10 +332,10 @@ export function renderReportEnvelope(workflow: Workflow, execution: Execution, r
   return [
     "# Workflow report inputs",
     `Workflow: ${workflow.title} (\`${workflow.name}\`) - ${workflow.description}`,
-    `Run: \`${execution.runId}\``,
-    execution.target ? `Target: ${execution.target}` : "",
-    `Status: ${execution.status}`,
-    execution.definitionDigest ? `Definition digest: \`${execution.definitionDigest}\`` : "",
+    `Run: \`${run.runId}\``,
+    run.target ? `Target: ${run.target}` : "",
+    `Status: ${run.status}`,
+    run.definitionDigest ? `Definition digest: \`${run.definitionDigest}\`` : "",
     "",
     "## Workflow overview",
     "",
@@ -355,7 +355,7 @@ export function rosterPrompt(visible: readonly Workflow[]): string {
   ].join("\n");
 }
 
-export function controlMessage(state: Execution): string {
+export function controlMessage(state: Run): string {
   const position = state.status === "active" ? state.stack[state.stack.length - 1] : undefined;
   const where = position ? position.key : "completion";
   const attempt = position ? frameAttempt(position) : 1;
@@ -370,7 +370,7 @@ export function summaryPrefix(runId: string): string {
   return `Summarize completed workflow \`${runId}\``;
 }
 
-export function summaryMessage(workflow: Workflow, state: Execution): string {
+export function summaryMessage(workflow: Workflow, state: Run): string {
   return [
     `${summaryPrefix(state.runId)}: ${workflow.title} run \`${state.runId}\` is complete.`,
     "Summarize what was done, the key findings and recommendations, the risks or open issues, and suggested next steps.",

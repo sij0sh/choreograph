@@ -4,9 +4,9 @@ This document identifies the source module for cross-package contracts. Consumer
 
 ## Kind sets
 
-### Execution frames
+### Run frames
 
-`src/domain/execution.ts` owns the `Frame` union and every frame-role projection.
+`src/domain/run.ts` owns the `Frame` union and every frame-role projection.
 
 - `isLeafFrame` identifies positions that accept model transitions.
 - `isAttemptBearingFrame` identifies frames that carry retry attempts.
@@ -39,12 +39,12 @@ The spec owns statuses, top-level fields, checkpoint fields, required fields, co
 
 ## Producer artifacts
 
-`src/domain/artifacts.ts` owns the block-kind to artifact-source and artifact-shape dispatch. `resolveBinding` adds loud binding errors around that shared dispatch. `producerArtifact` remains total for incomplete producers. Prompt and planning consumers use exported plan-result accessors instead of probing `PlanExecution.results`.
+`src/domain/artifacts.ts` owns the block-kind to artifact-source and artifact-shape dispatch. `resolveBinding` adds loud binding errors around that shared dispatch. `producerArtifact` remains total for incomplete producers. Prompt and planning consumers use exported plan-result accessors instead of probing `PlanRecord.results`.
 
 ## Persisted run state
 
-`src/domain/execution.ts` owns the `Execution` domain type. `src/persistence/run-state-schema.ts` owns its runtime persistence field table and is compiler-linked to every `Execution` key.
+`src/domain/run.ts` owns the `Run` domain type. `src/persistence/run-state-schema.ts` owns its runtime persistence field table and is compiler-linked to every `Run` key.
 
-`src/persistence/snapshot.ts` derives strict top-level and collection allowlists plus decoded projection from that table. `src/persistence/validate-stored-execution.ts` keeps the separate workflow-semantic validation layer. Both validation layers stay required. Unknown fields are still rejected. The active snapshot version gate is unchanged.
+`src/persistence/snapshot.ts` derives strict top-level and collection allowlists plus decoded projection from that table. `src/persistence/validate-stored-run.ts` keeps the separate workflow-semantic validation layer. Both validation layers stay required. Unknown fields are still rejected. The active snapshot version gate is unchanged.
 
-The workflow UI (`src/runtime/workflow-ui.ts`) is an ephemeral derivation of `Workflow` and `Execution` and is never persisted.
+The workflow UI (`src/runtime/workflow-ui.ts`) is an ephemeral derivation of `Workflow` and `Run` and is never persisted.

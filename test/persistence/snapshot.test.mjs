@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { activeSnapshot, parseSnapshot, terminalSnapshot } from "../../src/persistence/snapshot.ts";
-import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-execution.ts";
+import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-run.ts";
 import { latestSnapshot } from "../../src/persistence/store.ts";
 import { RUN_STATE_FIELDS, RUN_STATE_SCHEMA } from "../../src/persistence/run-state-schema.ts";
 import { completed, cp, loop, needsWork, sequence, task, workflow } from "../engine/helpers.mjs";

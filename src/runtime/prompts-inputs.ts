@@ -1,6 +1,6 @@
 import { canonicalJson, type JsonValue } from "../domain/json.ts";
 import { LIMITS } from "../domain/limits.ts";
-import type { Execution } from "../domain/execution.ts";
+import type { Run } from "../domain/run.ts";
 import type { InputBinding, Workflow } from "../domain/workflow.ts";
 import { inlineRefs, resolveBinding, type RefValueLoader } from "./artifacts.ts";
 
@@ -46,7 +46,7 @@ function renderedBytes(lines: readonly InputLine[]): number {
   return Buffer.byteLength([INPUT_HEADER, ...lines.map(renderInputLine)].join("\n"), "utf8");
 }
 
-function renderInputs(workflow: Workflow, state: Execution, bindings: Readonly<Record<string, InputBinding>>, load?: RefValueLoader): InputLine[] {
+function renderInputs(workflow: Workflow, state: Run, bindings: Readonly<Record<string, InputBinding>>, load?: RefValueLoader): InputLine[] {
   const current: InputLine[] = Object.entries(bindings).map(([name, binding]) => {
     const resolved = resolveBinding(workflow, state, binding);
     if (!resolved.ok) return { kind: "error", name, from: binding.from, error: resolved.error };
@@ -66,7 +66,7 @@ function renderInputs(workflow: Workflow, state: Execution, bindings: Readonly<R
   return current;
 }
 
-export function inputSection(workflow: Workflow, state: Execution, bindings: Readonly<Record<string, InputBinding>> | undefined, load?: RefValueLoader): string {
+export function inputSection(workflow: Workflow, state: Run, bindings: Readonly<Record<string, InputBinding>> | undefined, load?: RefValueLoader): string {
   if (!bindings || Object.keys(bindings).length === 0) return "";
   return [INPUT_HEADER, ...renderInputs(workflow, state, bindings, load).map(renderInputLine)].join("\n");
 }

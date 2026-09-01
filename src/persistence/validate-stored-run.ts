@@ -1,4 +1,4 @@
-import type { Execution, Frame, PlanExecution } from "../domain/execution.ts";
+import type { Run, Frame, PlanRecord } from "../domain/run.ts";
 import { isArtifactRef } from "../domain/artifacts.ts";
 import { contractError } from "../domain/contract.ts";
 import { LIMITS } from "../domain/limits.ts";
@@ -9,18 +9,18 @@ import { planInputFor, validateDynamicPlan } from "../planning/validate.ts";
 import type { PlanNode } from "../planning/schema.ts";
 import { loopStateForFrame } from "./run-state-schema.ts";
 
-type ValidationResult = { ok: true; execution: Execution } | { ok: false; error: string };
+type ValidationResult = { ok: true; execution: Run } | { ok: false; error: string };
 
 function reject(error: string): ValidationResult {
   return { ok: false, error };
 }
 
-function hasRuntimeManagedProcessData(state: Execution, key: string, data: unknown): boolean {
+function hasRuntimeManagedProcessData(state: Run, key: string, data: unknown): boolean {
   return state.invocations?.[key]?.status === "waiting" || isArtifactRef(data);
 }
 
 
-function validatePair(workflow: Workflow, state: Execution, parent: Frame, child: Frame, plans: Readonly<Record<string, PlanExecution>>): string | undefined {
+function validatePair(workflow: Workflow, state: Run, parent: Frame, child: Frame, plans: Readonly<Record<string, PlanRecord>>): string | undefined {
   const parentBlock = blockOf(workflow, parent.blockId);
   if (!parentBlock) return `frame ${parent.key} names unknown block ${parent.blockId}`;
   switch (parent.kind) {
@@ -35,10 +35,10 @@ function validatePair(workflow: Workflow, state: Execution, parent: Frame, child
     case "plan": {
       if (parentBlock.kind !== "plan") return `frame ${parent.key} does not name a plan block`;
       if (parent.mode !== "execute") return `frame ${parent.key} in create mode cannot have frames above it`;
-      const execution = plans[parent.key];
-      if (!execution || execution.blockId !== parent.blockId) return `frame ${parent.key} has no matching plan execution`;
+      const record = plans[parent.key];
+      if (!record || record.blockId !== parent.blockId) return `frame ${parent.key} has no matching plan execution`;
       if (child.kind !== "node") return `frame ${parent.key} must carry a node frame, not ${child.kind}`;
-      if (!execution.plan.nodes.some((node) => node.id === child.nodeId)) return `node ${child.nodeId} is not in the active plan for ${parent.key}`;
+      if (!record.plan.nodes.some((node) => node.id === child.nodeId)) return `node ${child.nodeId} is not in the active plan for ${parent.key}`;
       if (child.attempt < 1 || child.attempt > LIMITS.nodeAttempts + 1) return `node ${child.nodeId} attempt ${child.attempt} is out of bounds`;
       return undefined;
     }
@@ -61,7 +61,7 @@ function validatePair(workflow: Workflow, state: Execution, parent: Frame, child
   }
 }
 
-function validateLeaf(workflow: Workflow, state: Execution, leaf: Frame): string | undefined {
+function validateLeaf(workflow: Workflow, state: Run, leaf: Frame): string | undefined {
   const block = blockOf(workflow, leaf.blockId);
   if (!block) return `frame ${leaf.key} names unknown block ${leaf.blockId}`;
   switch (leaf.kind) {
@@ -72,9 +72,9 @@ function validateLeaf(workflow: Workflow, state: Execution, leaf: Frame): string
     case "plan": {
       if (block.kind !== "plan") return `frame ${leaf.key} does not name a plan block`;
       if (leaf.kind === "plan") return undefined;
-      const execution = state.plans[planKeyOf(leaf.key)] ?? state.plans[leaf.key];
-      if (!execution) return `node frame ${leaf.key} has no plan execution`;
-      if (!execution.plan.nodes.some((node) => node.id === leaf.nodeId)) return `node ${leaf.nodeId} is not in the active plan`;
+      const record = state.plans[planKeyOf(leaf.key)] ?? state.plans[leaf.key];
+      if (!record) return `node frame ${leaf.key} has no plan execution`;
+      if (!record.plan.nodes.some((node) => node.id === leaf.nodeId)) return `node ${leaf.nodeId} is not in the active plan`;
       return undefined;
     }
     default:
@@ -82,7 +82,7 @@ function validateLeaf(workflow: Workflow, state: Execution, leaf: Frame): string
   }
 }
 
-function validateCheckpoints(workflow: Workflow, state: Execution): string | undefined {
+function validateCheckpoints(workflow: Workflow, state: Run): string | undefined {
   // Loop-invariant plan-node index, built once per validateAgainstWorkflow call
   // (c3 repair): one enumeration of every plan's nodes, then an O(1) keyed
   // lookup per checkpoint key. The guarded set keeps the old .find
@@ -138,20 +138,20 @@ function validateCheckpoints(workflow: Workflow, state: Execution): string | und
   return undefined;
 }
 
-export function validateAgainstWorkflow(workflow: Workflow, execution: Execution): ValidationResult {
-  if (execution.workflowName !== workflow.name) return reject(`snapshot belongs to workflow ${execution.workflowName}, not ${workflow.name}`);
-  const stack = execution.stack;
+export function validateAgainstWorkflow(workflow: Workflow, run: Run): ValidationResult {
+  if (run.workflowName !== workflow.name) return reject(`snapshot belongs to workflow ${run.workflowName}, not ${workflow.name}`);
+  const stack = run.stack;
   const rootFrame = stack[0];
   if (!rootFrame || rootFrame.kind !== "sequence" || rootFrame.blockId !== workflow.root.id) {
     return reject(`snapshot does not start at the root sequence ${workflow.root.id}`);
   }
   for (let i = 0; i < stack.length - 1; i += 1) {
-    const problem = validatePair(workflow, execution, stack[i], stack[i + 1], execution.plans);
+    const problem = validatePair(workflow, run, stack[i], stack[i + 1], run.plans);
     if (problem) return reject(problem);
   }
-  const leafProblem = validateLeaf(workflow, execution, stack[stack.length - 1]);
+  const leafProblem = validateLeaf(workflow, run, stack[stack.length - 1]);
   if (leafProblem) return reject(leafProblem);
-  const checkpointProblem = validateCheckpoints(workflow, execution);
+  const checkpointProblem = validateCheckpoints(workflow, run);
   if (checkpointProblem) return reject(checkpointProblem);
-  return { ok: true, execution };
+  return { ok: true, execution: run };
 }

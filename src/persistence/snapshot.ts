@@ -1,8 +1,8 @@
-import { isStructuralFrame, type Execution, type Frame } from "../domain/execution.ts";
+import { isStructuralFrame, type Run, type Frame } from "../domain/run.ts";
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { validateCheckpoint } from "../domain/checkpoint.ts";
 import { LIMITS } from "../domain/limits.ts";
-import type { PlanExecution } from "../domain/execution.ts";
+import type { PlanRecord } from "../domain/run.ts";
 import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.ts";
 import type { NodeInvocation, NodeStatus, RunnerKind } from "../domain/node.ts";
@@ -42,14 +42,14 @@ export type ActiveSnapshotV7 = {
   readonly v: 7;
   readonly status: "active";
   readonly workflow: string;
-  readonly execution: Execution;
+  readonly execution: Run;
   readonly delivered: boolean;
   readonly baselineTools?: readonly string[];
 };
 
 type TerminalSnapshot =
-  | { readonly v: 7; readonly status: "completed"; readonly workflow: string; readonly runId: string; readonly execution?: Execution }
-  | { readonly v: 7; readonly status: "aborted"; readonly workflow: string; readonly runId: string; readonly execution?: Execution }
+  | { readonly v: 7; readonly status: "completed"; readonly workflow: string; readonly runId: string; readonly execution?: Run }
+  | { readonly v: 7; readonly status: "aborted"; readonly workflow: string; readonly runId: string; readonly execution?: Run }
 
 type RolloverSnapshotV6 = {
   readonly v: 6;
@@ -112,9 +112,9 @@ function checkpointsAt(value: unknown, label: string): Record<string, Checkpoint
   return checkpoints;
 }
 
-function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
+function plansAt(value: unknown, label: string): Record<string, PlanRecord> {
   const raw = objectAt(value, label);
-  const plans: Record<string, PlanExecution> = {};
+  const plans: Record<string, PlanRecord> = {};
   for (const [key, entry] of Object.entries(raw)) {
     const planRaw = objectAt(entry, `${label}.${key}`);
     for (const field of Object.keys(planRaw)) {
@@ -127,23 +127,23 @@ function plansAt(value: unknown, label: string): Record<string, PlanExecution> {
     const nodes = (plan as { nodes?: unknown }).nodes;
     if (!Array.isArray(nodes)) throw new Error(`${label}.${key}.plan.nodes must be a list`);
     const resultsRaw = objectAt(planRaw.results, `${label}.${key}.results`);
-    const results: Record<string, PlanExecution["results"][string]> = {};
+    const results: Record<string, PlanRecord["results"][string]> = {};
     for (const [id, value] of Object.entries(resultsRaw)) {
       const result = validateCheckpoint(value, `${label}.${key}.results.${id}`);
       results[id] = result;
     }
     plans[key] = {
       blockId,
-      plan: { version: 1, nodes: nodes as PlanExecution["plan"]["nodes"] },
+      plan: { version: 1, nodes: nodes as PlanRecord["plan"]["nodes"] },
       results,
     };
   }
   return plans;
 }
 
-function loopsAt(value: unknown, label: string): Record<string, Execution["loops"][string]> {
+function loopsAt(value: unknown, label: string): Record<string, Run["loops"][string]> {
   const raw = objectAt(value, label);
-  const loops: Record<string, Execution["loops"][string]> = {};
+  const loops: Record<string, Run["loops"][string]> = {};
   for (const [key, entry] of Object.entries(raw)) {
     const loopRaw = objectAt(entry, `${label}.${key}`);
     for (const field of Object.keys(loopRaw)) {
@@ -168,10 +168,11 @@ function loopsAt(value: unknown, label: string): Record<string, Execution["loops
   return loops;
 }
 
-function executionAt(value: unknown, label: string): Execution {
+/** Decodes the persisted run state. The JSON key `execution` is frozen at snapshot v7. */
+function runAt(value: unknown, label: string): Run {
   const raw = objectAt(value, label);
   for (const field of Object.keys(raw)) {
-    if (!RUN_STATE_FIELDS.includes(field as keyof Execution)) {
+    if (!RUN_STATE_FIELDS.includes(field as keyof Run)) {
       throw new Error(`${label}.${field} is not an accepted execution field`);
     }
   }
@@ -218,16 +219,16 @@ function executionAt(value: unknown, label: string): Execution {
     loops,
     definitionDigest: raw.definitionDigest as string | undefined,
     invocations,
-  } satisfies { [K in Exclude<keyof Execution, "definitionDigest" | "invocations">]-?: Execution[K] } & {
-    definitionDigest: Execution["definitionDigest"];
-    invocations: Execution["invocations"];
+  } satisfies { [K in Exclude<keyof Run, "definitionDigest" | "invocations">]-?: Run[K] } & {
+    definitionDigest: Run["definitionDigest"];
+    invocations: Run["invocations"];
   };
   const projected: Record<string, unknown> = {};
   for (const field of RUN_STATE_FIELDS) {
     const fieldValue = decoded[field];
     if (fieldValue !== undefined) projected[field] = fieldValue;
   }
-  return projected as unknown as Execution;
+  return projected as unknown as Run;
 }
 
 export function parseSnapshot(data: unknown): ParsedSnapshot | null {
@@ -249,8 +250,8 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
     return { status: "invalid", error: "snapshot version must be 7; snapshots from earlier engine versions are not resumable; start the workflow again" };
   }
   try {
-    const execution = executionAt(snapshot.execution, "snapshot.execution");
-    if (execution.workflowName !== snapshot.workflow) throw new Error("snapshot.workflow does not match snapshot.execution.workflowName");
+    const run = runAt(snapshot.execution, "snapshot.execution");
+    if (run.workflowName !== snapshot.workflow) throw new Error("snapshot.workflow does not match snapshot.execution.workflowName");
     if (typeof snapshot.delivered !== "boolean") throw new Error("snapshot.delivered must be a boolean");
     if (snapshot.baselineTools !== undefined) {
       if (
@@ -264,8 +265,8 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
     return {
       v: 7,
       status: "active",
-      workflow: execution.workflowName,
-      execution,
+      workflow: run.workflowName,
+      execution: run,
       delivered: snapshot.delivered as boolean,
       ...(baselineTools ? { baselineTools } : {}),
     };
@@ -276,7 +277,7 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
 
 export function activeSnapshot(fields: {
   workflow: string;
-  execution: Execution;
+  execution: Run;
   delivered: boolean;
   baselineTools?: readonly string[];
 }): ActiveSnapshotV7 {
@@ -319,7 +320,7 @@ export function terminalSnapshot(
   status: "completed" | "aborted",
   workflow: string,
   runId: string,
-  execution?: Execution,
+  execution?: Run,
 ): TerminalSnapshot {
   return { v: 7, status, workflow, runId, ...(execution ? { execution } : {}) };
 }

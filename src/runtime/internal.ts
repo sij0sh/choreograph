@@ -1,4 +1,4 @@
-import type { Execution } from "../domain/execution.ts";
+import type { Run } from "../domain/run.ts";
 import type { TaskOutcome } from "../engine/interpreter.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { ArtifactStore } from "./artifact-store.ts";
@@ -45,14 +45,14 @@ export interface CoordinatorInternals {
   setTools(): void;
   showStatus(ctx: UiContext): void;
   adoptActive(state: ActiveState, ctx: UiContext): void;
-  finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Execution): Promise<ToolResult>;
+  finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Run): Promise<ToolResult>;
   runTerminalExclusive<T>(signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T>;
   supportsSessionRollover(ctx: UiContext): boolean;
-  renderReport(workflow: Workflow, execution: Execution): string;
+  renderReport(workflow: Workflow, run: Run): string;
   requireActive(): ActiveState;
   settleAgent(active: ActiveState, outcome: TaskOutcome): void;
-  drive(active: ActiveState, ctx: UiContext, rerun?: boolean): Promise<Execution>;
-  prepareRollover(workflow: Workflow, execution: Execution, snapshot: unknown, terminal: boolean, ctx: UiContext): boolean;
+  drive(active: ActiveState, ctx: UiContext, rerun?: boolean): Promise<Run>;
+  prepareRollover(workflow: Workflow, run: Run, snapshot: unknown, terminal: boolean, ctx: UiContext): boolean;
   releaseArtifacts(runId: string): void;
   knownTools(): string[];
   isWorkflowTool(name: string): boolean;

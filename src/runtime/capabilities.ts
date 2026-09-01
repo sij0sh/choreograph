@@ -1,5 +1,5 @@
 import { currentPosition, processLeafAt } from "../engine/interpreter.ts";
-import type { Execution } from "../domain/execution.ts";
+import type { Run } from "../domain/run.ts";
 import type { Workflow } from "../domain/workflow.ts";
 
 export const TRANSITION_TOOL_NAME = "workflow_transition";
@@ -7,7 +7,7 @@ export const ABORT_TOOL_NAME = "workflow_abort";
 export const RETRY_TOOL_NAME = "workflow_retry";
 export const CONTROL_TOOLS: readonly string[] = [TRANSITION_TOOL_NAME, ABORT_TOOL_NAME];
 
-export function effectiveTools(workflow: Workflow, state: Execution, baseline: readonly string[]): string[] {
+export function effectiveTools(workflow: Workflow, state: Run, baseline: readonly string[]): string[] {
   let tools = [...baseline];
   if (workflow.tools) {
     const ceiling = new Set(workflow.tools);

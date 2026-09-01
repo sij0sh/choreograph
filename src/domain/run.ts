@@ -100,38 +100,38 @@ export function frameAttempt(frame: Frame): number {
   return isAttemptBearingFrame(frame) ? frame.attempt : 1;
 }
 
-export interface PlanExecution {
+export interface PlanRecord {
   readonly blockId: string;
   readonly plan: DynamicPlan;
   readonly results: Readonly<Record<string, import("../domain/checkpoint.ts").Checkpoint>>;
 }
 
-type ExecutionStatus = "active" | "completed" | "aborted";
+type RunStatus = "active" | "completed" | "aborted";
 
 export interface LoopState {
   readonly iteration: number;
   readonly items?: readonly JsonValue[];
 }
 
-export interface Execution {
+export interface Run {
   readonly workflowName: string;
   readonly runId: string;
   readonly target: string;
-  readonly status: ExecutionStatus;
+  readonly status: RunStatus;
   readonly stack: readonly Frame[];
   readonly checkpoints: Readonly<Record<string, Checkpoint>>;
   readonly checkpointOrder: readonly string[];
-  readonly plans: Readonly<Record<string, PlanExecution>>;
+  readonly plans: Readonly<Record<string, PlanRecord>>;
   readonly loops: Readonly<Record<string, LoopState>>;
   readonly definitionDigest?: string;
   readonly invocations?: Readonly<Record<string, NodeInvocation>>;
 }
 
 export function upsertInvocation(
-  state: Execution,
+  state: Run,
   key: string,
   invocation: NodeInvocation,
-): Execution["invocations"] {
+): Run["invocations"] {
   const invocations: Record<string, NodeInvocation> = { ...(state.invocations ?? {}), [key]: invocation };
   const keys = Object.keys(invocations);
   if (keys.length <= LIMITS.stackDepth) return invocations;
@@ -144,7 +144,7 @@ export function upsertInvocation(
   return invocations;
 }
 /** A run is parked when its leaf position's invocation is waiting on an operator. */
-export function isParked(execution: Execution): boolean {
-  const leaf = execution.stack[execution.stack.length - 1];
-  return leaf !== undefined && execution.invocations?.[leaf.key]?.status === "waiting";
+export function isParked(run: Run): boolean {
+  const leaf = run.stack[run.stack.length - 1];
+  return leaf !== undefined && run.invocations?.[leaf.key]?.status === "waiting";
 }

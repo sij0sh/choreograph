@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { SessionManager, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import type { Execution } from "../domain/execution.ts";
+import type { Run } from "../domain/run.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { summaryMessage, summaryPrefix } from "./prompts.ts";
 import { rolloverSnapshot, SNAPSHOT_TYPE } from "../persistence/snapshot.ts";
@@ -8,17 +8,17 @@ import { createTransfer, preparedTransfer, ROLLOVER_COMMAND, TRANSFER_ENTRY_TYPE
 import type { UiContext } from "./coordinator.ts";
 import type { CoordinatorInternals } from "./internal.ts";
 
-export function prepareRollover(c: CoordinatorInternals, workflow: Workflow, execution: Execution, snapshot: unknown, terminal: boolean, ctx: UiContext): boolean {
+export function prepareRollover(c: CoordinatorInternals, workflow: Workflow, run: Run, snapshot: unknown, terminal: boolean, ctx: UiContext): boolean {
   if (!c.supportsSessionRollover(ctx)) return false;
   const transfer = createTransfer({
     parentSession: ctx.sessionManager?.getSessionFile?.(),
-    runId: execution.runId,
+    runId: run.runId,
     workflow: workflow.name,
     terminal,
     snapshot,
   });
   c.pi.appendEntry(TRANSFER_ENTRY_TYPE, transfer);
-  c.commit(rolloverSnapshot(workflow.name, execution.runId, transfer.transferId), `rollover preparation for ${workflow.title} run ${execution.runId}`, { bypassCap: true });
+  c.commit(rolloverSnapshot(workflow.name, run.runId, transfer.transferId), `rollover preparation for ${workflow.title} run ${run.runId}`, { bypassCap: true });
   c.state = { status: "rollover-pending", transfer };
   c.setTools();
   c.showStatus(ctx);
@@ -93,7 +93,7 @@ export async function performRollover(c: CoordinatorInternals, transferId: strin
     c.pi.appendEntry(TRANSFER_ENTRY_TYPE, completion);
   }
   const workflow = c.workflows.find((item) => item.name === transfer.workflow);
-  const finalExecution = (transfer.snapshot as { execution?: Execution }).execution;
+  const finalExecution = (transfer.snapshot as { execution?: Run }).execution;
   const childEntries = SessionManager.open(childPath).getEntries();
   const summaryAlreadyRequested = childEntries.some((entry) => {
     if (entry.type !== "message" || entry.message.role !== "user") return false;

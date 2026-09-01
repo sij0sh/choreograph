@@ -1,6 +1,6 @@
 import type { Checkpoint } from "../domain/checkpoint.ts";
 import { contractError as contractErrorFor } from "../domain/contract.ts";
-import { frameAttempt, isAttemptBearingFrame, type Execution, type Frame } from "../domain/execution.ts";
+import { frameAttempt, isAttemptBearingFrame, type Run, type Frame } from "../domain/run.ts";
 import { DEFAULT_RECOVERY, type RecoveryPolicy } from "../domain/policy.ts";
 import { blockOf, type Workflow } from "../domain/workflow.ts";
 import { planKeyOf } from "../domain/keys.ts";
@@ -10,7 +10,7 @@ import { enterInvocation } from "./interpreter.ts";
 
 type Outcome = { readonly checkpoint: Checkpoint; readonly issues?: readonly Issue[] };
 
-function deliver(state: Execution): EngineResult {
+function deliver(state: Run): EngineResult {
   return { ok: true, state, effect: { kind: "deliver" } as Effect };
 }
 
@@ -28,25 +28,25 @@ function policyFor(workflow: Workflow, leaf: Frame): RecoveryPolicy {
   return { maxAttempts: maxAttempts ?? DEFAULT_RECOVERY.maxAttempts };
 }
 
-function checkpointContractError(workflow: Workflow, state: Execution, leaf: Frame, checkpoint: Checkpoint): string | undefined {
+function checkpointContractError(workflow: Workflow, state: Run, leaf: Frame, checkpoint: Checkpoint): string | undefined {
   if (leaf.kind === "task") {
     const block = blockOf(workflow, leaf.blockId);
     return block?.kind === "task" ? contractErrorFor(workflow, block.output, checkpoint.data, `checkpoint ${leaf.key}`) : undefined;
   }
   if (leaf.kind !== "node") return undefined;
-  const execution = state.plans[planKeyOf(leaf.key)];
-  const node = execution?.plan.nodes.find((entry) => entry.id === leaf.nodeId);
+  const record = state.plans[planKeyOf(leaf.key)];
+  const node = record?.plan.nodes.find((entry) => entry.id === leaf.nodeId);
   if (!node) return undefined;
   const operator = workflow.operators.get(node.operator);
   if (!operator) return undefined; // process nodes take no checkpoint contract
   return contractErrorFor(workflow, operator.output, checkpoint.data, `checkpoint ${leaf.key}`);
 }
 
-function recordCheckpoint(state: Execution, key: string, checkpoint: Checkpoint): Execution {
+function recordCheckpoint(state: Run, key: string, checkpoint: Checkpoint): Run {
   // Copy-on-write (corr-d1), matching withCheckpoint in interpreter.ts: never
   // mutate the input execution before the runtime commits the outcome.
   const tracked = Object.hasOwn(state.checkpoints, key);
-  const next: Execution = {
+  const next: Run = {
     ...state,
     checkpoints: { ...state.checkpoints, [key]: checkpoint },
     checkpointOrder: tracked ? state.checkpointOrder : [...state.checkpointOrder, key],
@@ -55,7 +55,7 @@ function recordCheckpoint(state: Execution, key: string, checkpoint: Checkpoint)
   return next;
 }
 
-export function applyNeedsWork(workflow: Workflow, state: Execution, outcome: Outcome): EngineResult {
+export function applyNeedsWork(workflow: Workflow, state: Run, outcome: Outcome): EngineResult {
   const stack = [...state.stack];
   const leaf = stack[stack.length - 1];
   if (!leaf) return fail("execution has no current leaf task");
@@ -71,7 +71,7 @@ export function applyNeedsWork(workflow: Workflow, state: Execution, outcome: Ou
   return stayWithCheckpoint(workflow, state, leaf, outcome.checkpoint);
 }
 
-function stayWithCheckpoint(workflow: Workflow, state: Execution, leaf: Frame, checkpoint: Checkpoint): EngineResult {
+function stayWithCheckpoint(workflow: Workflow, state: Run, leaf: Frame, checkpoint: Checkpoint): EngineResult {
   const waiting = enterInvocation(workflow, state, leaf, "waiting");
   const recorded = recordCheckpoint(waiting, leaf.key, checkpoint);
   return { ok: true, state: recorded, effect: { kind: "stay" } as Effect };

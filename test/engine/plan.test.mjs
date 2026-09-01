@@ -121,7 +121,7 @@ test("a completed plan block is skipped on re-entry", () => {
 
 test("plan executions persist and restore through snapshots", async () => {
   const { activeSnapshot, parseSnapshot } = await import("../../src/persistence/snapshot.ts");
-  const { validateAgainstWorkflow } = await import("../../src/persistence/validate-stored-execution.ts");
+  const { validateAgainstWorkflow } = await import("../../src/persistence/validate-stored-run.ts");
   const wf = planWorkflow();
   let state = start(wf, { runId: "r1" }).state;
   state = transition(wf, state, { type: "outcome", outcome: { status: "completed", checkpoint: { summary: "framed" } } }).state;

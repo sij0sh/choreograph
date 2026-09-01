@@ -2,7 +2,7 @@ import { isAbsolute } from "node:path";
 import type { Workflow } from "../domain/workflow.ts";
 import { workflowBlocks } from "../domain/workflow.ts";
 import { countSnapshotEntries, latestSnapshot, snapshotBytesInBranch } from "../persistence/store.ts";
-import { validateAgainstWorkflow } from "../persistence/validate-stored-execution.ts";
+import { validateAgainstWorkflow } from "../persistence/validate-stored-run.ts";
 import { WorkflowCompileError } from "./frozen-definition.ts";
 import { preparedTransfer, ROLLOVER_COMMAND } from "./transfer.ts";
 import { sweepWorkflowArtifacts } from "./retention.ts";

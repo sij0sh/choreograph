@@ -1,6 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { isAttemptBearingFrame, type Execution, type Frame } from "../domain/execution.ts";
+import { isAttemptBearingFrame, type Run, type Frame } from "../domain/run.ts";
 import { blockOf, type Block, type Workflow } from "../domain/workflow.ts";
 
 /** Persistent view selector; `inspect` exists only for the on-demand panel. */
@@ -86,7 +86,7 @@ function runnerOfLeaf(workflow: Workflow, leaf: Frame | undefined): "agent" | "p
  * The interpreter increments a sequence cursor before pushing its child, so the
  * active top-level child sits one behind the root cursor.
  */
-export function buildWorkflowView(workflow: Workflow, execution: Execution): WorkflowView | undefined {
+export function buildWorkflowView(workflow: Workflow, execution: Run): WorkflowView | undefined {
   if (execution.status !== "active") return undefined;
   const rootFrame = execution.stack[0];
   if (!rootFrame || rootFrame.kind !== "sequence" || rootFrame.blockId !== workflow.root.id) return undefined;
@@ -95,8 +95,8 @@ export function buildWorkflowView(workflow: Workflow, execution: Execution): Wor
   const activeIndex = Math.min(Math.max(rootFrame.index - 1, 0), children.length - 1);
   const relative = (key: string) => stripKeyPrefix(rootId, key);
 
-  let loopState: Execution["loops"][string] | undefined;
-  let planExecution: Execution["plans"][string] | undefined;
+  let loopState: Run["loops"][string] | undefined;
+  let planExecution: Run["plans"][string] | undefined;
   for (const frame of execution.stack) {
     if (frame.kind === "loop") loopState = execution.loops[frame.key];
     if (frame.kind === "plan" && frame.mode === "execute") planExecution = execution.plans[frame.key];

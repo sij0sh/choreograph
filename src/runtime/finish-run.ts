@@ -1,4 +1,4 @@
-import { frameAttempt, isAttemptBearingFrame, upsertInvocation, type Execution } from "../domain/execution.ts";
+import { frameAttempt, isAttemptBearingFrame, upsertInvocation, type Run } from "../domain/run.ts";
 import { LIMITS } from "../domain/limits.ts";
 import { processLeafAt } from "../engine/interpreter.ts";
 import { terminalSnapshot } from "../persistence/snapshot.ts";
@@ -51,7 +51,7 @@ export async function runAbort(c: CoordinatorInternals, signal: AbortSignal | un
   });
 }
 
-export async function finishRun(c: CoordinatorInternals, current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Execution): Promise<ToolResult> {
+export async function finishRun(c: CoordinatorInternals, current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Run): Promise<ToolResult> {
   if (status === "completed" && c.supportsSessionRollover(ctx)) {
     try {
       c.prepareRollover(current.workflow, final, terminalSnapshot(status, current.workflow.name, current.execution.runId, final), true, ctx);

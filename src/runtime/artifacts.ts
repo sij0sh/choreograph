@@ -1,7 +1,7 @@
 import { ARTIFACT_MEDIA_TYPES, isArtifactRef, resolveBinding, type ResolvedInput } from "../domain/artifacts.ts";
 import type { ArtifactRef } from "../domain/node.ts";
 import type { ArtifactStore } from "./artifact-store.ts";
-import type { Execution } from "../domain/execution.ts";
+import type { Run } from "../domain/run.ts";
 import { isJsonValue, type JsonValue } from "../domain/json.ts";
 import type { InputBinding, Workflow } from "../domain/workflow.ts";
 
@@ -103,7 +103,7 @@ function materializeRefs(value: JsonValue, materialize: ArtifactMaterializer, de
  * Values arrive only through explicit bindings; there is no implicit
  * interpolation into argv or environment entries.
  */
-export function resolveScriptInputs(workflow: Workflow, state: Execution, bindings: Readonly<Record<string, InputBinding>> | undefined, materialize?: ArtifactMaterializer): ResolvedScriptInputs {
+export function resolveScriptInputs(workflow: Workflow, state: Run, bindings: Readonly<Record<string, InputBinding>> | undefined, materialize?: ArtifactMaterializer): ResolvedScriptInputs {
   if (!bindings) return { ok: true, inputs: {} };
   const inputs: Record<string, JsonValue> = {};
   for (const [name, binding] of Object.entries(bindings)) {

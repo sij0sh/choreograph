@@ -1,6 +1,6 @@
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { Execution } from "../domain/execution.ts";
+import type { Run } from "../domain/run.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import type { RolloverTransferV2 } from "./transfer.ts";
 
@@ -41,7 +41,7 @@ export type UiContext = {
 export type ActiveState = {
   status: "active";
   workflow: Workflow;
-  execution: Execution;
+  execution: Run;
   delivered: boolean;
 };
 

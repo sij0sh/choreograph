@@ -10,7 +10,7 @@ import { clearRunMarker, writeRunMarker } from "./run-marker.ts";
 import { dirname, isAbsolute } from "node:path";
 import { start as engineStart } from "../engine/interpreter.ts";
 import type { TaskOutcome } from "../engine/interpreter.ts";
-import type { Execution } from "../domain/execution.ts";
+import type { Run } from "../domain/run.ts";
 import { LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { SnapshotByteBudgetReached, SnapshotCapReached, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
@@ -28,7 +28,7 @@ import {
   type WorkflowView,
 } from "./workflow-ui.ts";
 import { DeliveryCoordinator } from "./delivery.ts";
-import { deliverPending as deliverPendingNow, drive as driveRun, settleAgent as settleAgentNow } from "./execution-driver.ts";
+import { deliverPending as deliverPendingNow, drive as driveRun, settleAgent as settleAgentNow } from "./run-driver.ts";
 import { performRollover as performRolloverNow, prepareRollover as prepareRolloverNow } from "./rollover.ts";
 import { sweepWorkflowArtifacts } from "./retention.ts";
 import { runTransition } from "./transition.ts";
@@ -288,15 +288,15 @@ export class RuntimeCoordinator {
     return typeof ctx.sessionManager?.getSessionDir === "function" && Boolean(ctx.sessionManager.getSessionFile?.());
   }
 
-  renderReport(workflow: Workflow, execution: Execution): string {
-    return renderReportEnvelope(workflow, execution, this.frozen.promptRead);
+  renderReport(workflow: Workflow, run: Run): string {
+    return renderReportEnvelope(workflow, run, this.frozen.promptRead);
   }
 
-  private prepareRollover(workflow: Workflow, execution: Execution, snapshot: unknown, terminal: boolean, ctx: UiContext): boolean {
+  private prepareRollover(workflow: Workflow, execution: Run, snapshot: unknown, terminal: boolean, ctx: UiContext): boolean {
     return prepareRolloverNow(this as unknown as CoordinatorInternals, workflow, execution, snapshot, terminal, ctx);
   }
 
-  private async drive(active: ActiveState, ctx: UiContext, rerun = false): Promise<Execution> {
+  private async drive(active: ActiveState, ctx: UiContext, rerun = false): Promise<Run> {
     return driveRun(this as unknown as CoordinatorInternals, active, ctx, rerun);
   }
 
@@ -307,7 +307,7 @@ export class RuntimeCoordinator {
     if (!started.ok) throw new Error(started.error);
     this.frozen.freezePromptSources(workflow);
     const digest = this.frozen.frozenFor(workflow).digest;
-    const execution: Execution = { ...started.state, definitionDigest: digest };
+    const execution: Run = { ...started.state, definitionDigest: digest };
     const next: ActiveState = { status: "active", workflow, execution, delivered: false };
     this.commit(this.snapshotOf(next, false), `start of ${workflow.title} run ${next.execution.runId}`);
     this.isolationRunId = next.execution.runId;
@@ -340,7 +340,7 @@ export class RuntimeCoordinator {
     return runTransition(this as unknown as CoordinatorInternals, params, signal, ctx);
   }
 
-  private async finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Execution): Promise<ToolResult> {
+  private async finishRun(current: ActiveState, ctx: UiContext, status: "completed" | "aborted", final: Run): Promise<ToolResult> {
     return finishRunNow(this as unknown as CoordinatorInternals, current, ctx, status, final);
   }
 

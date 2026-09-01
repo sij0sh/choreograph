@@ -1,5 +1,5 @@
 import { canonicalJson, jsonPointerGet, type JsonValue } from "./json.ts";
-import type { Execution } from "./execution.ts";
+import type { Run } from "./run.ts";
 import type { Workflow } from "./workflow.ts";
 import { producerArtifact } from "./artifacts.ts";
 
@@ -40,7 +40,7 @@ function finiteNumber(value: JsonValue): value is number {
 
 function operand(
   workflow: Workflow,
-  state: Execution,
+  state: Run,
   guard: GuardClause,
 ): { ok: true; present: true; value: JsonValue } | { ok: true; present: false } | { ok: false; error: string } {
   const artifact = producerArtifact(workflow, state, guard.from);
@@ -98,7 +98,7 @@ function valueHolds(guard: GuardClause, source: string, value: JsonValue): Value
   }
 }
 
-export function evaluateGuard(workflow: Workflow, state: Execution, guard: GuardClause): GuardResult {
+export function evaluateGuard(workflow: Workflow, state: Run, guard: GuardClause): GuardResult {
   const found = operand(workflow, state, guard);
   if (!found.ok) return { ok: false, error: found.error };
   const source = guardSource(guard);

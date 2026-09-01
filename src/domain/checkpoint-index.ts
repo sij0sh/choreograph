@@ -1,5 +1,5 @@
 import type { Checkpoint } from "./checkpoint.ts";
-import type { Execution } from "./execution.ts";
+import type { Run } from "./run.ts";
 import { lastSegment } from "./keys.ts";
 
 /**
@@ -19,7 +19,7 @@ export type CheckpointIndex = {
 const cache = new WeakMap<object, CheckpointIndex>();
 
 /** Returns the record-keyed index, building it once per record (newest commit per block wins). */
-export function checkpointIndexFor(state: Execution, rootPrefix: string): CheckpointIndex {
+export function checkpointIndexFor(state: Run, rootPrefix: string): CheckpointIndex {
   const record = state.checkpoints as object;
   const cached = cache.get(record);
   if (cached) return cached;
@@ -28,7 +28,7 @@ export function checkpointIndexFor(state: Execution, rootPrefix: string): Checkp
   return index;
 }
 
-function buildIndex(state: Execution, rootPrefix: string): CheckpointIndex {
+function buildIndex(state: Run, rootPrefix: string): CheckpointIndex {
   const newestByBlock = new Map<string, NewestCheckpoint>();
   const order = state.checkpointOrder ?? Object.keys(state.checkpoints);
   for (let index = order.length - 1; index >= 0; index -= 1) {
@@ -47,12 +47,12 @@ function buildIndex(state: Execution, rootPrefix: string): CheckpointIndex {
 }
 
 /** Updates the newest-per-block entry after a commit; no-op until the index is built. */
-export function noteCheckpointCommitted(state: Execution, key: string, checkpoint: Checkpoint): void {
+export function noteCheckpointCommitted(state: Run, key: string, checkpoint: Checkpoint): void {
   cache.get(state.checkpoints as object)?.newestByBlock.set(lastSegment(key), { key, checkpoint });
 }
 
 /** Restores or drops the newest-per-block entry after an in-place checkpoint removal. */
-export function noteCheckpointRemoved(state: Execution, key: string, rootPrefix: string): void {
+export function noteCheckpointRemoved(state: Run, key: string, rootPrefix: string): void {
   const index = cache.get(state.checkpoints as object);
   if (!index) return;
   const blockId = lastSegment(key);
@@ -62,7 +62,7 @@ export function noteCheckpointRemoved(state: Execution, key: string, rootPrefix:
   else index.newestByBlock.delete(blockId);
 }
 
-function restoreNewest(state: Execution, rootPrefix: string, blockId: string, removedKey: string): NewestCheckpoint | undefined {
+function restoreNewest(state: Run, rootPrefix: string, blockId: string, removedKey: string): NewestCheckpoint | undefined {
   const order = state.checkpointOrder ?? Object.keys(state.checkpoints);
   for (let index = order.length - 1; index >= 0; index -= 1) {
     const key = order[index]!;
@@ -74,12 +74,12 @@ function restoreNewest(state: Execution, rootPrefix: string, blockId: string, re
 }
 
 /** Points the block at its newly created plan execution; no-op until the index is built. */
-export function notePlanKeyCreated(state: Execution, blockId: string, planKey: string): void {
+export function notePlanKeyCreated(state: Run, blockId: string, planKey: string): void {
   cache.get(state.checkpoints as object)?.planKeyByBlock.set(blockId, planKey);
 }
 
 /** Drops the block's plan entry when its execution is removed; no-op until the index is built. */
-export function notePlanKeyRemoved(state: Execution, blockId: string, planKey: string): void {
+export function notePlanKeyRemoved(state: Run, blockId: string, planKey: string): void {
   const index = cache.get(state.checkpoints as object);
   if (index?.planKeyByBlock.get(blockId) === planKey) index.planKeyByBlock.delete(blockId);
 }

@@ -6,7 +6,7 @@ import {
   isAttemptBearingFrame,
   isLeafFrame,
   isStructuralFrame,
-} from "../../src/domain/execution.ts";
+} from "../../src/domain/run.ts";
 import {
   BLOCK_KIND_KEYS,
   isAgentFacingBlock,

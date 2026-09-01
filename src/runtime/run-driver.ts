@@ -7,9 +7,9 @@ import {
   isAgentDispatchFrame,
   isParked,
   type AgentDispatchFrame,
-  type Execution,
+  type Run,
   upsertInvocation,
-} from "../domain/execution.ts";
+} from "../domain/run.ts";
 import { processLeafAt, transition as engineTransition, type TaskOutcome } from "../engine/interpreter.ts";
 import { activeSnapshot } from "../persistence/snapshot.ts";
 import { withinMemoryBound, SnapshotByteBudgetReached, SnapshotCapReached, WorkflowStorageError } from "../persistence/store.ts";
@@ -59,7 +59,7 @@ async function parkOnDispatchFailure(
   processKey: string,
   detail: string,
   attempt: number,
-): Promise<Execution> {
+): Promise<Run> {
   const leaf = current.execution.stack[current.execution.stack.length - 1];
   const base = current.execution.invocations?.[processKey] ?? {
     blockId: leaf?.blockId ?? processKey,
@@ -67,14 +67,14 @@ async function parkOnDispatchFailure(
     runner: "process" as const,
     attempt,
   };
-  const execution: Execution = {
+  const run: Run = {
     ...current.execution,
     invocations: upsertInvocation(current.execution, processKey, { ...base, status: "waiting", attempt }),
   };
   ctx.ui.notify(`${detail} The run is parked at ${processKey}; fix the cause, then call workflow_retry to re-run it or workflow_abort to stop the run.`, "error");
-  c.adoptActive({ ...current, execution, delivered: false }, ctx);
+  c.adoptActive({ ...current, execution: run, delivered: false }, ctx);
   await deliverPending(c);
-  return execution;
+  return run;
 }
 
 export function dispatchAgent(c: CoordinatorInternals, active: ActiveState, leaf: AgentDispatchFrame): void {
@@ -127,7 +127,7 @@ export function publishLogs(c: CoordinatorInternals, runId: string, key: string,
   }
 }
 
-export async function drive(c: CoordinatorInternals, active: ActiveState, ctx: UiContext, rerun = false): Promise<Execution> {
+export async function drive(c: CoordinatorInternals, active: ActiveState, ctx: UiContext, rerun = false): Promise<Run> {
   if (!rerun && processLeafAt(active.workflow, active.execution) && isParked(active.execution)) {
     await deliverPending(c);
     return active.execution;
@@ -135,7 +135,7 @@ export async function drive(c: CoordinatorInternals, active: ActiveState, ctx: U
   return await driveLoop(c, active, ctx);
 }
 
-async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiContext): Promise<Execution> {
+async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiContext): Promise<Run> {
   let current = active;
   let execution = active.execution;
   while (c.state === current) {

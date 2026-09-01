@@ -1,4 +1,4 @@
-import type { Execution, PlanExecution } from "./execution.ts";
+import type { Run, PlanRecord } from "./run.ts";
 import { jsonPointerGet, type JsonValue } from "./json.ts";
 import type { Workflow } from "./workflow.ts";
 import { blockOf, isBindableBlock, type AuthoredBlock } from "./workflow.ts";
@@ -48,7 +48,7 @@ function selectValue(value: JsonValue, producerId: string, select: string | unde
   return { ok: true, value: selected.value };
 }
 
-export function resolveBinding(workflow: Workflow, state: Execution, binding: InputBinding): ResolvedInput {
+export function resolveBinding(workflow: Workflow, state: Run, binding: InputBinding): ResolvedInput {
   if (binding.from === "$item") {
     const item = itemOf(state);
     if (item === undefined) return { ok: false, error: `input "from" names "$item", which resolves only inside a for_each loop body` };
@@ -84,38 +84,38 @@ export type ArtifactResult =
   | { readonly ok: true; readonly present: false; readonly reason: ArtifactAbsence; readonly skipped?: Checkpoint }
   | { readonly ok: false; readonly error: string };
 
-function checkpointOf(workflow: Workflow, state: Execution, blockId: string): { key: string; checkpoint: NonNullable<Execution["checkpoints"][string]> } | undefined {
+function checkpointOf(workflow: Workflow, state: Run, blockId: string): { key: string; checkpoint: NonNullable<Run["checkpoints"][string]> } | undefined {
   return checkpointIndexFor(state, `${workflow.root.id}/`).newestByBlock.get(blockId);
 }
 
 export function completedPlanNodeOf(
-  execution: PlanExecution,
+  record: PlanRecord,
   nodeId: string,
 ): { readonly node: PlanNode; readonly result: Checkpoint } | undefined {
-  const node = execution.plan.nodes.find((candidate) => candidate.id === nodeId);
-  if (!node || !Object.hasOwn(execution.results, nodeId)) return undefined;
-  const result = execution.results[nodeId];
+  const node = record.plan.nodes.find((candidate) => candidate.id === nodeId);
+  if (!node || !Object.hasOwn(record.results, nodeId)) return undefined;
+  const result = record.results[nodeId];
   return result === undefined ? undefined : { node, result };
 }
 
-function aggregateOf(state: Execution, key: string): JsonValue | undefined {
-  const execution = state.plans[key];
-  if (!execution) return undefined;
-  const nodes = execution.plan.nodes.map((node) => ({
+function aggregateOf(state: Run, key: string): JsonValue | undefined {
+  const record = state.plans[key];
+  if (!record) return undefined;
+  const nodes = record.plan.nodes.map((node) => ({
     id: node.id,
     operator: node.operator,
     objective: node.objective,
     ...(node.evidence !== undefined ? { evidence: [...node.evidence] } : {}),
-    result: (completedPlanNodeOf(execution, node.id)?.result ?? null) as unknown as JsonValue,
+    result: (completedPlanNodeOf(record, node.id)?.result ?? null) as unknown as JsonValue,
   }));
   return { version: 1, nodes } as JsonValue;
 }
 
-function planKeyForBlock(workflow: Workflow, state: Execution, blockId: string): string | undefined {
+function planKeyForBlock(workflow: Workflow, state: Run, blockId: string): string | undefined {
   return checkpointIndexFor(state, `${workflow.root.id}/`).planKeyByBlock.get(blockId);
 }
 
-function itemOf(state: Execution): JsonValue | undefined {
+function itemOf(state: Run): JsonValue | undefined {
   for (let i = state.stack.length - 1; i >= 0; i -= 1) {
     const frame = state.stack[i];
     if (frame.kind !== "loop") continue;
@@ -125,7 +125,7 @@ function itemOf(state: Execution): JsonValue | undefined {
   return undefined;
 }
 
-function artifactForBlock(workflow: Workflow, state: Execution, block: AuthoredBlock): ArtifactResult {
+function artifactForBlock(workflow: Workflow, state: Run, block: AuthoredBlock): ArtifactResult {
   switch (block.kind) {
     case "task":
     case "script": {
@@ -160,7 +160,7 @@ function artifactForBlock(workflow: Workflow, state: Execution, block: AuthoredB
   }
 }
 
-export function producerArtifact(workflow: Workflow, state: Execution, blockId: string): ArtifactResult {
+export function producerArtifact(workflow: Workflow, state: Run, blockId: string): ArtifactResult {
   const block = blockOf(workflow, blockId);
   if (!block) return { ok: false, error: `"${blockId}" is not a step of ${workflow.name}` };
   if (!isBindableBlock(block)) return { ok: false, error: `"${blockId}" does not produce artifacts` };

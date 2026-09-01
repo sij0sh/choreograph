@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { task, workflow } from '../engine/helpers.mjs';
 import { start, transition as engineTransition } from '../../src/engine/interpreter.ts';
-import { validateAgainstWorkflow } from '../../src/persistence/validate-stored-execution.ts';
+import { validateAgainstWorkflow } from '../../src/persistence/validate-stored-run.ts';
 
 // Keyed outcomes (corr-c1): the engine requires each outcome event to carry the
 // leaf key. Tests inject it automatically; an explicit key in the event wins.

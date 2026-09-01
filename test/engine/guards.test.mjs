@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { start, transition as engineTransition } from "../../src/engine/interpreter.ts";
-import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-execution.ts";
+import { validateAgainstWorkflow } from "../../src/persistence/validate-stored-run.ts";
 import { completed, cp, needsWork, script, task, workflow } from "./helpers.mjs";
 
 // Keyed outcomes (corr-c1): the engine requires each outcome event to carry the
