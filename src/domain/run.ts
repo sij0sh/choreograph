@@ -106,7 +106,35 @@ export interface PlanRecord {
   readonly results: Readonly<Record<string, import("../domain/checkpoint.ts").Checkpoint>>;
 }
 
-type RunStatus = "active" | "completed" | "aborted";
+/** The engine persists these as its own transitions; `paused` parks the session without stopping the engine. */
+type RunStatus = Exclude<RunLifecycleStatus, "paused">;
+
+/**
+ * Lifecycle statuses a run occupies from start to its terminal record. The
+ * roles table below owns every liveness question; consumers project named
+ * roles instead of comparing status literals.
+ */
+export type RunLifecycleStatus = "active" | "paused" | "completed" | "aborted";
+
+export type LifecycleRoles = {
+  /** The run drives, delivers instructions, and accepts model transitions. */
+  readonly live: boolean;
+  /** workflow_abort may end the run. */
+  readonly abortable: boolean;
+};
+
+const LIFECYCLE_ROLES: Readonly<Record<RunLifecycleStatus, LifecycleRoles>> = {
+  active: { live: true, abortable: true },
+  paused: { live: false, abortable: true },
+  completed: { live: false, abortable: false },
+  aborted: { live: false, abortable: false },
+};
+
+export function lifecycleRoles(status: RunLifecycleStatus): LifecycleRoles {
+  return LIFECYCLE_ROLES[status];
+}
+
+export const RUN_LIFECYCLE_STATUSES = Object.keys(LIFECYCLE_ROLES) as RunLifecycleStatus[];
 
 export interface LoopState {
   readonly iteration: number;

@@ -50,6 +50,12 @@ export async function retryRun(c: CoordinatorInternals, signal: AbortSignal | un
   } finally {
     c.suppressDelivery = false;
   }
+  if (c.state.status === "paused") {
+    return {
+      content: [{ type: "text", text: `Retried process ${process.key}; the run is paused at ${c.state.execution.stack.at(-1)?.key}. Abort the run or narrow the workflow outputs.` }],
+      details: { workflow: c.state.workflow.name, runId: c.state.execution.runId, position: c.state.execution.stack.at(-1)?.key, status: "paused" },
+    };
+  }
   if (c.state.status !== "active") {
     return {
       content: [{ type: "text", text: `Retried process ${process.key}; ${current.workflow.title} run ${current.execution.runId} completed. A summary request arrives in the next message.` }],

@@ -1,6 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { isAttemptBearingFrame, type Run, type Frame } from "../domain/run.ts";
+import { isAttemptBearingFrame, type Run, type Frame, type RunLifecycleStatus } from "../domain/run.ts";
 import { blockOf, type Block, type Workflow } from "../domain/workflow.ts";
 
 /** Persistent view selector; `inspect` exists only for the on-demand panel. */
@@ -40,7 +40,7 @@ export type CompletedView = {
 export type WorkflowView = {
   readonly workflow: string;
   readonly runId: string;
-  readonly state: "running" | "waiting";
+  readonly state: "running" | "waiting" | "paused";
   readonly phases: readonly PhaseView[];
   readonly current?: {
     readonly path: string;
@@ -86,7 +86,7 @@ function runnerOfLeaf(workflow: Workflow, leaf: Frame | undefined): "agent" | "p
  * The interpreter increments a sequence cursor before pushing its child, so the
  * active top-level child sits one behind the root cursor.
  */
-export function buildWorkflowView(workflow: Workflow, execution: Run): WorkflowView | undefined {
+export function buildWorkflowView(workflow: Workflow, execution: Run, lifecycle: Extract<RunLifecycleStatus, "active" | "paused"> = "active"): WorkflowView | undefined {
   if (execution.status !== "active") return undefined;
   const rootFrame = execution.stack[0];
   if (!rootFrame || rootFrame.kind !== "sequence" || rootFrame.blockId !== workflow.root.id) return undefined;
@@ -138,7 +138,7 @@ export function buildWorkflowView(workflow: Workflow, execution: Run): WorkflowV
   return {
     workflow: workflow.title,
     runId: execution.runId,
-    state: waiting ? "waiting" : "running",
+    state: lifecycle === "paused" ? "paused" : waiting ? "waiting" : "running",
     phases,
     ...(leaf
       ? {
@@ -190,7 +190,7 @@ const MARKER_COLORS: Record<PhaseState, keyof WorkflowPalette> = {
 };
 
 function stateLabel(view: WorkflowView, palette: WorkflowPalette): string {
-  return view.state === "waiting" ? palette.warning("WAITING") : palette.accent("RUNNING");
+  return view.state === "paused" ? palette.error("PAUSED") : view.state === "waiting" ? palette.warning("WAITING") : palette.accent("RUNNING");
 }
 
 function headerLine(view: WorkflowView, width: number, palette: WorkflowPalette): string {
@@ -261,8 +261,8 @@ function tailLines(view: WorkflowView, attentionShown: boolean, palette: Workflo
 }
 
 function renderRail(view: WorkflowView, detailed: boolean, width: number, palette: WorkflowPalette): string[] {
-  // A parked run overrides the routine now-line with its attention reason.
-  const parked = view.state === "waiting" && view.attention !== undefined;
+  // A parked or paused run overrides the routine now-line with its attention reason.
+  const parked = (view.state === "waiting" || view.state === "paused") && view.attention !== undefined;
   const lines = [headerLine(view, width, palette), phaseLine(view, width, palette), parked ? attentionLine(view, palette) : nowLine(view, width, palette)];
   return detailed ? [...lines, ...tailLines(view, parked, palette)] : lines;
 }

@@ -49,6 +49,12 @@ The spec owns statuses, top-level fields, checkpoint fields, required fields, co
 
 `src/engine/outcome.ts` owns `TaskOutcome`, the engine's discriminated semantic union. `src/engine/interpreter.ts` re-exports it. Runtime modules import it instead of restating its structure.
 
+## Run lifecycle
+
+`src/domain/run.ts` owns `RunLifecycleStatus` and the lifecycle roles table (`lifecycleRoles`): the live and abortable answers per status. `src/runtime/types.ts` maps the coordinator's `RunState` onto that table (`runStateRoles`, `liveRunState`, `runPayloadState`); runtime modules ask those helpers instead of comparing run-state status literals, and the session-lifecycle vocabulary never appears below the runtime layer.
+
+A paused run is a session-level park: the engine's `Run.status` never holds `paused`. `src/persistence/snapshot.ts` owns the paused snapshot record, its parse row in the status decoder table (a lifecycle status without a parse row fails compilation), and the O(1) pause marker; `src/persistence/store.ts` folds markers into paused records the way it folds delivered tombstones. `/workflow-resume` owns the in-session resume.
+
 ## Producer artifacts
 
 `src/domain/artifacts.ts` owns the block-kind to artifact-source and artifact-shape dispatch. `resolveBinding` adds loud binding errors around that shared dispatch. `producerArtifact` remains total for incomplete producers. Prompt and planning consumers use exported plan-result accessors instead of probing `PlanRecord.results`.

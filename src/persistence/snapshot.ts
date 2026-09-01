@@ -8,6 +8,7 @@ import type { JsonValue } from "../domain/json.ts";
 import { isJsonValue, jsonDepth, objectAt, requireString } from "../domain/json.ts";
 import type { Invocation, InvocationStatus, RunnerKind } from "../domain/invocation.ts";
 import { loopFrameKeys, loopStateForFrame, RUN_STATE_FIELDS, RUN_STATE_SCHEMA } from "./run-state-schema.ts";
+import type { RunLifecycleStatus } from "../domain/run.ts";
 
 /**
  * A decode allowlist is exhaustiveness-linked to its domain union: a stale
@@ -60,6 +61,9 @@ export type ActiveSnapshotV7 = {
   readonly baselineTools?: readonly string[];
 };
 
+/** A parked run keeps its full execution; only the status differs from active. */
+export type PausedSnapshotV7 = Omit<ActiveSnapshotV7, "status"> & { readonly status: "paused" };
+
 type TerminalSnapshot =
   | { readonly v: 7; readonly status: "completed"; readonly workflow: string; readonly runId: string; readonly execution?: Run }
   | { readonly v: 7; readonly status: "aborted"; readonly workflow: string; readonly runId: string; readonly execution?: Run }
@@ -74,6 +78,7 @@ type RolloverSnapshotV6 = {
 
 export type ParsedSnapshot =
   | ActiveSnapshotV7
+  | PausedSnapshotV7
   | RolloverSnapshotV6
   | TerminalSnapshot
   | { readonly status: "terminal" }
@@ -249,21 +254,18 @@ function runAt(value: unknown, label: string): Run {
   return projected as unknown as Run;
 }
 
-export function parseSnapshot(data: unknown): ParsedSnapshot | null {
-  if (typeof data !== "object" || data === null) return null;
-  const snapshot = data as Record<string, unknown>;
-  if (snapshot.status === "completed" || snapshot.status === "aborted") return { status: "terminal" };
-  if (snapshot.status === "rollover-pending") {
-    if (snapshot.v !== 6 || typeof snapshot.workflow !== "string" || typeof snapshot.runId !== "string" || typeof snapshot.transferId !== "string") {
-      return { status: "invalid", error: "rollover snapshot fields are invalid" };
-    }
-    return { v: 6, status: "rollover-pending", workflow: snapshot.workflow, runId: snapshot.runId, transferId: snapshot.transferId };
+function terminalAt(): ParsedSnapshot | null {
+  return { status: "terminal" };
+}
+
+function rolloverAt(snapshot: Record<string, unknown>): ParsedSnapshot | null {
+  if (snapshot.v !== 6 || typeof snapshot.workflow !== "string" || typeof snapshot.runId !== "string" || typeof snapshot.transferId !== "string") {
+    return { status: "invalid", error: "rollover snapshot fields are invalid" };
   }
-  // corr-c14: an unknown string status means a corrupt choreograph snapshot;
-  // report it instead of dropping the run silently. A missing or non-string
-  // status keeps returning null so foreign session entries stay skipped.
-  if (typeof snapshot.status !== "string") return null;
-  if (snapshot.status !== "active") return { status: "invalid", error: `unknown snapshot status ${JSON.stringify(snapshot.status)}` };
+  return { v: 6, status: "rollover-pending", workflow: snapshot.workflow, runId: snapshot.runId, transferId: snapshot.transferId };
+}
+
+function liveSnapshotAt(status: "active" | "paused", snapshot: Record<string, unknown>): ParsedSnapshot | null {
   if (snapshot.v !== 7) {
     return { status: "invalid", error: "snapshot version must be 7; snapshots from earlier engine versions are not resumable; start the workflow again" };
   }
@@ -282,7 +284,7 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
     const baselineTools = snapshot.baselineTools as string[] | undefined;
     return {
       v: 7,
-      status: "active",
+      status,
       workflow: run.workflowName,
       execution: run,
       delivered: snapshot.delivered as boolean,
@@ -291,6 +293,26 @@ export function parseSnapshot(data: unknown): ParsedSnapshot | null {
   } catch (error) {
     return { status: "invalid", error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/** One decoder per snapshot status; the mapped type is the compile link: a lifecycle status without a parse row fails compilation. */
+const SNAPSHOT_STATUS_DECODERS: { [S in RunLifecycleStatus | "rollover-pending"]: (snapshot: Record<string, unknown>) => ParsedSnapshot | null } = {
+  active: (snapshot) => liveSnapshotAt("active", snapshot),
+  paused: (snapshot) => liveSnapshotAt("paused", snapshot),
+  completed: terminalAt,
+  aborted: terminalAt,
+  "rollover-pending": rolloverAt,
+};
+
+export function parseSnapshot(data: unknown): ParsedSnapshot | null {
+  if (typeof data !== "object" || data === null) return null;
+  const snapshot = data as Record<string, unknown>;
+  // corr-c14: an unknown string status means a corrupt choreograph snapshot;
+  // report it instead of dropping the run silently. A missing or non-string
+  // status keeps returning null so foreign session entries stay skipped.
+  if (typeof snapshot.status !== "string") return null;
+  const decode = SNAPSHOT_STATUS_DECODERS[snapshot.status as RunLifecycleStatus | "rollover-pending"];
+  return decode ? decode(snapshot) : { status: "invalid", error: `unknown snapshot status ${JSON.stringify(snapshot.status)}` };
 }
 
 export function activeSnapshot(fields: {
@@ -307,6 +329,15 @@ export function activeSnapshot(fields: {
     delivered: fields.delivered,
     ...(fields.baselineTools ? { baselineTools: [...new Set(fields.baselineTools)] } : {}),
   };
+}
+
+export function pausedSnapshot(fields: {
+  workflow: string;
+  execution: Run;
+  delivered: boolean;
+  baselineTools?: readonly string[];
+}): PausedSnapshotV7 {
+  return { ...activeSnapshot(fields), status: "paused" };
 }
 
 export function rolloverSnapshot(workflow: string, runId: string, transferId: string): RolloverSnapshotV6 {
@@ -332,6 +363,27 @@ export function isDeliveredTombstone(data: unknown): data is DeliveredTombstone 
   if (typeof data !== "object" || data === null) return false;
   const tombstone = data as Record<string, unknown>;
   return tombstone.v === 1 && tombstone.kind === "delivered" && typeof tombstone.runId === "string";
+}
+
+/**
+ * O(1) pause marker: parks a run when its full state cannot be committed
+ * (memory bound, session caps). Readers fold it into the last active snapshot
+ * of the same run, like the delivered tombstone.
+ */
+export type PausedMarker = {
+  readonly v: 1;
+  readonly kind: "paused";
+  readonly runId: string;
+};
+
+export function pausedMarker(runId: string): PausedMarker {
+  return { v: 1, kind: "paused", runId };
+}
+
+export function isPausedMarker(data: unknown): data is PausedMarker {
+  if (typeof data !== "object" || data === null) return false;
+  const marker = data as Record<string, unknown>;
+  return marker.v === 1 && marker.kind === "paused" && typeof marker.runId === "string";
 }
 
 export function terminalSnapshot(

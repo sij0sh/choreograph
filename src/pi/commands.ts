@@ -33,6 +33,13 @@ export function registerRuntimeCommands(pi: ExtensionAPI, runtime: RuntimeCoordi
     },
   });
 
+  pi.registerCommand("workflow-resume", {
+    description: "Resume the paused workflow run in this session.",
+    handler: async (_args, ctx) => {
+      await runtime.resumePaused(ctx);
+    },
+  });
+
   pi.registerCommand(ROLLOVER_COMMAND, {
     description: "Internal command that moves a workflow into its next bounded child session.",
     handler: async (args, ctx) => {

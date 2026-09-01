@@ -17,6 +17,7 @@ import {
 } from "../../src/domain/workflow.ts";
 import { BOUNDARY_CHECKPOINT_FIELDS, TRANSITION_SHAPE } from "../../src/domain/checkpoint.ts";
 import { FRAME_KINDS, NODE_STATUSES, RUNNER_KINDS } from "../../src/persistence/snapshot.ts";
+import { lifecycleRoles, RUN_LIFECYCLE_STATUSES } from "../../src/domain/run.ts";
 import { start } from "../../src/engine/interpreter.ts";
 import { renderPositionEnvelope } from "../../src/runtime/prompts.ts";
 import { task, workflow } from "../engine/helpers.mjs";
@@ -63,6 +64,33 @@ test("every snapshot decode allowlist is exhaustiveness-linked to its domain uni
   assert.deepEqual([...NODE_STATUSES], ["running", "waiting", "succeeded", "failed", "canceled", "skipped"]);
   assert.deepEqual([...RUNNER_KINDS], ["agent", "process"]);
   assert.deepEqual([...FRAME_KINDS], ["sequence", "task", "plan", "node", "loop"]);
+});
+
+test("run lifecycle state sets and liveness roles have one owned truth table", () => {
+  assert.deepEqual([...RUN_LIFECYCLE_STATUSES], ["active", "paused", "completed", "aborted"]);
+  assert.deepEqual(lifecycleRoles("active"), { live: true, abortable: true });
+  assert.deepEqual(lifecycleRoles("paused"), { live: false, abortable: true });
+  assert.deepEqual(lifecycleRoles("completed"), { live: false, abortable: false });
+  assert.deepEqual(lifecycleRoles("aborted"), { live: false, abortable: false });
+});
+
+test("session-lifecycle status literals never leak below the runtime layer", async () => {
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const src = join(import.meta.dirname, "..", "..", "src");
+  const violations = [];
+  const scan = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) scan(path);
+      else if (entry.name.endsWith(".ts")) {
+        const text = readFileSync(path, "utf8");
+        if (/status\s*(===|!==)\s*"(paused|idle|rollover-pending)"/.test(text)) violations.push(path);
+      }
+    }
+  };
+  for (const layer of ["authoring", "planning", "engine", "pi", "domain"]) scan(join(src, layer));
+  assert.deepEqual(violations, [], "only the runtime and persistence layers may branch on session lifecycle states");
 });
 
 test("the model-facing transition prompt derives its enumerations", () => {

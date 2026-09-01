@@ -78,7 +78,7 @@ export function restoreRun(c: CoordinatorInternals, ctx: UiContext): void {
     ctx.ui.notify(`Workflow rollover ${snapshot.transferId} is pending but its transfer record is missing.`, "error");
     return;
   }
-  if (snapshot.status !== "active") return;
+  if (snapshot.status !== "active" && snapshot.status !== "paused") return;
   const workflow = c.workflows.find((item) => item.name === snapshot.workflow);
   if (!workflow) {
     ctx.ui.notify(`Cannot resume ${snapshot.workflow} run: that workflow no longer exists.`, "warning");
@@ -102,15 +102,22 @@ export function restoreRun(c: CoordinatorInternals, ctx: UiContext): void {
     return;
   }
   c.frozen.freezePromptSources(workflow);
+  // Snapshots written before workflow_retry was gated may carry it in baselineTools.
+  c.baselineTools = (snapshot.baselineTools ?? c.knownTools())
+    .filter((name) => !c.isWorkflowTool(name));
+  if (snapshot.status === "paused") {
+    const state: ActiveState = { status: "paused", workflow, execution: migrated.execution, delivered: snapshot.delivered };
+    c.isolationRunId = state.execution.runId;
+    c.adoptActive(state, ctx);
+    ctx.ui.notify(`Resumed ${workflow.title} run \`${state.execution.runId}\` paused at ${state.execution.stack.at(-1)?.key}. Resume it with /workflow-resume, or abort the run.`, "info");
+    return;
+  }
   const state: ActiveState = {
     status: "active",
     workflow,
     execution: migrated.execution,
     delivered: snapshot.delivered,
   };
-  // Snapshots written before workflow_retry was gated may carry it in baselineTools.
-  c.baselineTools = (snapshot.baselineTools ?? c.knownTools())
-    .filter((name) => !c.isWorkflowTool(name));
   c.isolationRunId = state.execution.runId;
   c.adoptActive(state, ctx);
   ctx.ui.notify(`Resumed ${workflow.title} run \`${state.execution.runId}\` at ${state.execution.stack.at(-1)?.key}.`, "info");

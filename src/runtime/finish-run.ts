@@ -22,14 +22,14 @@ function stopLocalRun(c: CoordinatorInternals, run: ActiveState, ctx: UiContext)
 }
 
 export async function runAbort(c: CoordinatorInternals, signal: AbortSignal | undefined, ctx: UiContext): Promise<ToolResult> {
-  const current = c.requireActive();
+  const current = c.requireAbortable();
   assertNotCancelled(signal);
   await c.registry.cancelAll();
   // corr-c8: the terminal commit is serialized against the transition
   // epilogue; the re-check under the lock keeps a completed run from being
   // retro-aborted when a concurrent transition lands first.
   return c.runTerminalExclusive(signal, async () => {
-    if (c.state.status !== "active") {
+    if (c.state.status !== "active" && c.state.status !== "paused") {
       return {
         content: [{ type: "text", text: `${current.workflow.title} run ${current.execution.runId} is no longer active; there is nothing to abort.` }],
         details: { workflow: current.workflow.name, runId: current.execution.runId, status: "not-active" },

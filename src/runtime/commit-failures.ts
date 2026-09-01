@@ -55,6 +55,8 @@ export function driveFailure(c: CoordinatorInternals, error: unknown, ctx: UiCon
       c.prepareRollover(resume.workflow, active.execution, c.snapshotOf(active, false), false, ctx);
       return rolloverPending(identity, `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap during script execution; the workflow continues in a fresh session.`);
     }
+    // The promise becomes the state: the run parks and the pause marker persists.
+    c.pauseRun(ctx);
     return capStay(identity, `The session reached its ${LIMITS.snapshotEntriesPerSession}-snapshot cap during script execution; the run is paused at ${position}. Continue in a fresh session or raise LIMITS.snapshotEntriesPerSession.`);
   }
   if (error instanceof SnapshotByteBudgetReached) {
@@ -62,6 +64,7 @@ export function driveFailure(c: CoordinatorInternals, error: unknown, ctx: UiCon
       c.prepareRollover(resume.workflow, active.execution, c.snapshotOf(active, false), false, ctx);
       return rolloverPending(identity, `${byteCapPhrase(error)} during script execution; the workflow continues in a fresh session.`);
     }
+    c.pauseRun(ctx);
     return byteStay(identity, `${byteCapPhrase(error)} (LIMITS.snapshotBytesPerSession) during script execution; the run is paused at ${position}. Continue in a fresh session or raise LIMITS.snapshotBytesPerSession.`, error);
   }
   throw error;

@@ -14,8 +14,8 @@ import type { Run } from "../domain/run.ts";
 import { LIMITS } from "../domain/limits.ts";
 import type { Workflow } from "../domain/workflow.ts";
 import { SnapshotByteBudgetReached, SnapshotCapReached, WorkflowStorageError, type SnapshotStore } from "../persistence/store.ts";
-import { activeSnapshot, deliveredTombstone, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
-import { effectiveTools, CONTROL_TOOLS, RETRY_TOOL_NAME } from "./capabilities.ts";
+import { activeSnapshot, deliveredTombstone, pausedMarker, SNAPSHOT_TYPE, terminalSnapshot } from "../persistence/snapshot.ts";
+import { effectiveTools, CONTROL_TOOLS, RETRY_TOOL_NAME, TRANSITION_TOOL_NAME } from "./capabilities.ts";
 import { readBlockFrom, renderPositionEnvelope, renderReportEnvelope, rosterPrompt } from "./prompts.ts";
 import { createContextIsolator, type IsolatableMessage } from "./isolation.ts";
 import {
@@ -39,8 +39,10 @@ import { restoreRun as restoreRunNow, startSession } from "./session.ts";
 import { FrozenSources } from "./workflow-definition.ts";
 export { WorkflowCompileError } from "./workflow-definition.ts";
 import type { ActiveState, PiFacade, RunState, ToolResult, UiContext } from "./types.ts";
+import { liveRunState, runPayloadState } from "./types.ts";
 export type { ActiveState, PiFacade, RunState, ToolResult, UiContext } from "./types.ts";
 import { assertNotCancelled, type CoordinatorInternals } from "./internal.ts";
+import { notifyDriveFailure, type FailureIdentity } from "./commit-failures.ts";
 
 export const START_TOOL_NAME = "workflow_start";
 
@@ -204,13 +206,17 @@ export class RuntimeCoordinator {
 
   private activeToolsFor(state: RunState): string[] {
     this.baselineTools ??= this.captureBaseline();
-    if (state.status !== "active") {
+    if (state.status !== "active" && state.status !== "paused") {
       const idle = [...this.baselineTools];
       return this.visibleWorkflows.length ? [...idle, START_TOOL_NAME] : idle;
     }
     const active = effectiveTools(state.workflow, state.execution, this.baselineTools);
     const registered = new Set(this.knownTools());
-    return active.filter((name) => registered.has(name) || CONTROL_TOOLS.includes(name));
+    const names = active.filter((name) => registered.has(name) || CONTROL_TOOLS.includes(name));
+    // A paused run keeps abort; transition and retry return only after a resume.
+    return state.status === "paused"
+      ? names.filter((name) => name !== TRANSITION_TOOL_NAME && name !== RETRY_TOOL_NAME)
+      : names;
   }
 
   private setTools(): void {
@@ -233,8 +239,8 @@ export class RuntimeCoordinator {
 
   /** The same ephemeral view the widget renders; never stored or persisted. */
   activeWorkflowView(): WorkflowView | undefined {
-    const active = this.state.status === "active" ? this.state : undefined;
-    return active ? buildWorkflowView(active.workflow, active.execution) : undefined;
+    const active = runPayloadState(this.state);
+    return active ? buildWorkflowView(active.workflow, active.execution, active.status) : undefined;
   }
 
   private showStatus(ctx: UiContext): void {
@@ -256,8 +262,53 @@ export class RuntimeCoordinator {
   }
 
   private requireActive(): ActiveState {
+    if (this.state.status === "paused") throw new Error("the workflow run is paused; resume it with /workflow-resume or abort it first");
     if (this.state.status !== "active") throw new Error("no active workflow");
     return this.state;
+  }
+
+  /** Abort reaches a live or paused run; nothing else. */
+  private requireAbortable(): ActiveState {
+    if (this.state.status !== "active" && this.state.status !== "paused") throw new Error("no active workflow");
+    return this.state;
+  }
+
+  /** Parks the active run in place; the O(1) pause marker makes a restart restore it paused. */
+  private pauseRun(ctx: UiContext): void {
+    if (this.state.status !== "active") return;
+    const paused: ActiveState = { ...this.state, status: "paused" };
+    try {
+      this.commit(pausedMarker(paused.execution.runId), `pause of ${paused.workflow.title} run ${paused.execution.runId}`, { bypassCap: true });
+    } catch {
+      // Best effort: the session parks anyway; a restart re-drives instead.
+    }
+    this.adoptActive(paused, ctx);
+  }
+
+  /** Resumes a paused run in place; refuses when the resume snapshot cannot commit. */
+  async resumePaused(ctx: UiContext): Promise<void> {
+    const paused = this.state.status === "paused" ? this.state : undefined;
+    if (!paused) {
+      ctx.ui.notify("No paused workflow run to resume.", "warning");
+      return;
+    }
+    const next: ActiveState = { ...paused, status: "active", delivered: false };
+    try {
+      this.commit(this.snapshotOf(next, false), `resume of ${next.workflow.title} run ${next.execution.runId}`);
+    } catch (error) {
+      ctx.ui.notify(`Cannot resume ${next.workflow.title} run ${next.execution.runId}: ${error instanceof Error ? error.message : String(error)}. The run stays paused.`, "error");
+      return;
+    }
+    this.notifyCtx.current = ctx;
+    this.adoptActive(next, ctx);
+    ctx.ui.notify(`Resumed ${next.workflow.title} run \`${next.execution.runId}\` at ${next.execution.stack.at(-1)?.key}.`, "info");
+    const identity: FailureIdentity = { workflow: next.workflow.name, runId: next.execution.runId };
+    const position = next.execution.stack.at(-1)?.key;
+    try {
+      await this.drive(next, ctx);
+    } catch (error: unknown) {
+      notifyDriveFailure(this as unknown as CoordinatorInternals, error, ctx, identity, next, position);
+    }
   }
 
   /** Runs fn while holding the terminal lock (corr-c8). A fired signal unblocks a queued caller. */
@@ -324,9 +375,11 @@ export class RuntimeCoordinator {
 
   async startWorkflow(ctx: UiContext, workflow: Workflow, target: string, signal?: AbortSignal): Promise<ActiveState | null> {
     if (this.state.status !== "idle") {
-      const description = this.state.status === "active"
-        ? `${this.state.workflow.title} run ${this.state.execution.runId} is already active.`
-        : `Workflow run ${this.state.transfer.runId} is waiting for a session rollover.`;
+      const description = this.state.status === "rollover-pending"
+        ? `Workflow run ${this.state.transfer.runId} is waiting for a session rollover.`
+        : this.state.status === "paused"
+          ? `${this.state.workflow.title} run ${this.state.execution.runId} is paused; resume it with /workflow-resume or abort it before starting again.`
+          : `${this.state.workflow.title} run ${this.state.execution.runId} is already active.`;
       ctx.ui.notify(description, "error");
       return null;
     }
@@ -365,7 +418,7 @@ export class RuntimeCoordinator {
   }
 
   handleAgentStart(): void {
-    if (this.state.status === "active") this.agentRunStarted = true;
+    if (liveRunState(this.state)) this.agentRunStarted = true;
   }
 
   async handleAgentSettled(ctx: UiContext): Promise<void> {
@@ -376,9 +429,10 @@ export class RuntimeCoordinator {
   }
 
   handleBeforeAgentStart(event: { systemPrompt: string }): { systemPrompt: string } | undefined {
-    if (this.state.status === "active") {
-      const store = this.artifactStoreFor(this.state.workflow, this.state.execution.runId);
-      const guide = renderPositionEnvelope(this.state.workflow, this.state.execution, this.frozen.promptRead, refLoaderFor(store), this.activeToolsFor(this.state));
+    const live = liveRunState(this.state);
+    if (live) {
+      const store = this.artifactStoreFor(live.workflow, live.execution.runId);
+      const guide = renderPositionEnvelope(live.workflow, live.execution, this.frozen.promptRead, refLoaderFor(store), this.activeToolsFor(live));
       return { systemPrompt: `${event.systemPrompt}\n\n${guide}` };
     }
     const roster = rosterPrompt(this.visibleWorkflows);

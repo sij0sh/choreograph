@@ -100,8 +100,10 @@ test("corr-d2: restoring a cap-full parked run pauses with a notice instead of c
   assert.ok(resumed, "the active snapshot at the cap was resumed");
   const paused = await waitFor(() => h.ctx.ui.notices.some((n) => /run is paused at root\/go/.test(n.message)));
   assert.ok(paused, "the resume drive failure reached the user as a pause notice");
-  assert.equal(runtime.state.status, "active", "the run stays active and resumable");
-  assert.equal(h.entries.length, LIMITS.snapshotEntriesPerSession, "no commit slipped past the cap");
+  assert.equal(runtime.state.status, "paused", "the promised pause is the persisted state (R1)");
+  assert.equal(h.entries.length, LIMITS.snapshotEntriesPerSession + 1, "only the bypass-cap pause marker was committed");
+  const marker = h.entries.at(-1);
+  assert.equal(marker.data.kind, "paused", "the marker records the pause");
 });
 test("corr-d2: a rollover-capable host resumes into the standard rollover handoff", async () => {
   const h = harness({ rollover: true });

@@ -1,6 +1,6 @@
 import { canonicalJsonBytes, type JsonValue } from "../domain/json.ts";
 import { LIMITS } from "../domain/limits.ts";
-import { isDeliveredTombstone, SNAPSHOT_TYPE, parseSnapshot, type ActiveSnapshotV7, type ParsedSnapshot } from "./snapshot.ts";
+import { isDeliveredTombstone, isPausedMarker, SNAPSHOT_TYPE, parseSnapshot, type ActiveSnapshotV7, type ParsedSnapshot } from "./snapshot.ts";
 
 export class WorkflowStorageError extends Error {
   constructor(operation: string, cause: unknown) {
@@ -74,23 +74,29 @@ export function withinMemoryBound(snapshot: ActiveSnapshotV7): boolean {
 
 /**
  * Latest resumable snapshot state. Accepts both delivered-marker formats (fx5b):
- * a tombstone folds `delivered: true` into the active snapshot of the run it names;
- * a legacy full snapshot already carries the flag.
+ * a delivered tombstone folds `delivered: true` into the active snapshot of the
+ * run it names, and a pause marker folds the active snapshot into a paused
+ * record, so readers only ever see semantic records.
  */
 export function latestSnapshot(branch: readonly unknown[]): ParsedSnapshot | null {
   let deliveredRunId: string | undefined;
+  let pausedRunId: string | undefined;
   for (let i = branch.length - 1; i >= 0; i -= 1) {
     const entry = branch[i] as { type?: unknown; customType?: unknown; data?: unknown };
     if (entry.type !== "custom" || entry.customType !== SNAPSHOT_TYPE) continue;
+    if (isPausedMarker(entry.data)) {
+      pausedRunId ??= entry.data.runId;
+      continue;
+    }
     if (isDeliveredTombstone(entry.data)) {
       deliveredRunId ??= entry.data.runId;
       continue;
     }
     const parsed = parseSnapshot(entry.data);
-    if (parsed?.status === "active" && deliveredRunId === parsed.execution.runId) {
-      return { ...parsed, delivered: true };
-    }
-    return parsed;
+    if (parsed?.status !== "active") return parsed;
+    const delivered = deliveredRunId === parsed.execution.runId ? true : parsed.delivered;
+    if (pausedRunId !== parsed.execution.runId) return { ...parsed, delivered };
+    return { ...parsed, status: "paused", delivered };
   }
   return null;
 }

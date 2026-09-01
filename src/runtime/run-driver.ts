@@ -21,10 +21,11 @@ import type { NodeResult } from "./runner.ts";
 import type { ActiveState, ToolResult, UiContext } from "./coordinator.ts";
 import { resultText } from "./commit-failures.ts";
 import type { CoordinatorInternals } from "./internal.ts";
+import { liveRunState } from "./types.ts";
 
 export async function deliverPending(c: CoordinatorInternals): Promise<void> {
-  if (c.suppressDelivery || c.state.status !== "active" || c.state.delivered) return;
-  const pending = c.state;
+  const pending = liveRunState(c.state);
+  if (c.suppressDelivery || !pending || pending.delivered) return;
   const process = processLeafAt(pending.workflow, pending.execution);
   if (process && !isParked(pending.execution)) return;
   const leaf = pending.execution.stack[pending.execution.stack.length - 1];
@@ -213,6 +214,8 @@ async function driveLoop(c: CoordinatorInternals, active: ActiveState, ctx: UiCo
     const next: ActiveState = { ...current, execution: applied.state, delivered: false };
     const pendingSnapshot = activeSnapshot({ workflow: next.workflow.name, execution: next.execution, delivered: false });
     if (!withinMemoryBound(pendingSnapshot)) {
+      // The promise becomes the state: the run parks and the marker persists.
+      c.pauseRun(ctx);
       ctx.ui.notify(`The run's persisted state would exceed ${LIMITS.memoryBytes / 1024} KiB after process ${processKey}; the run is paused. Abort the run or narrow the workflow outputs.`, "error");
       return execution;
     }

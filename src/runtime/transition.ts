@@ -22,6 +22,12 @@ function runEndedText(c: CoordinatorInternals, run: ActiveState): ToolResult {
  * concurrent abort can never interleave between the sample and the text.
  */
 function transitionEpilogue(c: CoordinatorInternals, current: ActiveState, outcome: TaskOutcome, rollover: boolean, effectKind: "complete" | "advance" | "stay", ctx: UiContext): ToolResult {
+  if (c.state.status === "paused") {
+    return {
+      content: [{ type: "text", text: `Recorded ${outcome.status}. The run is paused at ${c.state.execution.stack.at(-1)?.key}; see the pause notice above. Abort the run or address the pause cause, then resume.` }],
+      details: { workflow: c.state.workflow.name, runId: c.state.execution.runId, position: c.state.execution.stack.at(-1)?.key, status: "paused" },
+    };
+  }
   if (c.state.status !== "active") {
     if (c.lastTerminal === "aborted") return runEndedText(c, current);
     return {

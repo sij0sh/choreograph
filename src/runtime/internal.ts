@@ -50,6 +50,8 @@ export interface CoordinatorInternals {
   supportsSessionRollover(ctx: UiContext): boolean;
   renderReport(workflow: Workflow, run: Run): string;
   requireActive(): ActiveState;
+  requireAbortable(): ActiveState;
+  pauseRun(ctx: UiContext): void;
   settleAgent(active: ActiveState, outcome: TaskOutcome): void;
   drive(active: ActiveState, ctx: UiContext, rerun?: boolean): Promise<Run>;
   prepareRollover(workflow: Workflow, run: Run, snapshot: unknown, terminal: boolean, ctx: UiContext): boolean;
