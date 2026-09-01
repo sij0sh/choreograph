@@ -68,6 +68,9 @@ steps depend on structured output.
 * **User-first invocation:** Every workflow gets a slash command. Workflows
   stay out of model context by default. Enable `piVisibility` only when the
   model should discover and start one itself.
+* **Live progress rail:** A compact view above the editor shows phase state,
+  the current position, and completed step summaries without cluttering the
+  transcript. See [Progress View](#-progress-view).
 * **Bounded runtime behavior:** Plan size, loop length, process time, captured
   output, retries, snapshots, and retained artifacts all have hard limits.
 
@@ -77,7 +80,7 @@ steps depend on structured output.
 
 * Node.js 22.19+
 * [Pi coding agent](https://github.com/earendil-works/pi-coding-agent) ~0.84.x
-* No API keys or environment variables
+* No API keys or required environment variables
 
 ### 1. Install Choreograph
 
