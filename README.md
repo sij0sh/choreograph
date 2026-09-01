@@ -156,6 +156,32 @@ engine rules and runs validation as part of the process. For manual authoring,
 all frontmatter fields, block parameters, schema keywords, runtime rules, and
 limits are documented in [WORKFLOW_REFERENCE.md](WORKFLOW_REFERENCE.md).
 
+## [=] Progress View
+
+While a workflow runs, Choreograph shows a compact rail above the editor
+instead of a footer status line:
+
+```text
+choreograph  review-change  RUNNING
+[x] frame  [x] author  [>] validate  [ ] report
+now validate/check  agent  attempt 2  loop 1/3
+```
+
+The rail shows discrete phase state, the current position, and the active
+attempt. It never shows a percentage. Completed step summaries appear in
+`detailed` mode. When the run finishes or aborts, the rail disappears; the
+final report stays in the transcript.
+
+| Control | Effect |
+|---|---|
+| `CHOREOGRAPH_TUI=off\|compact\|detailed` | Initial view mode for the process; default `compact`. |
+| `/workflow-tui` | Cycle `off` -> `compact` -> `detailed` -> `off`. |
+| `/workflow-tui [off\|compact\|detailed]` | Select one mode explicitly. |
+| `/workflow-inspect` | Open a bounded snapshot panel of the active run. |
+
+The view mode is a UI preference for the current process only; it is never
+persisted with the run.
+
 ## [+] Common Tasks
 
 Run a workflow from a fresh Pi process:

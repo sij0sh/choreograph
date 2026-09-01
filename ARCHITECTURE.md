@@ -46,3 +46,5 @@ The spec owns statuses, top-level fields, checkpoint fields, required fields, co
 `src/domain/execution.ts` owns the `Execution` domain type. `src/persistence/run-state-schema.ts` owns its runtime persistence field table and is compiler-linked to every `Execution` key.
 
 `src/persistence/snapshot.ts` derives strict top-level and collection allowlists plus decoded projection from that table. `src/persistence/validate-stored-execution.ts` keeps the separate workflow-semantic validation layer. Both validation layers stay required. Unknown fields are still rejected. The active snapshot version gate is unchanged.
+
+The workflow UI (`src/runtime/workflow-ui.ts`) is an ephemeral derivation of `Workflow` and `Execution` and is never persisted.
