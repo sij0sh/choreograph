@@ -1,9 +1,12 @@
 # choreograph
 
-> Choreograph runs multi-step Pi workflows in fresh context windows, with
-> explicit handoffs, checkpoints, and validation between steps.
+> **Context engineering for multi-step Pi workflows.**
+>
+> Choreograph keeps each model step focused in a fresh context window while
+> carrying forward the decisions, evidence, and artifacts the next step actually
+> needs.
 
-> **Status:** Choreograph is an MVP. Workflow files, snapshots, and runtime
+> Choreograph is an MVP. Workflow files, snapshots, and runtime
 > behavior can change between releases.
 
 A [Pi](https://github.com/earendil-works/pi-coding-agent) extension. See
@@ -12,84 +15,211 @@ contracts.
 
 ---
 
-## [!] What Problem It Solves
+## Context is part of the program
 
-Agent skills progressively add guidance to the current conversation. That works
-well for focused instructions. It becomes less reliable when a long process
-must share one growing context with tool output, intermediate reasoning, and
-past decisions. The agent can lose the sequence, skip a check, or drift from
-the original goal.
+Long-running agent work is a context engineering problem. Prompting alone does
+not fix it.
 
-Choreograph moves the process out of conversation memory and into an explicit
-workflow. Every model step starts in a fresh child session. It receives only
-the workflow overview, its instructions, selected earlier outputs, completion
-criteria, and the transition contract. The engine owns order, progress,
-retries, and resume state.
+An agent does not reason over your workflow in the abstract. It reasons over
+whatever is currently visible in its context window: the original request,
+instructions, tool output, intermediate results, previous decisions, abandoned
+paths, corrections, and the conversation produced while getting there.
 
-The result is not a larger prompt. It is a series of small, bounded prompts
-connected by validated state.
+As a process grows, two different pressures appear.
 
-## [*] How Workflows Stay on Track
+**Context load** grows when more information remains simultaneously visible.
+Useful information must compete with history that may no longer matter to the
+current decision.
 
-A workflow combines a few building blocks. Each one removes a different kind
-of ambiguity.
+**Cognitive load** grows when the agent must maintain or repeatedly reconstruct
+different reasoning frames: different objectives, artifacts, evidence
+standards, tools, decision policies, or completion conditions.
 
-| Building block | Problem it solves | How it solves it |
-|---|---|---|
-| **Task** | The next model action is known. | Runs one focused Markdown instruction in a fresh child context. |
-| **Plan** | The goal is known, but the necessary investigation is not. | Lets the model build a small dependency plan from an author-approved operator set. |
-| **Operator** | Dynamic plans need reusable expertise without becoming open-ended. | Defines one trusted capability, its instructions, tool ceiling, and optional output contract. |
-| **Script** | A deterministic command should not depend on model judgment. | Runs one bounded local process directly, with controlled input, output, environment, and timeout. |
-| **Loop** | The same model task must run over several items. | Repeats one task with a fresh context per item and a hard item cap. |
-| **Contract** | Prose handoffs are easy to omit, rename, or misunderstand. | Validates checkpoint data against JSON Schema before the workflow advances. |
-| **Input binding** | Later steps should not inherit the whole transcript. | Selects only declared outputs, or parts of them, from earlier checkpoints. |
-| **Guard** | A step applies only under a known condition. | Evaluates structured earlier output and either runs or explicitly skips the step. |
+A larger context window does not remove either problem. It only increases how
+much can be retained.
 
-Use tasks for a sequence you can design in advance. Use a plan when the model
-must choose the investigation path at runtime. Give that plan a small operator
-registry instead of unrestricted instructions. Use scripts for deterministic
-work and loops only for bounded repetition. Add contracts wherever later
-steps depend on structured output.
+For short tasks this is often harmless. For longer workflows it can make
+execution progressively less predictable:
 
-## [*] Vocabulary
+* earlier instructions compete with the current task;
+* intermediate reasoning is mistaken for durable state;
+* old assumptions survive after the work that produced them is finished;
+* later phases pull attention away from the current completion criterion;
+* important decisions become buried in transcript history;
+* retries inherit the same contaminated context that contributed to the
+  failure;
+* an agent asked to plan, implement, validate, and report must continually
+  determine which reasoning frame it should currently be using.
 
-| Term | Meaning |
-|---|---|
-| **Workflow** | The thing you author: a `WORKFLOW.md` package under a discovery root. |
-| **Definition** | The workflow's frozen compiled representation, fixed by a content digest. |
-| **Run** | One execution of a workflow. |
-| **Step** | A declared unit in the workflow tree: task, script, plan, loop, or sequence. |
-| **Position** | The site the model currently occupies, addressed by one key. |
-| **Invocation** | One actual attempt to execute a position. |
-| **Checkpoint** | The durable result committed at a boundary. |
+The failure is not necessarily that the model has "forgotten" something.
 
-The full reference for these terms and the file formats is
-[WORKFLOW_REFERENCE.md](WORKFLOW_REFERENCE.md#vocabulary).
+Often it has been given **too much to remember at once**.
 
-## [*] Key Features
+## Choreograph's approach
 
-* **Fresh context for every model position:** Context does not accumulate
-  across the workflow. A bounded handoff carries only what the next position
-  needs.
-* **Author-controlled execution:** Ordered blocks, trusted operators, tool
-  ceilings, completion criteria, guards, and hard limits define the rails.
-* **Validated state handoffs:** Contracts catch malformed or incomplete data
-  before it can mislead a later step.
-* **Explicit data flow:** Input bindings make dependencies visible and keep
-  unrelated history out of the prompt.
-* **Durable recovery:** Choreograph checkpoints before advancing. Failed work
-  retries under a declared policy, then parks for inspection and can resume
-  with `workflow_retry`.
-* **User-first invocation:** Every workflow gets a slash command. Workflows
-  stay out of model context by default. Enable `piVisibility` only when the
-  model should discover and start one itself.
-* **Live progress rail:** A compact view above the editor shows phase state,
-  the current position, and completed step summaries without cluttering the
-  transcript. See [Progress View](#-progress-view).
-* **Bounded runtime behavior:** Plan size, loop length, process time, captured
-  output, retries, snapshots, and retained artifacts all have hard limits.
+Choreograph treats context as a resource and constructs it deliberately for
+each stage of a workflow.
 
-## [>] Quickstart
+Instead of running an entire process inside one accumulating conversation,
+Choreograph breaks it into **bounded context epochs**.
+
+Each model-bearing position runs in a fresh working context. That context
+holds the stable request and constraints, the state deliberately handed forward
+from earlier work, the current position's instructions and inputs, and the
+controls needed to complete that position.
+
+The full transcript is not the workflow state.
+
+The workflow engine is.
+
+When a position completes, Choreograph records a checkpoint and prepares the
+state required by whatever runs next. Large outputs can stay in the artifact
+store and be retrieved exactly when needed instead of sitting permanently in
+the prompt.
+
+The result is a sequence of small reasoning environments connected by explicit,
+validated state. No single prompt grows more elaborate.
+
+```text
+original request
+      |
+      v
++-------------+
+|   frame     |  focused context
++-------------+
+      |
+      | checkpoint / artifacts
+      v
++-------------+
+| investigate |  fresh focused context
++-------------+
+      |
+      | validated handoff
+      v
++-------------+
+|   verify    |  fresh focused context
++-------------+
+      |
+      v
++-------------+
+|   report    |  fresh focused context
++-------------+
+```
+
+Each position gets enough continuity to do its job without inheriting the
+entire cognitive history of how the workflow reached it.
+
+## Context engineering in Choreograph
+
+### Fresh context epochs
+
+Every model-bearing position starts in a bounded context epoch.
+
+The next position does not need the complete transcript of the previous one.
+It receives the durable request and constraints, relevant workflow state,
+bounded handoff information, and its own instructions.
+
+This creates a real context boundary rather than merely adding another heading
+to an existing prompt.
+
+### Genesis preserves the original frame
+
+Clearing context would be dangerous if it also erased the user's original
+request.
+
+Choreograph therefore protects a Genesis handoff containing the run identity,
+target, workflow constraints, acceptance criteria, and environment.
+
+The original frame survives even as transient reasoning is discarded.
+
+### Checkpoints turn reasoning into state
+
+Conversation history is a poor database.
+
+At each workflow boundary, Choreograph requires the current position to commit
+a checkpoint describing what was completed, the evidence gathered, unresolved
+issues, decisions, and structured output.
+
+Later work consumes this committed state instead of depending on whatever
+happened to remain salient in the transcript.
+
+### Explicit inputs control what comes back
+
+A later position can declare exactly which earlier artifacts it needs.
+
+```yaml
+inputs:
+  brief:
+    from: observe
+    select: /data/scope
+  findings:
+    from: investigate
+    select: /nodes/0/result
+```
+
+This makes context construction part of the workflow definition.
+
+Dependencies are visible and bounded. A position does not need every earlier
+result merely because those results exist.
+
+### Artifacts keep large state available without keeping it active
+
+Some information must remain recoverable but does not need to consume active
+context continuously.
+
+Choreograph stores large checkpoint data and handoff sources as durable,
+content-addressed artifacts. A later position can retrieve exact omitted detail
+when it actually becomes necessary.
+
+This separates **availability** from **visibility**.
+
+Information can survive the workflow without occupying every prompt.
+
+### Contracts protect the boundary
+
+A bad handoff can be worse than no handoff.
+
+Tasks and operators can therefore publish structured output through JSON Schema
+contracts. Choreograph validates that state before allowing the workflow to
+advance.
+
+Contracts turn "the previous agent probably mentioned it" into an explicit
+interface between reasoning stages.
+
+### Bounded execution sets hard limits
+
+Plans, loops, retries, process execution, captured output, checkpoint size, and
+position inputs all have hard limits.
+
+The purpose is not restriction for its own sake.
+
+Bounds prevent a supposedly focused workflow stage from silently expanding
+until it recreates the same context-management problem the workflow was meant
+to solve.
+
+## Workflow building blocks
+
+These building blocks control reasoning boundaries, data flow, and
+determinism.
+
+| Building block      | Context-engineering role                                                                                  |
+| ------------------- | --------------------------------------------------------------------------------------------------------- |
+| **Task**            | Gives one model position a focused instruction, completion condition, and optional input/output contract. |
+| **Plan**            | Allows runtime investigation without turning the entire workflow into open-ended reasoning.               |
+| **Operator**        | Bounds what a dynamic plan is allowed to ask a model or process to do.                                    |
+| **Script**          | Moves deterministic work out of model cognition entirely.                                                 |
+| **Loop**            | Repeats work under an explicit hard cap instead of creating an unbounded reasoning cycle.                 |
+| **Contract**        | Defines the state interface crossing a workflow boundary.                                                 |
+| **Input binding**   | Selects which earlier state is allowed back into the current context.                                     |
+| **Guard**           | Keeps irrelevant branches from entering the reasoning path at all.                                        |
+| **Checkpoint**      | Converts completed reasoning into durable workflow state.                                                 |
+| **Recovery policy** | Repairs invalid state without blindly replaying the entire conversation.                                  |
+
+The important design question is therefore what the model should think about
+now and what state must survive when that context ends. The number of steps is
+a secondary question.
+
+## Quickstart
 
 ### Prerequisites
 
@@ -107,8 +237,8 @@ Pi clones the package and loads its extension from the package manifest.
 
 ### 2. Enable the workflow author
 
-The repository includes a Choreograph workflow that frames, writes, validates,
-and reports a new workflow package. Link it into the workflow directory:
+The repository includes a Choreograph workflow for designing and validating
+new workflows:
 
 ```bash
 AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
@@ -117,15 +247,13 @@ ln -s "$AGENT_DIR/git/github.com/sij0sh/choreograph/.agents/workflows/choreograp
   "$AGENT_DIR/workflows/choreograph"
 ```
 
-The link keeps the authoring workflow in sync with package updates. If the
-target already exists, keep it or remove it before creating the link.
-Inside the Choreograph repository itself the authoring workflow loads
-automatically from `.agents/workflows/choreograph`; the link is only needed
-to author workflows from other projects.
+The link keeps the authoring workflow in sync with package updates. Inside the
+Choreograph repository itself it loads automatically from
+`.agents/workflows/choreograph`.
 
 ### 3. Author a workflow
 
-Start a new Pi process, then describe the outcome to `/choreograph`:
+Start a new Pi process and describe the outcome:
 
 ```text
 /choreograph Create a workflow that reviews a change, verifies its tests, and reports only actionable findings.
@@ -133,51 +261,56 @@ Start a new Pi process, then describe the outcome to `/choreograph`:
 
 The authoring workflow will:
 
-1. Frame the outcome, steps, handoffs, contracts, and conditions.
-2. Choose tasks, plans, scripts, or loops for each responsibility.
-3. Write the package under the workflow directory.
-4. Run the engine's workflow validation and address diagnostics.
-5. Report the files, validation result, and restart requirement.
+1. identify the reasoning stages and their completion boundaries;
+2. decide what state must cross each boundary;
+3. choose tasks, plans, scripts, loops, contracts, and guards accordingly;
+4. write the workflow package;
+5. validate it against the engine.
 
-Restart Pi after authoring. The new workflow is then available as a slash
-command named after its directory:
+Restart Pi after authoring. The resulting workflow is available through its
+directory name:
 
 ```text
 /review-change path/to/change
 ```
 
-## [=] Configuration
+## Designing context boundaries
 
-Workflow packages load from two roots:
-
-* Global: `$PI_CODING_AGENT_DIR/workflows` (default `~/.pi/agent/workflows`).
-* Local: `<project>/.agents/workflows`, relative to the directory Pi starts
-  in.
-
-A local package overrides a global package with the same name, which keeps a
-repo's workflows self-contained inside the repository. A package uses this
-layout:
+A workflow package has this shape:
 
 ```text
 my-workflow/
-├── WORKFLOW.md          # Workflow overview and block sequence
-├── steps/               # Focused task instructions
-├── contracts/           # Optional JSON Schema handoff contracts
-└── operators/           # Optional capabilities available to plans
+├── WORKFLOW.md          # Stable frame and workflow structure
+├── steps/               # Focused model instructions
+├── contracts/           # Optional structured handoff interfaces
+└── operators/           # Optional bounded capabilities for plans
 ```
 
-The directory name becomes the slash command. Use lowercase kebab-case, such
-as `review-change`.
+Packages load from:
 
-Prefer `/choreograph` when creating or changing a package. It applies the
-engine rules and runs validation as part of the process. For manual authoring,
-all frontmatter fields, block parameters, schema keywords, runtime rules, and
-limits are documented in [WORKFLOW_REFERENCE.md](WORKFLOW_REFERENCE.md).
+* Global: `$PI_CODING_AGENT_DIR/workflows`
+  (default `~/.pi/agent/workflows`)
+* Local: `<project>/.agents/workflows`
 
-## [=] Progress View
+A local package overrides a global package with the same name.
 
-While a workflow runs, Choreograph shows a compact rail above the editor
-instead of a footer status line:
+When designing a workflow, prefer boundaries where the next stage requires a
+meaningfully different objective, artifact, evidence standard, capability set,
+or completion condition.
+
+Do not create stages merely to make files smaller.
+
+Each boundary creates a handoff, so it should earn that cost by reducing the
+amount of irrelevant reasoning state the next position would otherwise have to
+carry.
+
+For manual authoring, [WORKFLOW_REFERENCE.md](WORKFLOW_REFERENCE.md) documents
+every frontmatter field, block parameter, schema keyword, runtime rule, and
+limit.
+
+## Progress without transcript pollution
+
+Choreograph shows workflow progress in a compact rail above the editor:
 
 ```text
 choreograph  review-change  RUNNING
@@ -185,66 +318,62 @@ choreograph  review-change  RUNNING
 now validate/check  agent  attempt 2  loop 1/3
 ```
 
-The rail shows discrete phase state, the current position, and the active
-attempt. It never shows a percentage. Completed step summaries appear in
-`detailed` mode. When the run finishes or aborts, the rail disappears; the
-final report stays in the transcript.
+Operational state does not need to become conversational state.
 
-| Control | Effect |
-|---|---|
-| `CHOREOGRAPH_TUI=off\|compact\|detailed` | Initial view mode for the process; default `compact`. |
-| `/workflow-tui` | Cycle `off` -> `compact` -> `detailed` -> `off`. |
-| `/workflow-tui [off\|compact\|detailed]` | Select one mode explicitly. |
-| `/workflow-inspect` | Open a bounded snapshot panel of the active run. |
+The progress view exposes where the workflow is without adding status chatter
+to the model transcript.
 
-The view mode is a UI preference for the current process only; it is never
-persisted with the run.
+| Control                                  | Effect                                           |
+| ---------------------------------------- | ------------------------------------------------ |
+| `CHOREOGRAPH_TUI=off\|compact\|detailed` | Initial process view; default `compact`.         |
+| `/workflow-tui`                          | Cycle `off` -> `compact` -> `detailed` -> `off`. |
+| `/workflow-tui [off\|compact\|detailed]` | Select a mode explicitly.                        |
+| `/workflow-inspect`                      | Inspect a bounded snapshot of the active run.    |
 
-## [+] Common Tasks
+The view preference is not persisted with the run.
 
-Run a workflow from a fresh Pi process:
+## Recovery is state repair, not conversation replay
 
-```text
-/review-change path/to/change
-```
+A workflow checkpoint is committed before Choreograph advances.
 
-The optional text after the command becomes the workflow target and reaches
-every position. Only one workflow can be active at a time.
+If later work discovers a problem, recovery can retry the current position,
+invalidate affected state, replan bounded dynamic work, or park for user input.
 
-Resume a parked run or stop an active run by asking the agent:
+Failure does not require restoring an entire historical conversation and hoping
+the model interprets it correctly the second time. Choreograph returns to the
+affected workflow state instead.
+
+Ask the agent to:
 
 ```text
 retry the parked workflow
 abort the workflow
 ```
 
-Choreograph exposes `workflow_retry` and `workflow_abort` as Pi tools. The
-agent calls them. There are no user-facing slash commands for these actions.
+Only one workflow can be active at a time.
 
-Update installed Pi packages, then start a new Pi process:
+## Common tasks
+
+Update installed Pi packages:
 
 ```bash
 pi update --extensions
 ```
 
-Try only the extension for one Pi process without installing it:
+Try the extension for one Pi process without installing it:
 
 ```bash
 pi -e git:github.com/sij0sh/choreograph
 ```
 
-Run the project validation suite:
+Run the validation suite:
 
 ```bash
 npm test
 ```
 
-Remove the installed package, then start a new Pi process:
+Remove the package:
 
 ```bash
 pi remove git:github.com/sij0sh/choreograph
 ```
-
----
-
-[MIT](LICENSE) (c) 2026 Josh Simon
