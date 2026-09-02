@@ -357,6 +357,19 @@ Update installed Pi packages:
 pi update --extensions
 ```
 
+Update Choreograph only:
+
+```bash
+pi update git:github.com/sij0sh/choreograph
+```
+
+Uninstall Choreograph:
+
+```bash
+pi remove git:github.com/sij0sh/choreograph
+rm "$AGENT_DIR/workflows/choreograph"
+```
+
 Try the extension for one Pi process without installing it:
 
 ```bash
