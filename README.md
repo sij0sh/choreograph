@@ -25,15 +25,15 @@ whatever is currently visible in its context window: the original request,
 instructions, tool output, intermediate results, previous decisions, abandoned
 paths, corrections, and the conversation produced while getting there.
 
-As a process grows, two different pressures appear.
+As a process grows, two pressures appear.
 
 **Context load** grows when more information remains simultaneously visible.
 Useful information must compete with history that may no longer matter to the
 current decision.
 
 **Cognitive load** grows when the agent must maintain or repeatedly reconstruct
-different reasoning frames: different objectives, artifacts, evidence
-standards, tools, decision policies, or completion conditions.
+different reasoning frames: objectives, artifacts, evidence standards, tools,
+decision policies, or completion conditions.
 
 A larger context window does not remove either problem. It only increases how
 much can be retained.
@@ -41,19 +41,18 @@ much can be retained.
 For short tasks this is often harmless. For longer workflows it can make
 execution progressively less predictable:
 
-* earlier instructions compete with the current task;
-* intermediate reasoning is mistaken for durable state;
-* old assumptions survive after the work that produced them is finished;
-* later phases pull attention away from the current completion criterion;
-* important decisions become buried in transcript history;
-* retries inherit the same contaminated context that contributed to the
-  failure;
+* earlier instructions compete with the current task.
+* intermediate reasoning is mistaken for durable state.
+* old assumptions survive after the work that produced them is finished.
+* later phases pull attention away from the current completion criterion.
+* important decisions become buried in transcript history.
+* retries inherit the same contaminated context that contributed to the failure.
 * an agent asked to plan, implement, validate, and report must continually
   determine which reasoning frame it should currently be using.
 
 The failure is not necessarily that the model has "forgotten" something.
 
-Often it has been given **too much to remember at once**.
+Often it has been given too much to remember at once.
 
 ## Choreograph's approach
 
@@ -77,8 +76,8 @@ state required by whatever runs next. Large outputs can stay in the artifact
 store and be retrieved exactly when needed instead of sitting permanently in
 the prompt.
 
-The result is a sequence of small reasoning environments connected by explicit,
-validated state. No single prompt grows more elaborate.
+What you get is a sequence of small reasoning environments connected by
+explicit, validated state. No single prompt grows more elaborate.
 
 ```text
 original request
@@ -107,7 +106,7 @@ original request
 ```
 
 Each position gets enough continuity to do its job without inheriting the
-entire cognitive history of how the workflow reached it.
+whole history of how the workflow got there.
 
 ## Context engineering in Choreograph
 
@@ -141,7 +140,7 @@ a checkpoint describing what was completed, the evidence gathered, unresolved
 issues, decisions, and structured output.
 
 Later work consumes this committed state instead of depending on whatever
-happened to remain salient in the transcript.
+happened to still stand out in the transcript.
 
 ### Explicit inputs control what comes back
 
@@ -168,10 +167,10 @@ Some information must remain recoverable but does not need to consume active
 context continuously.
 
 Choreograph stores large checkpoint data and handoff sources as durable,
-content-addressed artifacts. A later position can retrieve exact omitted detail
-when it actually becomes necessary.
+content-addressed artifacts. A later position can retrieve the omitted detail
+the moment it becomes necessary.
 
-This separates **availability** from **visibility**.
+This separates availability from visibility.
 
 Information can survive the workflow without occupying every prompt.
 
@@ -179,7 +178,7 @@ Information can survive the workflow without occupying every prompt.
 
 A bad handoff can be worse than no handoff.
 
-Tasks and operators can therefore publish structured output through JSON Schema
+Tasks and operators can publish structured output through JSON Schema
 contracts. Choreograph validates that state before allowing the workflow to
 advance.
 
@@ -190,8 +189,6 @@ interface between reasoning stages.
 
 Plans, loops, retries, process execution, captured output, checkpoint size, and
 position inputs all have hard limits.
-
-The purpose is not restriction for its own sake.
 
 Bounds prevent a supposedly focused workflow stage from silently expanding
 until it recreates the same context-management problem the workflow was meant
@@ -207,7 +204,7 @@ determinism.
 | **Task**            | Gives one model position a focused instruction, completion condition, and optional input/output contract. |
 | **Plan**            | Allows runtime investigation without turning the entire workflow into open-ended reasoning.               |
 | **Operator**        | Bounds what a dynamic plan is allowed to ask a model or process to do.                                    |
-| **Script**          | Moves deterministic work out of model cognition entirely.                                                 |
+| **Script**          | Runs deterministic work as plain code, outside the model.                                                 |
 | **Loop**            | Repeats work under an explicit hard cap instead of creating an unbounded reasoning cycle.                 |
 | **Contract**        | Defines the state interface crossing a workflow boundary.                                                 |
 | **Input binding**   | Selects which earlier state is allowed back into the current context.                                     |
@@ -215,8 +212,8 @@ determinism.
 | **Checkpoint**      | Converts completed reasoning into durable workflow state.                                                 |
 | **Recovery policy** | Repairs invalid state without blindly replaying the entire conversation.                                  |
 
-The important design question is therefore what the model should think about
-now and what state must survive when that context ends. The number of steps is
+The important design question is what the model should think about now and
+what state must survive when that context ends. The number of steps is
 a secondary question.
 
 ## Quickstart
